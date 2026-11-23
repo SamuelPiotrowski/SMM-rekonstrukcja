@@ -7,7 +7,7 @@ __pycache__/
 .pytest_cache/
 
 # data: skany (duże, każdy trzyma lokalnie) i wyniki (generowane przez scripts/prepare_data.py)
-scanned_bones_light/
+scanned_bones/
 out/
 
 # sources
