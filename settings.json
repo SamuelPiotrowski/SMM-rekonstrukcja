@@ -1,0 +1,89 @@
+// ustawienia projektu zapisane w jednym json wczytuje je config.py
+// Składnia JSON: true / false / null małymi literami, tekst w "...", liczby z kropką,
+// bez przecinka po ostatnim elemencie. Komentarze // są dozwolone.
+
+{
+  // -----------------
+  // Foldery (względem głównego folderu projektu)
+  // -----------------
+  "paths": {
+    "data_in": "scanned_bones_light",   // surowe skany (.ply, .obj, .stl)
+    "data_out": "out"                   // wyniki przygotowania danych
+  },
+
+  // -----------------
+  // Przygotowanie danych - scripts/prepare_data.py
+  // Po zmianie trzeba ponownie uruchomić prepare_data.py.
+  // -----------------
+  "data_parsing": {
+    // Kolejność wyboru formatu, gdy ten sam skan jest w kilku plikach.
+    // PLY: binarny, najmniejszy, ma kolory wierzchołków. STL nie ma kolorów.
+    "preferred_formats": ["ply", "obj", "stl"],
+
+    // Oderwane kawałki o polu mniejszym niż ten ułamek największego są usuwane
+    // (szum / odpryski ze skanu). 0 = nic nie usuwaj.
+    "min_component_area_ratio": 0.05,
+
+    // Przesuń każdy fragment tak, żeby jego środek był w (0, 0, 0).
+    // Przesunięcie trafia do meta.json, więc da się je odwrócić.
+    "center_fragments": true,
+
+    // Rozmiar woksela [mm] = mniej więcej odstęp między punktami chmury.
+    // Mniej = gęstsza chmura, wolniejsze liczenie.
+    "voxel_size": 0.5,
+
+    // Ile punktów losować na voxel^2 powierzchni przed przerzedzeniem.
+    "sampling_density": 4,
+
+    // Promienie normalnych i deskryptorów FPFH jako wielokrotności voxel_size
+    // (domyślnie 1 mm i 2.5 mm).
+    "normal_radius_factor": 2.0,
+    "fpfh_radius_factor": 5.0
+  },
+
+  // -----------------
+  // Wygląd okna 3D - src/visualizing_3d.py
+  // Kolory: RGB w zakresie 0-1.
+  // -----------------
+  "visualizing": {
+    "window_size": [1600, 900],         // rozmiar okna i zrzutu ekranu [px] (szerokość, wysokość)
+    "normal_length_mm": 2.0,            // długość rysowanych normalnych [mm]
+    "max_normals": 3000,                // maks. liczba normalnych na fragment (wszystkie zasłoniłyby kość)
+    "axes_size_mm": 10.0,               // długość osi układu współrzędnych [mm]
+    "background": [1.0, 1.0, 1.0],      // kolor tła (biały)
+    "bone_color": [0.89, 0.85, 0.79],   // kolor kości, gdy skan nie ma własnych kolorów
+    "normal_color": [0.15, 0.15, 0.15], // kolor odcinków normalnych
+    "camera_tilt": 0.35,                // pochylenie kamery startowej, żeby było widać głębię (0 = prosto)
+    "camera_zoom": 0.5                  // zoom kamery startowej (mniej = bliżej; domyślne open3d to 0.7)
+  },
+
+  // -----------------
+  // Co pokazuje tests/visualize.py (każdy fragment osobno, po kolei)
+  // -----------------
+  "view": {
+    // "mesh"  = oczyszczona siatka,
+    // "cloud" = chmura punktów,
+    // "fpfh"  = chmura pokolorowana wg FPFH (podobny kolor = podobny lokalny kształt,
+    //           porównywalny między fragmentami)
+    "show": "mesh",
+
+    // "side" = fragmenty obok siebie wzdłuż osi X, "original" = współrzędne skanera
+    "layout": "side",
+
+    // "scan" = kolory skanera, "fragment" = każdy fragment w innym kolorze
+    // (legenda w konsoli); ignorowane przy show = "fpfh"
+    "colors": "scan",
+
+    // null = wszystkie fragmenty, albo lista fragmentów nazw, np. ["lowerjaw", "upperjaw"]
+    "only": null,
+
+    "normals": false,                   // dorysuj normalne chmury punktów
+    "axes": false,                      // osie w (0, 0, 0): X czerwona, Y zielona, Z niebieska
+    "gap": 10.0,                        // odstęp między fragmentami w layout "side" [mm] (gdy kilka w jednym oknie)
+    "point_size": 3.0,                  // rozmiar punktów chmury na ekranie [px]
+
+    // null = otwórz okno, albo ścieżka (względem głównego folderu) do zapisu
+    // obrazu bez okna, np. "out/podglad.png"
+    "screenshot": null
+  }
+}

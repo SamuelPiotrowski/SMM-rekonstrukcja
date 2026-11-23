@@ -1,0 +1,8 @@
+{
+    "python.analysis.extraPaths": [
+        "src"
+    ],
+    "files.associations": {
+        "settings.json": "jsonc"
+    }
+}
