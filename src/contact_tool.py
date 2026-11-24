@@ -9,10 +9,13 @@ zapisuje się przez serwer do contacts/<id_kości>.json (contacts.py).
     serve()                       # Ctrl+C w konsoli kończy
 
 API (używa go strona):
-    GET  /api/bones                lista kości + stan oznaczeń
-    GET  /api/bones/<id>           siatka (base64) + etykiety
+    GET  /api/bones                lista kości + stan oznaczeń      (ToolState.summary)
+    GET  /api/bones/<id>           siatka (base64) + etykiety       (ToolState.bone_payload)
     PUT  /api/bones/<id>/contacts  zapis etykiet {labels: base64 uint8, names: {k: nazwa}}
-    POST /api/bones/<id>/detect    propozycja algorytmu (nic nie zapisuje)
+                                                                     (ToolState.save)
+    POST /api/bones/<id>/detect    propozycja algorytmu (nic nie zapisuje)  (ToolState.detect)
+Oprócz tego serwer podaje pliki strony (STATIC) i three.js (VENDOR). Błędy wracają
+jako JSON {"error": "..."} i są pokazywane na stronie.
 
 three.js jest pobierany raz z CDN i zapisywany w DATA_OUT/.cache/web, potem działa bez internetu.
 """
@@ -44,11 +47,20 @@ VENDOR = {"/vendor/three.module.js": f"https://cdn.jsdelivr.net/npm/three@{THREE
 
 
 def _b64(a: np.ndarray) -> str:
+    """Surowe bajty tablicy w base64 - strona czyta je jako Float32Array / Uint32Array / Uint8Array.
+
+    Typ tablicy musi zgadzać się z tym, czego oczekuje contact_tool.js (float32, uint32, uint8).
+    """
     return base64.b64encode(np.ascontiguousarray(a).tobytes()).decode("ascii")
 
 
 def view_rotation(mesh) -> np.ndarray:
-    """Obrót do widoku: najdłuższa oś kości poziomo (X), najcieńsza w stronę kamery (Z)."""
+    """Obrót do widoku: najdłuższa oś kości poziomo (X), najcieńsza w stronę kamery (Z).
+
+    Returns:
+        Macierz 3x3 (wiersze = osie główne PCA wierzchołków, bez odbicia lustrzanego);
+        strona mnoży przez nią pozycje wierzchołków.
+    """
     v = np.asarray(mesh.vertices)
     c = v - v.mean(axis=0)
     _, _, vt = np.linalg.svd(c[:: max(1, len(c) // 20000)], full_matrices=False)
@@ -59,24 +71,45 @@ def view_rotation(mesh) -> np.ndarray:
 
 
 class ToolState:
-    """Kości wczytane do pamięci + ustawienia narzędzia."""
+    """Stan serwera: kości wczytane raz przy starcie (bez chmur i FPFH) + ustawienia narzędzia.
+
+    Metody odpowiadają zapytaniom API (opis w docstringu modułu). Serwer obsługuje
+    zapytania w osobnych wątkach, dlatego zapis pliku jest chroniony blokadą `lock`.
+    """
 
     def __init__(self, out_dir: Path | None, params: ct.ContactParams):
+        """Wczytuje kości (reload).
+
+        Args:
+            out_dir: folder wyników z kośćmi (None = DATA_OUT z settings.json).
+            params:  ustawienia narzędzia i algorytmu (sekcja "contacts").
+        """
         self.params = params
         self.out_dir = out_dir
         self.lock = threading.Lock()
         self.reload()
 
     def reload(self) -> None:
+        """Wczytuje kości z out_dir; kolejność jak w load_bones (= numery w skryptach)."""
         self.bones: dict[str, Bone] = {b.id: b for b in load_bones(self.out_dir)}
         self.order = list(self.bones)
 
     def bone(self, bone_id: str) -> Bone:
+        """Kość o danym id. KeyError, gdy jej nie ma (serwer odpowiada wtedy 404)."""
         if bone_id not in self.bones:
             raise KeyError(bone_id)
         return self.bones[bone_id]
 
     def summary(self) -> dict:
+        """GET /api/bones: lista kości do panelu bocznego + dane startowe strony.
+
+        Returns:
+            {"bones": [{"nr", "id", "label", "scans", "area_mm2", "extent_mm", "vertices",
+                        "surfaces": [{"id", "name", "area_mm2"}] - ręczne oznaczenia,
+                        "updated": data zapisu albo None, "auto": czy jest wynik algorytmu}],
+             "palette": kolory powierzchni, "detectors": nazwy algorytmów,
+             "params": {"brush_mm", "wand_angle_deg"} - startowe ustawienia pędzla i różdżki}.
+        """
         items = []
         for nr, bid in enumerate(self.order, 1):
             b = self.bones[bid]
@@ -95,6 +128,16 @@ class ToolState:
                 "params": {"brush_mm": self.params.brush_mm, "wand_angle_deg": self.params.wand_angle_deg}}
 
     def bone_payload(self, bone_id: str) -> dict:
+        """GET /api/bones/<id>: siatka kości i jej ręczne etykiety dla three.js.
+
+        Returns:
+            {"id", "label",
+             "positions": float32 (V, 3), "normals": float32 (V, 3), "indices": uint32 (T, 3),
+             "colors": uint8 (V, 3) - kolory skanera albo szare, "labels": uint8 (V,)
+             - wszystkie tablice jako base64 (_b64),
+             "names": {"k": nazwa}, "remapped": etykiety przeniesione ze starej siatki,
+             "rotation": 3x3 z view_rotation}.
+        """
         b = self.bone(bone_id)
         m = b.mesh
         colors = (np.asarray(m.vertex_colors) * 255).round().astype(np.uint8) if m.has_vertex_colors() \
@@ -114,6 +157,17 @@ class ToolState:
         }
 
     def save(self, bone_id: str, body: dict) -> dict:
+        """PUT /api/bones/<id>/contacts: zapisuje ręczne etykiety do contacts/<id>.json.
+
+        Args:
+            bone_id: id kości.
+            body:    {"labels": base64 uint8 (V,), "names": {"k": nazwa}} - nazwy
+                     przycinane do 80 znaków.
+
+        Returns:
+            {"saved": ścieżka pliku albo None (brak oznaczeń - plik usunięty),
+             "surfaces": [{"id", "name", "area_mm2", "max_diameter_mm"}]}.
+        """
         b = self.bone(bone_id)
         labels = np.frombuffer(base64.b64decode(body["labels"]), dtype=np.uint8).copy()
         names = {int(k): str(v)[:80] for k, v in body.get("names", {}).items()}
@@ -126,6 +180,17 @@ class ToolState:
                               "max_diameter_mm": s["max_diameter_mm"]} for s in stats]}
 
     def detect(self, bone_id: str, method: str | None) -> dict:
+        """POST /api/bones/<id>/detect: propozycja algorytmu - NIC nie zapisuje.
+
+        Użytkownik poprawia propozycję na stronie i zapisuje ją sam (jako ręczne oznaczenia).
+
+        Args:
+            bone_id: id kości.
+            method:  nazwa algorytmu z DETECTORS; None = params.method.
+
+        Returns:
+            {"labels": base64 uint8 (V,), "names": {"k": nazwa}, "method": użyty algorytm}.
+        """
         b = self.bone(bone_id)
         method = method or self.params.method
         c = ct.detect_contacts(b, method, self.params)
@@ -133,7 +198,18 @@ class ToolState:
 
 
 def fetch_vendor(path: str, cache_dir: Path) -> bytes:
-    """Plik three.js: z cache, a za pierwszym razem pobrany z CDN."""
+    """Plik three.js: z cache, a za pierwszym razem pobrany z CDN i zapisany w cache.
+
+    Args:
+        path:      ścieżka URL z VENDOR, np. "/vendor/three.module.js".
+        cache_dir: folder cache (DATA_OUT/.cache/web).
+
+    Returns:
+        Zawartość pliku.
+
+    Raises:
+        OSError: nie udało się pobrać (np. brak internetu przy pierwszym uruchomieniu).
+    """
     target = cache_dir / Path(path).name
     if not target.exists():
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -143,11 +219,24 @@ def fetch_vendor(path: str, cache_dir: Path) -> bytes:
 
 
 def make_handler(state: ToolState, cache_dir: Path):
+    """Tworzy klasę obsługi zapytań HTTP, która widzi `state` i `cache_dir`.
+
+    HTTPServer sam tworzy obiekt obsługi dla każdego zapytania i nie pozwala przekazać
+    mu własnych argumentów - dlatego klasa jest zdefiniowana wewnątrz funkcji.
+    """
+
     class Handler(BaseHTTPRequestHandler):
+        """Routing zapytań strony: pliki strony, three.js i API /api/bones/...
+
+        Każdy wyjątek jest zamieniany na odpowiedź JSON {"error": ...} (KeyError -> 404,
+        inne -> 500), żeby błąd było widać na stronie, a serwer działał dalej.
+        """
+
         def log_message(self, fmt, *args):     # bez logu każdego zapytania w konsoli
             pass
 
         def _send(self, status, body: bytes, ctype: str):
+            """Wysyła odpowiedź z treścią `body` typu `ctype` (bez cache przeglądarki)."""
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -156,20 +245,25 @@ def make_handler(state: ToolState, cache_dir: Path):
             self.wfile.write(body)
 
         def _json(self, data, status=HTTPStatus.OK):
+            """Wysyła `data` jako JSON (UTF-8, polskie znaki bez escape)."""
             self._send(status, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json")
 
         def _error(self, status, msg):
+            """Wysyła błąd {"error": msg} - strona pokazuje go w dymku."""
             self._json({"error": msg}, status)
 
         def _body(self) -> dict:
+            """Treść zapytania jako słownik z JSON ({} dla pustej)."""
             n = int(self.headers.get("Content-Length", 0))
             return json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
 
         def _route(self):
+            """Ścieżka URL bez parametrów, podzielona na części: "/api/bones/x" -> ["api", "bones", "x"]."""
             parts = [p for p in self.path.split("?")[0].split("/") if p]
             return parts
 
         def do_GET(self):
+            """Pliki strony, three.js, lista kości i dane jednej kości."""
             path = self.path.split("?")[0]
             try:
                 if path in STATIC:
@@ -194,6 +288,7 @@ def make_handler(state: ToolState, cache_dir: Path):
                 return self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
 
         def do_PUT(self):
+            """Zapis oznaczeń kości: PUT /api/bones/<id>/contacts."""
             parts = self._route()
             try:
                 if len(parts) == 4 and parts[:2] == ["api", "bones"] and parts[3] == "contacts":
@@ -205,6 +300,7 @@ def make_handler(state: ToolState, cache_dir: Path):
                 return self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
 
         def do_POST(self):
+            """Propozycja algorytmu: POST /api/bones/<id>/detect (body: {"method": ...} opcjonalnie)."""
             parts = self._route()
             try:
                 if len(parts) == 4 and parts[:2] == ["api", "bones"] and parts[3] == "detect":
@@ -220,7 +316,19 @@ def make_handler(state: ToolState, cache_dir: Path):
 
 def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | None = None,
           params: ct.ContactParams | None = None) -> None:
-    """Uruchamia narzędzie i czeka (Ctrl+C kończy)."""
+    """Uruchamia narzędzie i czeka (Ctrl+C kończy).
+
+    Serwer słucha tylko na 127.0.0.1 - z innych komputerów nie jest dostępny.
+
+    Args:
+        port:         port serwera (None = CONTACT_TOOL_PORT z settings.json).
+        open_browser: otwórz stronę w przeglądarce po starcie.
+        out_dir:      folder wyników z kośćmi (None = DATA_OUT).
+        params:       ustawienia narzędzia i algorytmu (None = sekcja "contacts").
+
+    Raises:
+        SystemExit: brak przygotowanych kości albo port zajęty (komunikat mówi, co zrobić).
+    """
     import config
 
     params = params or config.contact_params()

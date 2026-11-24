@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dopasowanie z suwakami</title>
+  <link rel="stylesheet" href="/match_tool.css">
+  <script src="/vendor/plotly.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">◐</span> Dopasowanie powierzchni styku</div>
+    <div class="pair-title" id="pairTitle">Wczytywanie…</div>
+    <div class="status" id="status" hidden></div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel left">
+      <div class="panel-head">Pary <span class="muted" id="pairCount"></span></div>
+      <input class="search" id="pairSearch" placeholder="Szukaj…" autocomplete="off">
+      <ul class="pair-list" id="pairList"></ul>
+      <div class="legend-mini">wynik z matching.json → po przeliczeniu</div>
+    </aside>
+
+    <section class="viewport">
+      <div id="plot"></div>
+      <div class="busy" id="busy" hidden><div class="spinner"></div><span id="busyText">Przeliczam…</span></div>
+      <div class="legend3d">
+        <span><i style="background:#6f9fd8"></i>kość A</span>
+        <span><i style="background:#e8508f"></i>powierzchnia A</span>
+        <span><i style="background:#e0c9a0"></i>kość B</span>
+        <span><i style="background:#18b0a6"></i>powierzchnia B</span>
+      </div>
+    </section>
+
+    <aside class="panel right">
+      <div class="section">
+        <div class="section-title">Wynik pary</div>
+        <div id="resultCard" class="result"></div>
+        <div class="stale" id="stale" hidden>
+          Wynik policzony z innymi ustawieniami niż suwaki.
+          <button id="recomputeStale">Przelicz z obecnymi</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Szukanie ustawienia <span class="muted">— zmiana = dopasowanie od nowa</span></div>
+        <div id="slidersSearch"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Ocena <span class="muted">— zmiana = tylko nowa ocena</span></div>
+        <div id="slidersScore"></div>
+      </div>
+
+      <div class="section buttons">
+        <button class="primary" id="recompute" title="RANSAC jest losowy - kolejne przeliczenie może dać inny wynik">
+          ↻ Przelicz od nowa</button>
+        <button id="reset">Przywróć ustawienia</button>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Do settings.json <span class="muted">(sekcja "matching")</span></div>
+        <pre class="snippet" id="snippet"></pre>
+        <button id="copy" hidden>Kopiuj</button>
+        <p class="hint">Nic nie jest zapisywane. Żeby przeliczyć wszystkie pary z nowymi ustawieniami:
+          wklej je do settings.json i uruchom <code>python scripts/match_surfaces.py</code>.</p>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/match_tool.js"></script>
+</body>
+</html>

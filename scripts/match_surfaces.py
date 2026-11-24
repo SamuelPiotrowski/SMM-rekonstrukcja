@@ -29,7 +29,7 @@ CO ROBI
            styk     - pole, na którym powierzchnie leżą bliżej niż tolerance_mm z przeciwnymi
                       normalnymi (mniejsze z pól obu stron) [mm²],
            kolizja  - pole, na którym CAŁE kości wchodzą w siebie głębiej niż collision_mm [mm²],
-           RMSE     - średnia odległość punktów w styku [mm],
+           RMSE     - średnia kwadratowa odległość punktów w styku [mm],
            WYNIK    = styk - kolizja; im więcej, tym lepiej.
     Wszystkie ustawienia (z opisami): settings.json, sekcja "matching"; algorytm wykrywania: "contacts".
     Liczba par rośnie kwadratowo: N powierzchni -> ~N²/2 par, każda ~1-3 s.
@@ -53,6 +53,7 @@ Wyniki:
     out/3d/matching.json  - wszystkie pary: wynik, styk, kolizja, RMSE, macierz przekształcenia T
                             (4x4, układ kości A -> układ kości B, jak w out/3d/bones/<id>/mesh.ply),
                             użyte ustawienia
+Podgląd z suwakami ustawień (zmiana przelicza jedną pokazaną parę): python scripts/tune_matching.py
 Kod: src/matching_surfaces.py.
 """
 
@@ -77,6 +78,7 @@ SOURCE_NAMES = {"manual": "tylko ręczne", "auto": "tylko z algorytmu",
 
 
 def main() -> None:
+    """Wybiera powierzchnie styku, dopasowuje każdą parę, wypisuje najlepsze i zapisuje matching.json / .html."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--source", choices=ms.SOURCES, default=None,
@@ -131,7 +133,8 @@ def main() -> None:
         f"Powierzchnie styku: {SOURCE_NAMES[params.source]}{algo}. Każda dopasowana (RANSAC + ICP) "
         "do każdej powierzchni innej kości, twarzą w twarz. Wynik = pole styku (powierzchnie bliżej niż "
         f"{params.tolerance_mm:g} mm, normalne przeciwne) minus pole, na którym kości wchodzą w siebie.",
-        [("Najlepsze pary", "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę.",
+        [("Najlepsze pary", "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę. "
+          "Suwaki ustawień z przeliczaniem jednej pary: python scripts/tune_matching.py",
           matching_figure(results, by_id, contacts, view, params.max_shown)),
          ("Wszystkie pary", "Wynik każdej pary powierzchni [mm²]; puste pola = ta sama kość, "
           "„(algorytm)” = powierzchnia z algorytmu wykrywania.",

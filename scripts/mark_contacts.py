@@ -25,6 +25,7 @@ from contact_tool import serve  # noqa: E402
 
 
 def main() -> None:
+    """Czyta argumenty i uruchamia serwer narzędzia (contact_tool.serve) - działa do Ctrl+C."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, help="port serwera (domyślnie contacts.port z settings.json)")
     parser.add_argument("--no-open", action="store_true", help="nie otwieraj przeglądarki")

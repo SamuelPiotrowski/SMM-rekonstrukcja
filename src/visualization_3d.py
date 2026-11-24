@@ -1,10 +1,11 @@
 """
 Interaktywne wizualizacje 3D kości - pliki HTML otwierane w przeglądarce (plotly).
 
-Dwie wizualizacje:
+Trzy wizualizacje:
 
-1. KOŚCI (bones_html) - wszystkie kości ułożone "na stole", każda leży płasko
-   (najdłuższa oś poziomo). Powierzchnie styku (jeśli oznaczone) są zaznaczone kolorem.
+1. KOŚCI (bones_figure; scripts/show_bones.py -> out/3d/bones.html) - wszystkie kości
+   ułożone "na stole", każda leży płasko (najdłuższa oś poziomo). Powierzchnie styku
+   (jeśli oznaczone) są zaznaczone kolorem.
        - lista "Pokaż" - wszystkie kości albo jedna, z przybliżeniem,
        - przyciski: powierzchnie styku pokaż / ukryj, widok 3D / z góry / z boku,
        - kliknięcie kości w legendzie - ukrycie / pokazanie,
@@ -13,11 +14,21 @@ Dwie wizualizacje:
    "fpfh" - kolor wg deskryptorów FPFH (podobny kolor = podobny lokalny kształt,
    porównywalny między kośćmi).
 
-2. ŁĄCZENIE SKANÓW (merging_html) - jak skany połączyły się w kości: każdy skan
-   w innym kolorze (drobne "paski" dwóch kolorów = skany dobrze się pokrywają),
-   usunięty szum na czerwono, tabela nakładania wszystkich par skanów.
+2. ŁĄCZENIE SKANÓW (merging_figure + overlap_figure; scripts/show_merging.py
+   -> out/3d/merging.html) - jak skany połączyły się w kości: każdy skan w innym
+   kolorze (drobne "paski" dwóch kolorów = skany dobrze się pokrywają), usunięty szum
+   na czerwono, macierz nakładania wszystkich par skanów.
 
-Wizualizacja nie zmienia wyników - czyta tylko out/3d/bones/ i contacts/.
+3. DOPASOWANIE POWIERZCHNI STYKU (matching_figure + match_matrix_figure;
+   scripts/match_surfaces.py -> out/3d/matching.html) - najlepsze pary: kość A
+   ustawiona na kości B znalezionym przekształceniem, obie powierzchnie styku
+   w kolorze; macierz wyników wszystkich par powierzchni.
+
+Zapis: save_figure (jedna figura na całe okno) albo write_page (kilka figur w sekcjach
+z nagłówkami). Przy embed_plotly = True plik HTML działa bez internetu i można go
+po prostu komuś wysłać.
+
+Wizualizacja nie zmienia wyników - czyta tylko out/3d/ i contacts/.
 """
 
 from __future__ import annotations
@@ -46,9 +57,11 @@ LIGHTING = dict(ambient=0.55, diffuse=0.75, specular=0.12, roughness=0.65, fresn
 
 @dataclass(frozen=True)
 class View3DParams:
+    """Wygląd wizualizacji HTML (settings.json, sekcja "visualization_3d", bez "open_browser")."""
+
     triangles_total: int = 240000      # trójkątów w całym HTML, dzielone między kości (więcej = większy plik)
     embed_plotly: bool = True          # True = działa bez internetu (plik ~4.5 MB większy)
-    background: str = "#f4f6f8"
+    background: str = "#f4f6f8"        # kolor tła strony
     bone_color: str = "#e3d9c6"        # kolor kości, gdy skan nie ma kolorów
     gap_mm: float = 10.0               # odstęp między kośćmi na stole
 
@@ -58,7 +71,18 @@ class View3DParams:
 # -----------------
 
 def decimate(mesh: o3d.geometry.TriangleMesh, max_triangles: int) -> o3d.geometry.TriangleMesh:
-    """Uproszczona kopia siatki do pokazania (kolory zostają). Mniejsze siatki bez zmian."""
+    """Uproszczona kopia siatki do pokazania (oryginał bez zmian, kolory zostają).
+
+    Upraszczanie quadric decimation zachowuje kształt, ale NIE numerację wierzchołków -
+    etykiety powierzchni trzeba przenosić po najbliższym wierzchołku (cKDTree).
+
+    Args:
+        mesh:          siatka kości albo skanu.
+        max_triangles: docelowa liczba trójkątów; mniejsze siatki są tylko kopiowane.
+
+    Returns:
+        Nowa siatka z normalnymi wierzchołków.
+    """
     if len(mesh.triangles) <= max_triangles:
         out = o3d.geometry.TriangleMesh(mesh)
     else:
@@ -68,7 +92,12 @@ def decimate(mesh: o3d.geometry.TriangleMesh, max_triangles: int) -> o3d.geometr
 
 
 def lying_rotation(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
-    """Obrót kładący kość płasko: najdłuższa oś = X, najcieńsza = Z (do góry)."""
+    """Obrót kładący kość płasko: najdłuższa oś = X, najcieńsza = Z (do góry).
+
+    Returns:
+        Macierz 3x3 R (wiersze = osie główne PCA, bez odbicia lustrzanego);
+        użycie: (v - środek) @ R.T.
+    """
     v = np.asarray(mesh.vertices)
     c = v - v.mean(axis=0)
     _, _, vt = np.linalg.svd(c[:: max(1, len(c) // 20000)], full_matrices=False)
@@ -78,11 +107,13 @@ def lying_rotation(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
 
 
 def _hex(rgb: np.ndarray) -> np.ndarray:
+    """Kolory (N, 3) w [0, 1] -> tablica (N,) tekstów "#rrggbb" (vertexcolor w plotly)."""
     rgb = (np.clip(rgb, 0, 1) * 255).round().astype(int)
     return np.array([f"#{r:02x}{g:02x}{b:02x}" for r, g, b in rgb])
 
 
 def _f32(a) -> np.ndarray:
+    """Tablica float32 - plotly zapisuje ją binarnie, o połowę mniej niż float64."""
     return np.asarray(a, dtype=np.float32)
 
 
@@ -93,7 +124,15 @@ def _ijk(t: np.ndarray, n_vertices: int) -> dict:
 
 
 def _compact(points: np.ndarray, tri: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Tylko wierzchołki użyte przez `tri` (z przenumerowaniem)."""
+    """Tylko wierzchołki użyte przez `tri` (z przenumerowaniem).
+
+    Args:
+        points: (V, 3) wierzchołki.
+        tri:    (T, 3) indeksy trójkątów w `points`.
+
+    Returns:
+        (użyte wierzchołki (V', 3), trójkąty (T, 3) z indeksami w nich).
+    """
     used, inv = np.unique(tri, return_inverse=True)
     return points[used], inv.reshape(tri.shape)
 
@@ -103,6 +142,12 @@ def fpfh_colors(fpfhs: list[np.ndarray]) -> list[np.ndarray]:
 
     Ten sam deskryptor dostaje ten sam kolor niezależnie od kości, więc miejsca o podobnym
     kolorze na dwóch kościach mają podobny lokalny kształt. Skala: percentyle 1-99.
+
+    Args:
+        fpfhs: deskryptory (N_i, 33) każdej kości.
+
+    Returns:
+        Kolory (N_i, 3) w [0, 1] dla każdej kości, w tej samej kolejności.
     """
     sizes = [len(f) for f in fpfhs]
     x = np.vstack(fpfhs).astype(np.float64)
@@ -117,9 +162,18 @@ def fpfh_colors(fpfhs: list[np.ndarray]) -> list[np.ndarray]:
 
 
 def shelf_layout(sizes: list[np.ndarray], gap: float, aspect: float = 1.8) -> list[np.ndarray]:
-    """Środki prostokątów (szer., wys.) ułożonych w rzędy od lewej, w kolejności listy.
+    """Układa prostokąty (szer., wys.) w rzędy od lewej, w kolejności listy - jak książki na półkach.
 
-    Szerokość rzędu dobrana tak, żeby całość miała proporcje ~aspect : 1.
+    Szerokość rzędu dobrana tak, żeby całość miała proporcje ~aspect : 1. Kolejne rzędy
+    idą w dół (malejące y).
+
+    Args:
+        sizes:  (szerokość, wysokość) każdego prostokąta [mm].
+        gap:    odstęp między prostokątami [mm].
+        aspect: proporcje szerokość : wysokość całości.
+
+    Returns:
+        Środki (x, y) prostokątów.
     """
     total = sum((w + gap) * (h + gap) for w, h in sizes)
     row_w = max(max(w for w, _ in sizes), math.sqrt(total * aspect))
@@ -134,6 +188,11 @@ def shelf_layout(sizes: list[np.ndarray], gap: float, aspect: float = 1.8) -> li
 
 
 def _bone_hover(nr: int, bone: Bone, stats: list[dict], contacts: Contacts | None) -> str:
+    """Podpowiedź po najechaniu na kość (hovertemplate plotly, HTML).
+
+    Zawiera: numer i nazwę, skany, pole, wymiary, usunięty szum, powierzchnie styku
+    (`stats` z contacts.surface_stats) z ich kolorem, polem i średnicą.
+    """
     m = bone.meta
     st = m.get("stats", {})
     ext = " × ".join(f"{e:.1f}" for e in sorted(st.get("extent_mm", [0, 0, 0]), reverse=True))
@@ -160,13 +219,26 @@ def _bone_hover(nr: int, bone: Bone, stats: list[dict], contacts: Contacts | Non
 def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None = None,
                  color_mode: str = "scan", params: View3DParams = View3DParams(),
                  numbers: list[int] | None = None) -> go.Figure:
-    """Figura plotly: wszystkie kości na stole + powierzchnie styku.
+    """Figura plotly: wszystkie kości na stole + powierzchnie styku (opis: docstring modułu, pkt 1).
+
+    Każda kość jest uproszczona do ~params.triangles_total / liczba kości trójkątów
+    (co najmniej 5000), położona płasko (lying_rotation) i ustawiona na stole
+    (shelf_layout). Powierzchnie styku to osobne nakładki uniesione 0.04 mm nad kością -
+    dzięki temu da się je ukryć przyciskiem. Na stole jest podziałka 10 albo 50 mm.
 
     Args:
         bones:      kości (dla color_mode="fpfh" wczytane z features=True).
-        contacts:   {id kości: Contacts albo None}.
+        contacts:   {id kości: Contacts albo None}; brak klucza = kość bez oznaczeń.
         color_mode: "scan" / "fragment" / "fpfh".
-        numbers:    numery kości do wyświetlenia (domyślnie 1..N).
+        params:     wygląd (triangles_total, bone_color, gap_mm, background).
+        numbers:    numery kości do wyświetlenia (domyślnie 1..N) - żeby przy wybranych
+                    kościach zgadzały się z numerami z pełnej listy.
+
+    Returns:
+        Figura do zapisania przez save_figure.
+
+    Raises:
+        ValueError: nieznany color_mode albo pusta lista kości.
     """
     if color_mode not in COLOR_MODES:
         raise ValueError(f"Nieznany tryb kolorów {color_mode!r}, dostępne: {COLOR_MODES}")
@@ -261,6 +333,7 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
     mid_scene = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (z_lo + z_hi) / 2])
 
     def camera(box_lo, box_hi, direction, up=(0, 0, 1), zoom=0.8):
+        """Kamera plotly patrząca na pudełko box_lo..box_hi [mm] z kierunku `direction`."""
         center = ((np.asarray(box_lo) + np.asarray(box_hi)) / 2 - mid_scene) / span * aspect
         size = max(((np.asarray(box_hi) - np.asarray(box_lo)) / span * aspect)[:2])
         eye = center + zoom * max(size, 0.08) * np.asarray(direction, dtype=float)
@@ -322,7 +395,17 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
                    numbers: list[int] | None = None) -> go.Figure:
     """Figura plotly: skany każdej kości nałożone na siebie (każdy w innym kolorze) + usunięty szum.
 
-    Pokazuje kości złożone z >1 skanu albo z usuniętym szumem (lista "Kość" przełącza).
+    Pokazuje tylko kości złożone z >1 skanu albo z usuniętym szumem, najpierw te z największą
+    liczbą skanów; lista w lewym dolnym rogu przełącza kości. Siatki skanów są czytane
+    z <folder kości>/scans/ (zapisuje je bones.save_bone).
+
+    Args:
+        bones:   kości z load_bones (muszą mieć ustawiony `folder`).
+        params:  wygląd (triangles_total, background).
+        numbers: numery kości do wyświetlenia (domyślnie 1..N).
+
+    Returns:
+        Figura; gdy żadna kość nie pasuje - figura z samym komunikatem.
     """
     numbers = numbers or list(range(1, len(bones) + 1))
     chosen = [(n, b) for n, b in zip(numbers, bones) if b.n_scans > 1 or b.meta.get("noise_removed_mm2")]
@@ -376,6 +459,7 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
         return fig
 
     def layout_for(k):
+        """Zmiany układu (osie, proporcje, opis) po wybraniu k-tej kości z listy."""
         lo, hi = boxes[k]
         span = np.maximum(hi - lo, 1e-3)
         return {"scene.xaxis.range": [lo[0], hi[0]], "scene.yaxis.range": [lo[1], hi[1]],
@@ -406,12 +490,24 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
     return fig
 
 
+# Podpowiedź pod opisem kości w merging_figure.
 HELP_MERGE = ("<br><br><i>drobne paski dwóch kolorów = skany leżą na sobie (dobrze)<br>"
               "jeden kolor przykrywa drugi w całości = coś się rozjechało</i>")
 
 
 def overlap_figure(report: dict, params: View3DParams = View3DParams()) -> go.Figure:
-    """Macierz nakładania par skanów z merging.json (wysoka wartość = ta sama kość)."""
+    """Macierz nakładania par skanów z merging.json (wysoka wartość = ta sama kość).
+
+    Skany są posortowane po kości, do której trafiły; ramki obejmują skany połączone
+    w jedną kość. Kolor zmienia się skokowo na progu min_overlap.
+
+    Args:
+        report: zawartość merging.json (load_report).
+        params: wygląd (background).
+
+    Returns:
+        Figura z mapą cieplną.
+    """
     scans = report["scans"]
     ids = [s["id"] for s in scans]
     pos = {s: i for i, s in enumerate(ids)}
@@ -450,11 +546,26 @@ def overlap_figure(report: dict, params: View3DParams = View3DParams()) -> go.Fi
 # 3. DOPASOWANIE POWIERZCHNI STYKU
 # -----------------
 
+# Kolory w matching_figure: kość A, kość B i ich powierzchnie styku.
 MATCH_COLORS = {"a": "#6f9fd8", "b": "#e0c9a0", "surf_a": "#e8508f", "surf_b": "#18b0a6"}
 
 
 def _surface_overlay(bone: Bone, labels: np.ndarray, sid: int, d: o3d.geometry.TriangleMesh, v: np.ndarray):
-    """Trójkąty uproszczonej siatki `d` (wierzchołki `v` już przekształcone) należące do powierzchni sid."""
+    """Nakładka powierzchni styku `sid` na uproszczonej siatce `d`.
+
+    Etykiety z pełnej siatki kości są przenoszone na `d` po najbliższym wierzchołku;
+    brany jest trójkąt, którego wszystkie 3 wierzchołki należą do powierzchni.
+
+    Args:
+        bone:   kość (pełna siatka - do etykiet).
+        labels: (V,) etykiety wierzchołków bone.mesh.
+        sid:    numer powierzchni.
+        d:      uproszczona siatka (decimate).
+        v:      wierzchołki `d` już przekształcone do pokazania (np. przesunięte).
+
+    Returns:
+        (wierzchołki, trójkąty) nakładki albo (None, None), gdy po uproszczeniu nic nie zostało.
+    """
     _, near = cKDTree(np.asarray(bone.mesh.vertices)).query(np.asarray(d.vertices))
     t = np.asarray(d.triangles)
     tri = t[(labels[near][t] == sid).all(axis=1)]
@@ -465,9 +576,18 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
                     params: View3DParams = View3DParams(), max_shown: int = 15) -> go.Figure:
     """Najlepsze pary powierzchni: kość A ustawiona na kości B (lista wybiera parę).
 
+    Kość B zostaje w swoim układzie, kość A jest przenoszona przekształceniem T z wyniku.
+    Obok opis pary: wynik, styk, pokrycie obu stron, RMSE i kolizja.
+
     Args:
-        results:  pary z matching_surfaces.match_all (posortowane od najlepszej).
-        bones:    {id: kość}, contacts: {id: Contacts} - te same, których użyto do dopasowania.
+        results:   pary z matching_surfaces.match_all (posortowane od najlepszej).
+        bones:     {id kości: Bone} - te same, których użyto do dopasowania.
+        contacts:  {id kości: Contacts} - etykiety, z których wzięto powierzchnie.
+        params:    wygląd (triangles_total, background).
+        max_shown: ile najlepszych par dać na listę.
+
+    Returns:
+        Figura z listą par w lewym dolnym rogu.
     """
     shown = results[:max_shown]
     per_bone = max(4000, params.triangles_total // max(1, 2 * len(shown)))
@@ -513,6 +633,7 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
             "", "<i>wynik = styk - kolizja</i>"]))
 
     def layout_for(k):
+        """Zmiany układu (sześcienne osie wokół pary, opis) po wybraniu k-tej pary z listy."""
         lo, hi = boxes[k]
         c, half = (lo + hi) / 2, (hi - lo).max() / 2 * 1.05
         return {"scene.xaxis.range": [c[0] - half, c[0] + half], "scene.yaxis.range": [c[1] - half, c[1] + half],
@@ -545,7 +666,15 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
 
 
 def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> go.Figure:
-    """Macierz wyników wszystkich par powierzchni (puste = ta sama kość)."""
+    """Macierz wyników wszystkich par powierzchni (puste = ta sama kość).
+
+    Args:
+        report: słownik z matching_surfaces.report (to samo, co w matching.json).
+        params: wygląd (background).
+
+    Returns:
+        Figura z mapą cieplną; powierzchnie z algorytmu mają dopisek "(algorytm)".
+    """
     surfs = report["surfaces"]
     keys = [s["key"] for s in surfs]
     pos = {k: i for i, k in enumerate(keys)}
@@ -574,6 +703,7 @@ def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> 
 # ZAPIS HTML
 # -----------------
 
+# Szablon strony write_page; {{ }} = zwykłe nawiasy CSS (str.format).
 PAGE = """<!doctype html>
 <html lang="pl"><head><meta charset="utf-8"><title>{title}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -591,6 +721,7 @@ section .note {{ font-size: 13px; color: #6b7b8c; padding: 8px 16px 0; margin: 0
 
 
 def _plotly_head(embed: bool) -> str:
+    """Znacznik <script> z plotly.js: wklejony w całości (embed=True, działa offline) albo z CDN."""
     if embed:
         from plotly.offline import get_plotlyjs
         return f"<script>{get_plotlyjs()}</script>"
@@ -600,7 +731,19 @@ def _plotly_head(embed: bool) -> str:
 
 def write_page(path: Path, title: str, lead: str, sections: list[tuple[str, str, go.Figure]],
                params: View3DParams = View3DParams(), open_browser: bool = False) -> Path:
-    """Strona HTML z kilkoma figurami plotly (każda w swojej sekcji z nagłówkiem)."""
+    """Zapisuje stronę HTML z kilkoma figurami plotly (każda w swojej sekcji z nagłówkiem).
+
+    Args:
+        path:         plik wynikowy (foldery są tworzone).
+        title:        tytuł strony i nagłówek na górze.
+        lead:         opis pod tytułem (może zawierać HTML, np. <b>).
+        sections:     [(nagłówek sekcji, opis albo "", figura), ...].
+        params:       wygląd (background, embed_plotly).
+        open_browser: otwórz stronę w przeglądarce po zapisie.
+
+    Returns:
+        Ścieżka zapisanego pliku.
+    """
     config = dict(displaylogo=False, scrollZoom=True, toImageButtonOptions=dict(format="png", scale=2))
     body = []
     for heading, note, fig in sections:
@@ -618,7 +761,18 @@ def write_page(path: Path, title: str, lead: str, sections: list[tuple[str, str,
 
 def save_figure(fig: go.Figure, path: Path, params: View3DParams = View3DParams(), open_browser: bool = False,
                 title: str = "Fragmenty kości") -> Path:
-    """Jedna figura jako samodzielny plik HTML na całe okno przeglądarki."""
+    """Zapisuje jedną figurę jako samodzielny plik HTML na całe okno przeglądarki.
+
+    Args:
+        fig:          figura plotly.
+        path:         plik wynikowy (foldery są tworzone).
+        params:       wygląd (background, embed_plotly).
+        open_browser: otwórz plik w przeglądarce po zapisie.
+        title:        tytuł karty przeglądarki.
+
+    Returns:
+        Ścieżka zapisanego pliku.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     div = fig.to_html(full_html=False, include_plotlyjs=True if params.embed_plotly else "cdn",
@@ -635,5 +789,6 @@ def save_figure(fig: go.Figure, path: Path, params: View3DParams = View3DParams(
 
 
 def load_report(out_dir: Path) -> dict | None:
+    """Wczytuje out_dir/merging.json (pipeline.write_merging_report); None, gdy go nie ma."""
     p = Path(out_dir) / "merging.json"
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None

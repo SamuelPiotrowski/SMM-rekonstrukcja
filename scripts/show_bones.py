@@ -25,6 +25,7 @@ from visualization_3d import COLOR_MODES, bones_figure, save_figure  # noqa: E40
 
 
 def main() -> None:
+    """Wczytuje wybrane kości i ich oznaczenia, buduje figurę i zapisuje HTML (domyślnie out/3d/bones.html)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--colors", choices=COLOR_MODES, default="scan", help="kolorowanie kości")

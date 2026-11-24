@@ -30,6 +30,7 @@ from bones import load_bones, select_bones  # noqa: E402
 
 
 def main() -> None:
+    """Uruchamia algorytm na wybranych kościach, zapisuje wyniki i porównuje je z ręcznymi oznaczeniami."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--method", choices=list(ct.DETECTORS), default=None, help="algorytm")

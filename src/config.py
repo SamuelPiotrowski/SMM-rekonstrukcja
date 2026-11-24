@@ -7,6 +7,22 @@ komentarze //, które są usuwane przed wczytaniem (zwykły JSON ich nie obsług
 
 Brakujący klucz w settings.json = wartość domyślna z danego modułu.
 Literówka w nazwie klucza = czytelny błąd z listą poprawnych nazw.
+
+Co udostępnia:
+    ROOT, SETTINGS_FILE             - główny folder projektu i ścieżka do settings.json,
+    SETTINGS                        - cały settings.json jako słownik,
+    DATA_IN, DATA_OUT, CONTACTS_DIR - foldery (sekcja "paths"),
+    scan_params(), merge_params(), feature_params(), contact_params(),
+    matching_params(), view3d_params()
+                                    - obiekty parametrów modułów (po jednym na sekcję),
+    OPEN_BROWSER, CONTACT_TOOL_PORT, MATCH_TOOL_PORT
+                                    - pojedyncze ustawienia skryptów.
+
+Funkcje *_params() importują swój moduł dopiero przy wywołaniu - dzięki temu config
+można zaimportować w każdym module bez cyklicznych importów.
+
+    import config
+    params = config.merge_params()      # MergeParams z sekcji "merging"
 """
 
 import json
@@ -22,7 +38,21 @@ _STRING_OR_COMMENT = re.compile(r'("(?:\\.|[^"\\])*")|//[^\n]*')
 
 
 def load_settings(path: Path = SETTINGS_FILE) -> dict:
-    """Wczytuje plik JSON, w którym mogą być komentarze //."""
+    """Wczytuje plik JSON, w którym mogą być komentarze //.
+
+    Komentarze // (do końca linii) są usuwane przed parsowaniem. Tekst w cudzysłowie
+    zostaje nietknięty, więc np. "http://..." się nie psuje. Komentarze /* ... */
+    nie są obsługiwane.
+
+    Args:
+        path: plik do wczytania (domyślnie settings.json w głównym folderze projektu).
+
+    Returns:
+        Zawartość pliku, dla settings.json: {nazwa sekcji: {klucz: wartość}}.
+
+    Raises:
+        SystemExit: błąd składni JSON - komunikat podaje numer linii i typowe przyczyny.
+    """
     text = path.read_text(encoding="utf-8")
     text = _STRING_OR_COMMENT.sub(lambda m: m.group(1) or "", text)
     try:
@@ -50,7 +80,22 @@ CONTACTS_DIR = ROOT / _paths.get("contacts", "contacts")     # ręczne oznaczeni
 # -----------------
 
 def _section(name: str, cls, skip=()):
-    """Tworzy obiekt parametrów `cls` z sekcji `name` settings.json."""
+    """Tworzy obiekt parametrów `cls` z sekcji `name` settings.json.
+
+    Klucze, których brakuje w sekcji, dostają wartości domyślne z dataclassy `cls`.
+    Listy JSON są zamieniane na krotki (tak jak wartości domyślne w dataclassach).
+
+    Args:
+        name: nazwa sekcji w settings.json, np. "merging".
+        cls:  dataclass z parametrami modułu, np. merging.MergeParams.
+        skip: klucze sekcji, których nie ma w `cls`, bo są czytane osobno (np. "port").
+
+    Returns:
+        Obiekt `cls` z wartościami z settings.json.
+
+    Raises:
+        SystemExit: sekcja zawiera nieznany klucz (np. literówkę) - komunikat podaje poprawne nazwy.
+    """
     values = {k: v for k, v in SETTINGS.get(name, {}).items() if k not in skip}
     known = {f.name for f in fields(cls)}
     unknown = sorted(set(values) - known)
@@ -62,34 +107,53 @@ def _section(name: str, cls, skip=()):
 
 
 def scan_params():
+    """Wyszukiwanie i czyszczenie skanów: sekcja "scans" -> data_parsing.ScanParams."""
     from data_parsing import ScanParams
     return _section("scans", ScanParams)
 
 
 def merge_params():
+    """Łączenie skanów tej samej kości: sekcja "merging" -> merging.MergeParams."""
     from merging import MergeParams
     return _section("merging", MergeParams)
 
 
 def feature_params():
+    """Chmura punktów i FPFH kości: sekcja "features" -> bones.FeatureParams."""
     from bones import FeatureParams
     return _section("features", FeatureParams)
 
 
 def contact_params():
+    """Powierzchnie styku (narzędzie + algorytm): sekcja "contacts" -> contacts.ContactParams.
+
+    Klucz "port" jest pomijany - to CONTACT_TOOL_PORT.
+    """
     from contacts import ContactParams
     return _section("contacts", ContactParams, skip=("port",))
 
 
 def matching_params():
+    """Dopasowanie powierzchni styku: sekcja "matching" -> matching_surfaces.SurfaceMatchParams.
+
+    Klucz "port" jest pomijany - to MATCH_TOOL_PORT.
+    """
     from matching_surfaces import SurfaceMatchParams
-    return _section("matching", SurfaceMatchParams)
+    return _section("matching", SurfaceMatchParams, skip=("port",))
 
 
 def view3d_params():
+    """Wygląd wizualizacji HTML: sekcja "visualization_3d" -> visualization_3d.View3DParams.
+
+    Klucz "open_browser" jest pomijany - to OPEN_BROWSER.
+    """
     from visualization_3d import View3DParams
     return _section("visualization_3d", View3DParams, skip=("open_browser",))
 
 
+# Czy skrypty mają same otwierać wygenerowane pliki HTML w przeglądarce.
 OPEN_BROWSER = bool(SETTINGS.get("visualization_3d", {}).get("open_browser", True))
+# Port lokalnego serwera narzędzia do oznaczania (scripts/mark_contacts.py).
 CONTACT_TOOL_PORT = int(SETTINGS.get("contacts", {}).get("port", 8765))
+# Port lokalnego serwera podglądu dopasowania z suwakami (scripts/tune_matching.py).
+MATCH_TOOL_PORT = int(SETTINGS.get("matching", {}).get("port", 8766))

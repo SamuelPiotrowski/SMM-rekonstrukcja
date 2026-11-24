@@ -34,6 +34,8 @@ from data_parsing import compute_fpfh, mesh_stats, sample_surface, to_cloud
 
 @dataclass(frozen=True)
 class FeatureParams:
+    """Ustawienia chmury punktów i deskryptorów FPFH kości (settings.json, sekcja "features")."""
+
     center: bool = True               # przesuń kość tak, żeby jej środek był w (0, 0, 0)
     voxel_size: float = 0.5           # odstęp punktów chmury [mm]
     sampling_density: float = 4.0     # punkty losowane na voxel^2 przed przerzedzeniem
@@ -50,8 +52,11 @@ class Bone:
         mesh:   siatka (open3d) z kolorami i normalnymi.
         source: (T,) indeks skanu źródłowego każdego trójkąta (meta["scans"][i]).
         cloud:  chmura punktów z normalnymi (open3d) albo None, jeśli nie wczytano.
-        fpfh:   (N, 33) deskryptory FPFH chmury albo None.
+        fpfh:   (N, 33) deskryptory FPFH chmury (ta sama kolejność co punkty) albo None.
         meta:   słownik z meta.json.
+        folder: DATA_OUT/bones/<id>/ albo None, jeśli kości jeszcze nie zapisano.
+
+    Wszystkie współrzędne są w układzie kości (jak w mesh.ply), w mm.
     """
 
     id: str
@@ -65,6 +70,7 @@ class Bone:
 
     @property
     def n_scans(self) -> int:
+        """Z ilu skanów powstała kość (co najmniej 1)."""
         return len(self.meta.get("scans", [])) or 1
 
 
@@ -73,6 +79,11 @@ class Bone:
 # -----------------
 
 def write_mesh(path: Path, mesh: o3d.geometry.TriangleMesh) -> None:
+    """Zapisuje siatkę open3d do pliku (format wg rozszerzenia, np. .ply) przez trimesh.
+
+    Zapisywane są wierzchołki, trójkąty i kolory wierzchołków (jako 0-255). Normalne
+    liczy na nowo read_mesh. Brakujące foldery są tworzone.
+    """
     colors = None
     if mesh.has_vertex_colors():
         colors = (np.clip(np.asarray(mesh.vertex_colors), 0, 1) * 255).round().astype(np.uint8)
@@ -83,6 +94,7 @@ def write_mesh(path: Path, mesh: o3d.geometry.TriangleMesh) -> None:
 
 
 def read_mesh(path: Path) -> o3d.geometry.TriangleMesh:
+    """Wczytuje siatkę zapisaną przez write_mesh i liczy normalne wierzchołków i trójkątów."""
     from data_parsing import load_mesh
 
     mesh = load_mesh(path)
@@ -96,7 +108,24 @@ def read_mesh(path: Path) -> o3d.geometry.TriangleMesh:
 # -----------------
 
 def finalize_bone(merged, params: FeatureParams = FeatureParams()) -> Bone:
-    """MergedBone (z merging.py) -> Bone: wyśrodkowanie, chmura punktów, FPFH, meta."""
+    """Zamienia wynik łączenia skanów (merging.MergedBone) w gotową kość.
+
+    1. Przesuwa kość tak, żeby jej środek (średnia wierzchołków) był w (0, 0, 0) -
+       jeśli params.center. Tak samo przesuwa siatki skanów i szumu.
+    2. Losuje równomierną chmurę punktów (odstęp params.voxel_size) i liczy FPFH
+       (promień params.fpfh_radius_factor x voxel_size).
+    3. Uzupełnia meta: przesunięcie, przekształcenia skanów do układu kości,
+       statystyki siatki, liczbę punktów chmury i użyte ustawienia.
+
+    Uwaga: siatki i meta w `merged` są zmieniane w miejscu (merged.mesh to bone.mesh).
+
+    Args:
+        merged: wynik merging.merge_group.
+        params: ustawienia chmury i FPFH.
+
+    Returns:
+        Kość z chmurą i FPFH, jeszcze niezapisana (zapis: save_bone).
+    """
     mesh = merged.mesh
     center = mesh.get_center() if params.center else np.zeros(3)
     shift = np.eye(4)
@@ -121,7 +150,19 @@ def finalize_bone(merged, params: FeatureParams = FeatureParams()) -> Bone:
 
 
 def save_bone(bone: Bone, merged, out_dir: Path) -> Path:
-    """Zapisuje kość do out_dir/bones/<id>/ (istniejące pliki są nadpisywane)."""
+    """Zapisuje kość do out_dir/bones/<id>/ (pliki opisane w docstringu modułu).
+
+    Istniejące pliki są nadpisywane, a folder scans/ najpierw czyszczony, żeby nie
+    zostały w nim skany z poprzedniego uruchomienia. Ustawia bone.folder.
+
+    Args:
+        bone:    kość z finalize_bone (z chmurą i FPFH).
+        merged:  ten sam MergedBone - stąd siatki pojedynczych skanów i szumu.
+        out_dir: folder wyników (DATA_OUT).
+
+    Returns:
+        Folder kości.
+    """
     target = out_dir / "bones" / bone.id
     if (target / "scans").exists():
         shutil.rmtree(target / "scans")
@@ -142,7 +183,19 @@ def save_bone(bone: Bone, merged, out_dir: Path) -> Path:
 
 
 def remove_stale(out_dir: Path, keep_ids: set[str]) -> list[str]:
-    """Usuwa foldery kości z poprzednich uruchomień, których już nie ma (tylko te z meta.json)."""
+    """Usuwa foldery kości z poprzednich uruchomień, których już nie ma.
+
+    Np. po zmianie grupowania skanów kość może dostać inne id - stary folder by został.
+    Usuwane są tylko foldery z meta.json (czyli utworzone przez save_bone); inne pliki
+    w out_dir/bones/ nie są ruszane.
+
+    Args:
+        out_dir:  folder wyników (DATA_OUT).
+        keep_ids: id kości z bieżącego uruchomienia.
+
+    Returns:
+        Id usuniętych kości.
+    """
     removed = []
     for meta in (out_dir / "bones").glob("*/meta.json"):
         if meta.parent.name not in keep_ids:
@@ -156,10 +209,12 @@ def load_bones(out_dir: Path | None = None, features: bool = False) -> list[Bone
 
     Args:
         out_dir:  folder wyników (domyślnie DATA_OUT z settings.json).
-        features: wczytaj też chmurę punktów i FPFH (wolniej, potrzebne do dopasowania).
+        features: wczytaj też chmurę punktów i FPFH (wolniej; potrzebne do dopasowania
+                  i kolorów "fpfh"). False = bone.cloud i bone.fpfh są None.
 
     Returns:
-        Lista kości posortowana po id; pusta, jeśli nic jeszcze nie przygotowano.
+        Lista kości posortowana po id - ta kolejność wyznacza numery kości (1, 2, ...)
+        we wszystkich skryptach. Pusta, jeśli nic jeszcze nie przygotowano.
     """
     if out_dir is None:
         from config import DATA_OUT
@@ -182,7 +237,16 @@ def load_bones(out_dir: Path | None = None, features: bool = False) -> list[Bone
 def select_bones(bones: list[Bone], patterns: list[str] | None) -> list[Bone]:
     """Kości, których id lub nazwa zawiera którykolwiek z tekstów (bez wielkości liter).
 
-    Numer (np. "3") wybiera kość o tym numerze na liście (od 1).
+    Numer (np. "3") wybiera kość o tym numerze na liście (od 1); numer spoza listy
+    jest traktowany jak zwykły tekst. Tak działają argumenty skryptów, np.
+    `python scripts/show_bones.py 3 strzalkowa`.
+
+    Args:
+        bones:    wszystkie kości (z load_bones - numery wg tej listy).
+        patterns: numery albo fragmenty nazw; pusta lista / None = wszystkie kości.
+
+    Returns:
+        Wybrane kości w kolejności wzorców, bez powtórzeń.
 
     Raises:
         ValueError: jeśli któryś wzorzec nie pasuje do żadnej kości.
@@ -203,7 +267,19 @@ def select_bones(bones: list[Bone], patterns: list[str] | None) -> list[Bone]:
 
 
 def write_summary(bones: list[Bone], out_dir: Path) -> Path:
-    """Tabela kości out_dir/summary.csv (separator ";", kodowanie dla Excela)."""
+    """Zapisuje tabelę kości out_dir/summary.csv - do otwarcia w Excelu.
+
+    Jeden wiersz na kość: numer, id, nazwa, skany, skan referencyjny, sposób sklejenia,
+    liczba trójkątów, pole, wymiary, usunięty szum, liczba punktów chmury. Separator ";"
+    i UTF-8 z BOM - tak polski Excel od razu rozdziela kolumny i pokazuje polskie znaki.
+
+    Args:
+        bones:   kości z kompletnym meta (z finalize_bone albo load_bones).
+        out_dir: folder wyników.
+
+    Returns:
+        Ścieżka do summary.csv.
+    """
     path = out_dir / "summary.csv"
     cols = ["nr", "id", "nazwa", "skany", "skan_referencyjny", "polaczenie", "trojkaty", "pole_mm2",
             "wymiar_x_mm", "wymiar_y_mm", "wymiar_z_mm", "usuniety_szum_mm2", "punkty_chmury"]

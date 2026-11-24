@@ -1,0 +1,353 @@
+// Podgląd dopasowania z suwakami (serwer: src/match_tool.py).
+//
+// Stan:
+//   base        - ustawienia, z którymi policzono matching.json (startowe położenie suwaków),
+//   params      - obecne położenie suwaków,
+//   computed    - {klucz pary: {result, params}} - wyniki przeliczone na tej stronie,
+//   geometry    - {klucz powierzchni: siatki} - pobierane raz.
+// Zmiana suwaka przelicza TYLKO pokazaną parę. Gdy zmieniło się któreś z ustawień
+// szukania (SEARCH), para jest dopasowywana od nowa; gdy tylko ustawienia oceny -
+// oceniane jest obecne ustawienie (szybko). Zapytania nie nakładają się: w trakcie
+// liczenia zapamiętywane jest tylko ostatnie żądanie.
+
+const COLORS = { a: "#6f9fd8", b: "#e0c9a0", surf_a: "#e8508f", surf_b: "#18b0a6" };
+const LIGHTING = { ambient: 0.55, diffuse: 0.75, specular: 0.12, roughness: 0.65, fresnel: 0.05 };
+const ITERATIONS = [10000, 25000, 50000, 100000, 250000, 500000, 1000000, 2000000];
+
+// group: "search" = dopasowanie od nowa, "score" = tylko ocena
+const SLIDERS = [
+  { group: "search", key: "sample_mm", label: "Odstęp punktów powierzchni", unit: "mm", min: 0.15, max: 1, step: 0.05,
+    help: "Mniej = dokładniej i wolniej. Wpływa też na ocenę." },
+  { group: "search", key: "coarse_voxel_mm", label: "Odstęp punktów RANSAC", unit: "mm", min: 0.4, max: 3, step: 0.1,
+    help: "Rzadsze punkty zgrubnego ustawienia = szybciej, mniej dokładnie." },
+  { group: "search", key: "fpfh_radius_mm", label: "Promień FPFH", unit: "mm", min: 1, max: 10, step: 0.25,
+    help: "≈ wielkość nierówności przełomu, po których rozpoznawany jest kształt." },
+  { group: "search", key: "ransac_iterations", label: "Iteracje RANSAC", values: ITERATIONS,
+    help: "Więcej = pewniej trafia dobre ustawienie, czas rośnie liniowo." },
+  { group: "search", key: "ransac_seeds", label: "Próby RANSAC + ICP", min: 1, max: 8, step: 1,
+    help: "Niezależne próby, wygrywa najlepsza." },
+  { group: "search", key: "ransac_normal_angle_deg", label: "RANSAC: maks. różnica normalnych", unit: "°",
+    min: 5, max: 90, step: 1, help: "Odrzuca ustawienia z bardziej rozbieżnymi normalnymi." },
+  { group: "search", key: "icp_start_mm", label: "ICP: promień startowy", unit: "mm", min: 0.5, max: 6, step: 0.1,
+    help: "Do jakiej odległości ICP szuka par punktów (potem połowa, na koniec 2 × odstęp)." },
+  { group: "score", key: "tolerance_mm", label: "Styk: maks. odległość", unit: "mm", min: 0.1, max: 2, step: 0.05,
+    help: "Punkty bliżej niż to liczą się do styku…" },
+  { group: "score", key: "normal_angle_deg", label: "Styk: tolerancja kąta normalnych", unit: "°",
+    min: 5, max: 90, step: 1, help: "…jeśli ich normalne są przeciwne z tą dokładnością." },
+  { group: "score", key: "collision_mm", label: "Kolizja: głębokość", unit: "mm", min: 0.2, max: 4, step: 0.1,
+    help: "Punkt kości głębiej pod powierzchnią drugiej = kolizja." },
+  { group: "score", key: "collision_search_mm", label: "Kolizja: zasięg szukania", unit: "mm", min: 1, max: 10,
+    step: 0.5, help: "Sprawdzane tylko tak blisko drugiej kości." },
+];
+const SEARCH = SLIDERS.filter((s) => s.group === "search").map((s) => s.key);
+const ALL = SLIDERS.map((s) => s.key);
+
+const $ = (id) => document.getElementById(id);
+const state = { pairs: [], base: {}, params: {}, computed: {}, geometry: {}, current: 0,
+                busy: false, pending: null };
+
+// ---------- pomocnicze ----------
+
+async function api(url, options) {
+  const r = await fetch(url, options);
+  const data = await r.json();
+  if (!r.ok || data.error) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+function b64(s, Type) {
+  const bin = atob(s);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Type(bytes.buffer);
+}
+
+let toastTimer;
+function toast(msg, error = false) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast" + (error ? " error" : "");
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), error ? 8000 : 2500);
+}
+
+const pairKey = (p) => `${p.a}|${p.b}`;
+const fmt = (x, d = 0) => (x === null || x === undefined || Number.isNaN(x) ? "–" : Number(x).toFixed(d));
+const decimals = (step) => (String(step).split(".")[1] || "").length;
+const sameParams = (p, q, keys) => keys.every((k) => Number(p[k]) === Number(q[k]));
+
+function fmtValue(s, v) {
+  if (s.values) return Number(v).toLocaleString("pl-PL");
+  return `${Number(v).toFixed(decimals(s.step))}${s.unit ? " " + s.unit : ""}`;
+}
+
+// Wynik pary pokazywany teraz: przeliczony na stronie albo z matching.json.
+function shown(k) {
+  const p = state.pairs[k];
+  return state.computed[pairKey(p)] || { result: p, params: state.base };
+}
+
+// ---------- suwaki ----------
+
+function buildSliders() {
+  for (const s of SLIDERS) {
+    const box = document.createElement("div");
+    box.className = "slider";
+    const v0 = state.base[s.key];
+    const input = document.createElement("input");
+    input.type = "range";
+    if (s.values) {
+      if (!s.values.includes(v0)) s.values = [...s.values, v0].sort((x, y) => x - y);
+      Object.assign(input, { min: 0, max: s.values.length - 1, step: 1 });
+    } else {
+      Object.assign(input, { min: Math.min(s.min, v0), max: Math.max(s.max, v0), step: s.step });
+    }
+    input.id = "s-" + s.key;
+    box.innerHTML = `<div class="row"><label for="${input.id}">${s.label}</label><span class="v"></span></div>`;
+    box.appendChild(input);
+    box.insertAdjacentHTML("beforeend", `<div class="help">${s.help}</div>`);
+    const value = () => (s.values ? s.values[Number(input.value)] : Number(Number(input.value).toFixed(decimals(s.step))));
+    input.addEventListener("input", () => showValue(s, value()));
+    input.addEventListener("change", () => {
+      state.params[s.key] = value();
+      updateSnippet();
+      requestCompute(false);
+    });
+    s.input = input;
+    s.out = box.querySelector(".v");
+    $(s.group === "search" ? "slidersSearch" : "slidersScore").appendChild(box);
+  }
+  setSliders(state.base);
+}
+
+function showValue(s, v) {
+  s.out.textContent = fmtValue(s, v);
+  s.out.classList.toggle("changed", Number(v) !== Number(state.base[s.key]));
+}
+
+function setSliders(values) {
+  for (const s of SLIDERS) {
+    const v = values[s.key];
+    s.input.value = s.values ? s.values.indexOf(v) : v;
+    showValue(s, v);
+  }
+  state.params = Object.fromEntries(ALL.map((k) => [k, values[k]]));
+  updateSnippet();
+}
+
+function updateSnippet() {
+  const changed = ALL.filter((k) => Number(state.params[k]) !== Number(state.base[k]));
+  $("snippet").textContent = changed.length
+    ? changed.map((k) => `"${k}": ${state.params[k]},`).join("\n")
+    : "(bez zmian względem matching.json)";
+  $("copy").hidden = !changed.length;
+}
+
+// ---------- lista par ----------
+
+function renderList() {
+  const q = $("pairSearch").value.trim().toLowerCase();
+  const ul = $("pairList");
+  ul.innerHTML = "";
+  state.pairs.forEach((p, k) => {
+    if (q && !`${p.a_name} ${p.b_name}`.toLowerCase().includes(q)) return;
+    const li = document.createElement("li");
+    li.classList.toggle("active", k === state.current);
+    const c = state.computed[pairKey(p)];
+    let score = `<b>${fmt(p.score)}</b>`;
+    if (c) {
+      const cls = c.result.score > p.score + 0.5 ? "up" : c.result.score < p.score - 0.5 ? "down" : "";
+      score = `<span class="muted">${fmt(p.score)}</span><span class="new ${cls}">→ ${fmt(c.result.score)}</span>`;
+    }
+    li.innerHTML = `<span class="nr">${k + 1}.</span>
+      <span class="names"><span title="${p.a_name}">${p.a_name}</span><span class="sep">↔</span>
+      <span title="${p.b_name}">${p.b_name}</span></span><span class="score">${score}</span>`;
+    li.addEventListener("click", () => selectPair(k));
+    ul.appendChild(li);
+  });
+}
+
+// ---------- 3D ----------
+
+async function getGeometry(key) {
+  if (!state.geometry[key]) {
+    const g = await api(`/api/geometry?key=${encodeURIComponent(key)}`);
+    state.geometry[key] = {
+      name: g.name, label: g.label,
+      pos: b64(g.positions, Float32Array), idx: b64(g.indices, Uint32Array),
+      spos: b64(g.surf_positions, Float32Array), sidx: b64(g.surf_indices, Uint32Array),
+    };
+  }
+  return state.geometry[key];
+}
+
+// Rozbija (V, 3) na x, y, z; T (4x4) = przekształcenie albo null.
+function xyz(pos, T) {
+  const n = pos.length / 3;
+  const x = new Float32Array(n), y = new Float32Array(n), z = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const px = pos[3 * i], py = pos[3 * i + 1], pz = pos[3 * i + 2];
+    if (T) {
+      x[i] = T[0][0] * px + T[0][1] * py + T[0][2] * pz + T[0][3];
+      y[i] = T[1][0] * px + T[1][1] * py + T[1][2] * pz + T[1][3];
+      z[i] = T[2][0] * px + T[2][1] * py + T[2][2] * pz + T[2][3];
+    } else {
+      x[i] = px; y[i] = py; z[i] = pz;
+    }
+  }
+  return { x, y, z };
+}
+
+function meshTrace(pos, idx, T, color, name) {
+  const n = idx.length / 3;
+  const i = new Uint32Array(n), j = new Uint32Array(n), k = new Uint32Array(n);
+  for (let t = 0; t < n; t++) { i[t] = idx[3 * t]; j[t] = idx[3 * t + 1]; k[t] = idx[3 * t + 2]; }
+  return { type: "mesh3d", ...xyz(pos, T), i, j, k, color, name, showlegend: false, flatshading: false,
+           lighting: LIGHTING, lightposition: { x: -1e4, y: -2e4, z: 3e4 },
+           hovertemplate: `<b>${name}</b><extra></extra>` };
+}
+
+async function draw() {
+  const k = state.current;
+  const p = state.pairs[k];
+  const [ga, gb] = await Promise.all([getGeometry(p.a), getGeometry(p.b)]);
+  if (k !== state.current) return;                    // w międzyczasie wybrano inną parę
+  const T = shown(k).result.T;
+  const traces = [meshTrace(gb.pos, gb.idx, null, COLORS.b, "B: " + gb.label)];
+  if (gb.sidx.length) traces.push(meshTrace(gb.spos, gb.sidx, null, COLORS.surf_b, gb.name));
+  traces.push(meshTrace(ga.pos, ga.idx, T, COLORS.a, "A: " + ga.label));
+  if (ga.sidx.length) traces.push(meshTrace(ga.spos, ga.sidx, T, COLORS.surf_a, ga.name));
+  const axis = { visible: false };
+  Plotly.react("plot", traces, {
+    paper_bgcolor: "#f4f6f8", margin: { l: 0, r: 0, t: 0, b: 0 },
+    scene: { xaxis: axis, yaxis: axis, zaxis: axis, aspectmode: "data" },
+    uirevision: pairKey(p),                           // kamera zostaje przy przeliczaniu, zmienia się z parą
+  }, { displaylogo: false, scrollZoom: true, responsive: true });
+}
+
+// ---------- wynik ----------
+
+function renderResult() {
+  const k = state.current;
+  const p = state.pairs[k];
+  const { result: r, params } = shown(k);
+  const c = state.computed[pairKey(p)];
+  const was = (now, old, d = 0, unit = "") =>
+    c && Math.abs((now ?? 0) - (old ?? 0)) >= 0.5 * 10 ** -d
+      ? `<span class="was">było ${fmt(old, d)}${unit}</span>` : "";
+  const row = (lbl, val) => `<span class="lbl">${lbl}</span><span class="val">${val}</span>`;
+  $("resultCard").innerHTML = [
+    row("wynik = styk − kolizja", `<span class="big">${fmt(r.score)}</span> mm²${was(r.score, p.score)}`),
+    row("styk", `${fmt(r.contact_mm2)} mm²${was(r.contact_mm2, p.contact_mm2)}`),
+    row("pokrycie A / B", `${fmt(100 * r.cover_a)}% / ${fmt(100 * r.cover_b)}%`),
+    row("RMSE w styku", `${fmt(r.rmse_mm, 2)} mm${was(r.rmse_mm, p.rmse_mm, 2)}`),
+    row("kolizja kości", `${fmt(r.collision_mm2)} mm²${was(r.collision_mm2, p.collision_mm2)}`),
+    row("pola powierzchni A / B", `${fmt(p.a_area_mm2)} / ${fmt(p.b_area_mm2)} mm²`),
+    `<span class="foot">${c
+      ? (c.result.mode === "full" ? "Dopasowane od nowa" : "Nowa ocena tego samego ustawienia")
+        + ` w ${fmt(c.result.seconds, 1)} s` + (c.result.seed !== null && c.result.seed !== undefined
+          ? `, wygrała próba ${c.result.seed + 1}` : "")
+      : "Wynik z matching.json."}</span>`,
+  ].join("");
+  $("stale").hidden = sameParams(params, state.params, ALL) || state.busy;
+  $("pairTitle").innerHTML = `${k + 1}. <b>${p.a_name}</b> ↔ <b>${p.b_name}</b>`;
+}
+
+// ---------- przeliczanie ----------
+
+// force = dopasowanie od nowa nawet bez zmiany ustawień szukania (RANSAC jest losowy).
+function requestCompute(force) {
+  const prev = state.pending;
+  state.pending = { k: state.current, force: force || (prev && prev.k === state.current && prev.force) };
+  if (!state.busy) runPending();
+}
+
+async function runPending() {
+  const job = state.pending;
+  state.pending = null;
+  if (!job) return;
+  const p = state.pairs[job.k];
+  const cur = shown(job.k);
+  const params = { ...state.params };
+  const full = job.force || !sameParams(cur.params, params, SEARCH);
+  const body = { a: p.a, b: p.b, params, mode: full ? "full" : "score" };
+  if (!full) Object.assign(body, { T: cur.result.T, seed: cur.result.seed });
+  setBusy(true, full
+    ? `Dopasowuję od nowa… (RANSAC ${params.ransac_iterations.toLocaleString("pl-PL")} × ${params.ransac_seeds})`
+    : "Oceniam…");
+  try {
+    const r = await api("/api/match", { method: "POST", headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify(body) });
+    state.computed[pairKey(p)] = { result: r, params };
+    if (job.k === state.current) await draw();
+  } catch (e) {
+    toast("Błąd przeliczania: " + e.message, true);
+  } finally {
+    setBusy(false);
+    renderList();
+    renderResult();
+    if (state.pending) runPending();
+  }
+}
+
+function setBusy(on, text = "") {
+  state.busy = on;
+  $("busy").hidden = !on;
+  $("busyText").textContent = text;
+  $("status").hidden = !on;
+  $("status").textContent = "liczę…";
+  $("recompute").disabled = on;
+  if (on) $("stale").hidden = true;
+}
+
+async function selectPair(k) {
+  state.current = k;
+  renderList();
+  renderResult();
+  try {
+    await draw();
+  } catch (e) {
+    toast("Błąd wczytywania kości: " + e.message, true);
+  }
+}
+
+// ---------- start ----------
+
+async function main() {
+  const data = await api("/api/pairs");
+  state.pairs = data.pairs;
+  state.base = data.params;
+  $("pairCount").textContent = `(${state.pairs.length})`;
+  buildSliders();
+  $("pairSearch").addEventListener("input", renderList);
+  $("recompute").addEventListener("click", () => requestCompute(true));
+  $("recomputeStale").addEventListener("click", () => requestCompute(false));
+  $("reset").addEventListener("click", () => {          // suwaki i pokazana para wracają do matching.json
+    setSliders(state.base);
+    if (!state.busy) delete state.computed[pairKey(state.pairs[state.current])];
+    renderList();
+    renderResult();
+    draw();
+  });
+  $("copy").addEventListener("click", async () => {
+    await navigator.clipboard.writeText($("snippet").textContent);
+    toast("Skopiowano - wklej do settings.json, sekcja \"matching\"");
+  });
+  document.addEventListener("keydown", (e) => {         // strzałki góra / dół = poprzednia / następna para
+    if (e.target.tagName === "INPUT" || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    selectPair(Math.min(Math.max(state.current + step, 0), state.pairs.length - 1));
+    e.preventDefault();
+  });
+  if (!state.pairs.length) {
+    $("pairTitle").textContent = "Brak par w matching.json";
+    return;
+  }
+  await selectPair(0);
+}
+
+main().catch((e) => {
+  $("pairTitle").textContent = "Błąd";
+  toast(e.message, true);
+});

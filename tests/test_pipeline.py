@@ -12,12 +12,14 @@ Tworzy w folderze tymczasowym:
 Sprawdza: wyszukiwanie w podfolderach, grupowanie (A razem, B osobno), usunięcie szumu,
 zapis / odczyt kości, oznaczenia styku (zapis, odczyt, przeniesienie na inną siatkę),
 algorytm wykrywania (zapis w contacts/auto/, cache), dopasowanie powierzchni styku
-(tryby manual / auto / manual-auto, odnalezienie drugiej strony przełomu) i budowę wizualizacji.
+(tryby manual / auto / manual-auto, odnalezienie drugiej strony przełomu), przeliczanie jednej
+pary w podglądzie z suwakami (match_tool) i budowę wizualizacji.
 
 Uruchomienie (z głównego folderu projektu):
     python tests/test_pipeline.py
 """
 
+import json
 import sys
 import tempfile
 import time
@@ -34,6 +36,7 @@ import contacts as ct  # noqa: E402
 import matching_surfaces as ms  # noqa: E402
 from bones import FeatureParams, load_bones  # noqa: E402
 from data_parsing import ScanParams, find_scans  # noqa: E402
+from match_tool import MatchState  # noqa: E402
 from merging import MergeParams  # noqa: E402
 from pipeline import prepare_all  # noqa: E402
 from visualization_3d import (View3DParams, bones_figure, match_matrix_figure, matching_figure,  # noqa: E402
@@ -41,7 +44,12 @@ from visualization_3d import (View3DParams, bones_figure, match_matrix_figure, m
 
 
 def bumpy_sphere(seed: int, radius: float = 12.0) -> trimesh.Trimesh:
-    """Kula z losowymi wybrzuszeniami - kształt z cechami, które da się dopasować."""
+    """Kula z losowymi wybrzuszeniami - kształt z cechami, które da się dopasować.
+
+    Args:
+        seed:   ziarno - inne ziarno = inny kształt (inny "fragment kości").
+        radius: promień kuli przed wybrzuszeniami [mm] (30 wybrzuszeń i wgłębień, każde do ±2 mm).
+    """
     rng = np.random.default_rng(seed)
     m = trimesh.creation.icosphere(subdivisions=6, radius=1.0)
     u = m.vertices / np.linalg.norm(m.vertices, axis=1, keepdims=True)
@@ -55,7 +63,12 @@ def bumpy_sphere(seed: int, radius: float = 12.0) -> trimesh.Trimesh:
 
 
 def partial_scan(mesh: trimesh.Trimesh, view: np.ndarray, seed: int) -> trimesh.Trimesh:
-    """Część powierzchni widoczna z kierunku `view`, w losowym układzie współrzędnych."""
+    """Część powierzchni widoczna z kierunku `view`, w losowym układzie współrzędnych.
+
+    Zostają trójkąty po stronie `view` (trochę ponad połowę kuli), więc dwa skany z różnych
+    stron częściowo się pokrywają - jak prawdziwe skany tego samego fragmentu.
+    Potem losowy obrót i przesunięcie do ±30 mm (ziarno `seed`).
+    """
     view = np.asarray(view, dtype=float) / np.linalg.norm(view)
     centers = mesh.triangles_center / np.linalg.norm(mesh.triangles_center, axis=1, keepdims=True)
     part = mesh.submesh([np.flatnonzero(centers @ view > -0.15)], append=True)
@@ -69,6 +82,7 @@ def partial_scan(mesh: trimesh.Trimesh, view: np.ndarray, seed: int) -> trimesh.
 
 
 def save(mesh: trimesh.Trimesh, path: Path, color=(214, 196, 168)) -> None:
+    """Zapisuje siatkę z jednolitym kolorem wierzchołków (jak skaner) i tworzy foldery."""
     mesh = mesh.copy()
     mesh.visual.vertex_colors = np.tile([*color, 255], (len(mesh.vertices), 1)).astype(np.uint8)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +90,7 @@ def save(mesh: trimesh.Trimesh, path: Path, color=(214, 196, 168)) -> None:
 
 
 def make_scans(root: Path) -> None:
+    """Tworzy w `root` sztuczne skany opisane w docstringu modułu (A1-A3 + szum, B, occlusion, kopia .stl)."""
     a, b = bumpy_sphere(1), bumpy_sphere(2, radius=10.0)
     a1 = partial_scan(a, [1, 0, 0], 11)
     a2 = partial_scan(a, [0.3, 1, 0.2], 12)
@@ -92,12 +107,14 @@ def make_scans(root: Path) -> None:
 
 
 def check(cond: bool, msg: str) -> None:
+    """Wypisuje "OK" albo "BŁĄD" z opisem; przy błędzie kończy test kodem wyjścia 1."""
     print(("  OK   " if cond else "  BŁĄD ") + msg)
     if not cond:
         raise SystemExit(1)
 
 
 def main() -> None:
+    """Wszystkie sprawdzenia po kolei, w folderze tymczasowym (usuwany na końcu)."""
     start = time.perf_counter()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -215,6 +232,22 @@ def main() -> None:
         fig = matching_figure(results, {s.bone.id: s.bone for s in surfs}, {s.bone.id: s.contacts for s in surfs})
         check(len(results) > 0 and len(fig.data) >= 2 and len(match_matrix_figure(rep).data) == 1,
               f"figury dopasowania ({len(results)} par)")
+
+        print("Podgląd z suwakami (match_tool)")
+        rep["params"]["source"] = "manual-auto"
+        (out_dir / "matching.json").write_text(json.dumps(rep, ensure_ascii=False), encoding="utf-8")
+        tool = MatchState(out_dir, cp, View3DParams(triangles_total=20000), root)
+        top = rep["pairs"][0]
+        same = tool.match({"a": top["a"], "b": top["b"], "params": {}, "mode": "score", "T": top["T"]})
+        check(abs(same["score"] - top["score"]) < 1e-3, "ta sama para i ustawienia -> ten sam wynik oceny")
+        looser = tool.match({"a": top["a"], "b": top["b"], "params": {"tolerance_mm": 2.0}, "mode": "score",
+                             "T": top["T"]})
+        check(looser["contact_mm2"] >= same["contact_mm2"], "większa tolerancja styku -> styk nie mniejszy")
+        full = tool.match({"a": top["a"], "b": top["b"], "params": {"sample_mm": 0.5, "ransac_iterations": 20000},
+                           "mode": "full"})
+        check(len(full["T"]) == 4 and full["mode"] == "full", f"dopasowanie pary od nowa ({full['seconds']} s)")
+        g = tool.geometry(top["a"])
+        check(len(g["positions"]) > 0 and len(g["surf_indices"]) > 0, "geometria do strony (siatka + powierzchnia)")
     print(f"Wszystkie testy OK ({time.perf_counter() - start:.0f} s)")
 
 

@@ -21,6 +21,14 @@ Ten moduł:
 5. SKLEJA powierzchnię: "union" = cały skan referencyjny + trójkąty pozostałych skanów
    tylko tam, gdzie czegoś brakuje (oryginalna geometria i kolory), albo "poisson" =
    jedna gładka powierzchnia z rekonstrukcji Poissona.
+
+Kolejność wywołań (tak robi pipeline.prepare_all):
+    scans  = [prepare_scan(f, scan_params, merge_params) for f in files]
+    pairs  = pairwise(scans, merge_params, cache_file)          # krok 1
+    groups = group_scans(scans, pairs, merge_params)            # krok 2
+    merged = [merge_group(scans, g, pairs, merge_params) for g in groups]   # kroki 3-5
+Przekształcenia T to macierze 4x4 (obrót + przesunięcie, bez skalowania); T "a -> b"
+przenosi punkty z układu skanu a do układu skanu b: p_b = transform_points(T, p_a).
 """
 
 from __future__ import annotations
@@ -58,6 +66,8 @@ FUSE_METHODS = ("union", "poisson")
 
 @dataclass(frozen=True)
 class MergeParams:
+    """Ustawienia łączenia skanów (settings.json, sekcja "merging")."""
+
     enabled: bool = True              # false = każdy skan to osobna kość (bez łączenia)
     sample_mm: float = 0.25           # odstęp punktów używanych do porównywania skanów [mm]
     coarse_voxel_mm: float = 1.0      # rozdzielczość zgrubnej rejestracji (FPFH + RANSAC) [mm]
@@ -65,13 +75,18 @@ class MergeParams:
     min_overlap: float = 0.3          # nakładanie, od którego dwa skany = ta sama kość
     min_support: float = 0.25         # kawałek potwierdzony w mniejszej części = szum
     ransac_seeds: int = 3             # ile prób zgrubnej rejestracji na parę
-    ransac_iterations: int = 50000
+    ransac_iterations: int = 50000    # maks. iteracji jednej próby (może skończyć wcześniej)
     fuse_method: str = "union"        # "union" albo "poisson"
     poisson_depth: int = 9            # tylko dla "poisson": większa = więcej szczegółów
     groups: dict | None = None        # ręczne grupy {"nazwa": ["fragment nazwy skanu", ...]}
 
     def registration_key(self) -> str:
-        """Parametry wpływające na wynik rejestracji pary (klucz cache)."""
+        """Tekst z parametrów wpływających na wynik rejestracji pary - część klucza cache.
+
+        Zmiana któregoś z nich = pary liczone od nowa. Pozostałe ustawienia (min_overlap,
+        min_support, fuse_method, groups, ...) działają już na gotowych wynikach par,
+        więc ich zmiana nie wymaga ponownej rejestracji.
+        """
         return (f"s{self.sample_mm}-c{self.coarse_voxel_mm}-t{self.tolerance_mm}"
                 f"-r{self.ransac_seeds}x{self.ransac_iterations}")
 
@@ -82,7 +97,10 @@ class MergeParams:
 
 @dataclass
 class PreparedScan:
-    """Skan wczytany i naprawiony, z punktami do porównywania z innymi skanami."""
+    """Skan wczytany i naprawiony, z punktami do porównywania z innymi skanami (prepare_scan).
+
+    Wszystko jest w oryginalnym układzie współrzędnych skanu (tak, jak zapisał go skaner).
+    """
 
     file: ScanFile
     mesh: o3d.geometry.TriangleMesh       # wszystkie kawałki (szum usuwany dopiero przy łączeniu)
@@ -92,17 +110,29 @@ class PreparedScan:
     base_keep: np.ndarray                 # (K,) kawałek zostaje bez potwierdzenia (duży i blisko)
     sample: SurfaceSample                 # punkty na całej powierzchni (wszystkie kawałki)
     point_comp: np.ndarray                # (N,) numer kawałka każdego punktu
-    checksum: str
-    raw_stats: dict = field(default_factory=dict)
-    _cache: dict = field(default_factory=dict, repr=False)
+    checksum: str                         # skrót pliku skanu - klucz cache par (file_checksum)
+    raw_stats: dict = field(default_factory=dict)            # wierzchołki / trójkąty przed naprawą
+    _cache: dict = field(default_factory=dict, repr=False)   # chmury i KD-drzewo (clouds, tree)
 
     @property
     def main_points(self) -> np.ndarray:
-        """Maska punktów pewnych kawałków (używanych do rejestracji)."""
+        """Maska (N,) punktów leżących na pewnych kawałkach (base_keep).
+
+        Tylko te punkty są używane do rejestracji, żeby podejrzane kawałki (być może szum)
+        nie psuły dopasowania skanów.
+        """
         return self.base_keep[self.point_comp]
 
     def clouds(self, coarse_voxel: float):
-        """(chmura gęsta, chmura 2x rzadsza, chmura zgrubna, FPFH zgrubnej) - liczone raz."""
+        """Chmury punktów main_points do rejestracji - liczone raz dla danego `coarse_voxel`.
+
+        Args:
+            coarse_voxel: odstęp punktów chmury zgrubnej [mm] (MergeParams.coarse_voxel_mm).
+
+        Returns:
+            (gęsta - wszystkie punkty, średnia - co coarse_voxel / 2, zgrubna - co coarse_voxel,
+             FPFH zgrubnej w promieniu 5 x coarse_voxel); chmury z normalnymi.
+        """
         key = ("clouds", coarse_voxel)
         if key not in self._cache:
             m = self.main_points
@@ -116,12 +146,18 @@ class PreparedScan:
         return self._cache[key]
 
     def tree(self) -> cKDTree:
+        """KD-drzewo punktów main_points (szukanie najbliższych sąsiadów) - liczone raz."""
         if "tree" not in self._cache:
             self._cache["tree"] = cKDTree(self.sample.points[self.main_points])
         return self._cache["tree"]
 
 
 def file_checksum(path: Path) -> str:
+    """Skrót zawartości pliku: SHA-1, pierwsze 16 znaków hex.
+
+    Zmieniony plik skanu = inny skrót = jego pary są rejestrowane od nowa; zmiana samej
+    nazwy pliku albo folderu nie wymaga ponownego liczenia.
+    """
     h = hashlib.sha1()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -130,7 +166,19 @@ def file_checksum(path: Path) -> str:
 
 
 def prepare_scan(file: ScanFile, scan: ScanParams, merge: MergeParams) -> PreparedScan:
-    """Wczytuje skan, naprawia siatkę, dzieli na kawałki i losuje punkty powierzchni."""
+    """Wczytuje skan, naprawia siatkę, dzieli na kawałki i losuje punkty powierzchni.
+
+    Kawałki nie są jeszcze usuwane - o szumie decyduje dopiero merge_group, gdy wiadomo,
+    czy inne skany tej samej kości potwierdzają dany kawałek.
+
+    Args:
+        file:  skan z data_parsing.find_scans.
+        scan:  progi kawałków (min_component_area_ratio, max_component_gap_mm) -> base_keep.
+        merge: odstęp punktów sample (sample_mm).
+
+    Returns:
+        PreparedScan w oryginalnym układzie skanu.
+    """
     mesh = load_mesh(file.path)
     raw = {"vertices": len(mesh.vertices), "triangles": len(mesh.triangles)}
     repair_mesh(mesh)
@@ -149,12 +197,31 @@ def prepare_scan(file: ScanFile, scan: ScanParams, merge: MergeParams) -> Prepar
 # -----------------
 
 def transform_points(T: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    """Przekształca punkty (N, 3) macierzą 4x4 T (obrót + przesunięcie).
+
+    Normalne przekształca się samym obrotem: normals @ T[:3, :3].T.
+    """
     return pts @ T[:3, :3].T + T[:3, 3]
 
 
 def covered(points: np.ndarray, normals: np.ndarray, tree: cKDTree, target_normals: np.ndarray,
             tol: float, min_dot: float = 0.7) -> np.ndarray:
-    """Maska punktów, które mają sąsiada bliżej niż `tol` o podobnie skierowanej normalnej."""
+    """Maska punktów, które mają sąsiada bliżej niż `tol` o podobnie skierowanej normalnej.
+
+    Sprawdzany jest tylko NAJBLIŻSZY punkt drugiej powierzchni. Punkty i normalne muszą
+    być już w układzie drugiej powierzchni.
+
+    Args:
+        points:         (N, 3) sprawdzane punkty.
+        normals:        (N, 3) ich jednostkowe normalne.
+        tree:           KD-drzewo punktów drugiej powierzchni.
+        target_normals: (M, 3) normalne drugiej powierzchni, w kolejności punktów `tree`.
+        tol:            maks. odległość [mm].
+        min_dot:        min. iloczyn skalarny normalnych = cos kąta (0.7 ~ 45 stopni).
+
+    Returns:
+        (N,) maska bool.
+    """
     d, idx = tree.query(points, distance_upper_bound=tol)
     ok = np.isfinite(d)
     ok[ok] &= np.einsum("ij,ij->i", normals[ok], target_normals[idx[ok]]) > min_dot
@@ -162,7 +229,20 @@ def covered(points: np.ndarray, normals: np.ndarray, tree: cKDTree, target_norma
 
 
 def overlap(a: PreparedScan, b: PreparedScan, T: np.ndarray, tol: float) -> tuple[float, float]:
-    """(część punktów a pokryta przez b, część punktów b pokryta przez a) przy przekształceniu a->b T."""
+    """Jak bardzo skany a i b leżą na sobie przy przekształceniu T (a -> b).
+
+    Liczone tylko na main_points obu skanów, w obie strony (punkty a w układzie b
+    i punkty b przeniesione odwrotnością T do układu a).
+
+    Args:
+        a, b: skany.
+        T:    przekształcenie 4x4 z układu a do układu b.
+        tol:  maks. odległość punktów na tej samej powierzchni [mm].
+
+    Returns:
+        (ułamek punktów a pokrytych przez b, ułamek punktów b pokrytych przez a), w [0, 1].
+        Mniejszy skan, który w całości leży na większym, ma swój ułamek bliski 1.
+    """
     ma, mb = a.main_points, b.main_points
     pa, na = a.sample.points[ma], a.sample.normals[ma]
     pb, nb = b.sample.points[mb], b.sample.normals[mb]
@@ -173,8 +253,20 @@ def overlap(a: PreparedScan, b: PreparedScan, T: np.ndarray, tol: float) -> tupl
 
 
 def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, sample_mm: float) -> np.ndarray:
-    """ICP point-to-plane od luźnego do ścisłego progu (1.5 -> 0.6 mm na rzadszych chmurach,
-    potem 1 x odstęp punktów na gęstych)."""
+    """Dokładne ustawienie ICP point-to-plane, od luźnego do ścisłego progu.
+
+    Kolejno: pary punktów do 1.5 mm i do 0.6 mm na rzadszych chmurach, na koniec do
+    max(sample_mm, 0.2) mm na gęstych. Każdy etap - najwyżej 40 iteracji.
+
+    Args:
+        src_clouds: chmury źródła z PreparedScan.clouds (używane [0] gęsta i [1] średnia).
+        tgt_clouds: chmury celu w tej samej kolejności (wystarczą dwie: gęsta, średnia).
+        T:          przekształcenie startowe źródło -> cel (np. z RANSAC).
+        sample_mm:  odstęp punktów gęstych chmur [mm].
+
+    Returns:
+        Poprawione przekształcenie 4x4 źródło -> cel.
+    """
     crit = reg.ICPConvergenceCriteria(max_iteration=40)
     for dist, k in ((1.5, 1), (0.6, 1), (max(sample_mm, 0.2), 0)):
         T = reg.registration_icp(src_clouds[k], tgt_clouds[k], dist, T,
@@ -185,8 +277,17 @@ def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, sample_mm: float) -> np.nd
 def register_pair(a: PreparedScan, b: PreparedScan, p: MergeParams) -> dict:
     """Szuka przekształcenia sztywnego a -> b, które najlepiej nakłada skany.
 
+    Do p.ransac_seeds prób: zgrubnie RANSAC na FPFH (chmury co coarse_voxel_mm), potem
+    refine_icp. Wygrywa próba z największym nakładaniem. Kończy wcześniej, gdy wynik
+    jest pewny (nakładanie >= max(0.5, 1.5 x min_overlap)).
+
+    Args:
+        a, b: skany.
+        p:    ustawienia łączenia.
+
     Returns:
-        {"overlap": max z obu kierunków, "overlap_a", "overlap_b", "T": macierz 4x4 (lista)}.
+        {"overlap": max z obu kierunków, "overlap_a", "overlap_b" (jak w overlap()),
+         "T": macierz 4x4 (lista list) z układu a do układu b}.
     """
     ca, cb = a.clouds(p.coarse_voxel_mm), b.clouds(p.coarse_voxel_mm)
     vox = p.coarse_voxel_mm
@@ -210,7 +311,22 @@ def register_pair(a: PreparedScan, b: PreparedScan, p: MergeParams) -> dict:
 
 def pairwise(scans: list[PreparedScan], p: MergeParams, cache_file: Path | None = None,
              progress=print) -> dict[tuple[int, int], dict]:
-    """Rejestruje wszystkie pary skanów (i < j). Wyniki z cache są brane bez liczenia."""
+    """Rejestruje wszystkie pary skanów (i < j). Wyniki z cache są brane bez liczenia.
+
+    Klucz cache = skróty plików obu skanów + MergeParams.registration_key(), więc wynik
+    zostaje ważny po zmianie nazw plików, a przestaje - po zmianie skanu albo ustawień
+    rejestracji. Para zapisana w odwrotnej kolejności też jest wykorzystywana. Nowe
+    wyniki są dopisywane do pliku co 10 par (przerwanie nie traci wszystkiego).
+
+    Args:
+        scans:      wszystkie skany.
+        p:          ustawienia łączenia.
+        cache_file: plik JSON z wynikami (np. out/3d/cache/pairs.json); None = bez cache.
+        progress:   funkcja do wypisywania postępu (np. print).
+
+    Returns:
+        {(i, j): wynik register_pair} dla każdej pary i < j (indeksy w `scans`).
+    """
     cache = {}
     if cache_file and cache_file.exists():
         try:
@@ -245,13 +361,17 @@ def pairwise(scans: list[PreparedScan], p: MergeParams, cache_file: Path | None 
 
 
 def pair_T(pairs: dict, i: int, j: int) -> np.ndarray:
-    """Przekształcenie skan i -> skan j."""
+    """Przekształcenie 4x4 z układu skanu i do układu skanu j (dowolna kolejność i, j).
+
+    Gdy w `pairs` jest tylko para (j, i), zwracana jest odwrotność jej przekształcenia.
+    """
     if (i, j) in pairs:
         return np.asarray(pairs[i, j]["T"])
     return np.linalg.inv(np.asarray(pairs[j, i]["T"]))
 
 
 def pair_overlap(pairs: dict, i: int, j: int) -> float:
+    """Nakładanie skanów i, j (wynik register_pair, niezależnie od kolejności)."""
     return pairs[(i, j) if (i, j) in pairs else (j, i)]["overlap"]
 
 
@@ -260,6 +380,7 @@ def pair_overlap(pairs: dict, i: int, j: int) -> float:
 # -----------------
 
 def _matches(scan: PreparedScan, pattern: str) -> bool:
+    """Czy `pattern` (bez wielkości liter) występuje w id, nazwie albo ścieżce skanu."""
     p = pattern.lower()
     return p in scan.file.id.lower() or p in scan.file.label.lower() or p in str(scan.file.path).lower()
 
@@ -268,10 +389,21 @@ def group_scans(scans: list[PreparedScan], pairs: dict, p: MergeParams) -> list[
     """Dzieli skany na kości.
 
     Ręczne grupy z `p.groups` mają pierwszeństwo; pozostałe skany są grupowane
-    automatycznie (nakładanie >= min_overlap, spójne składowe grafu).
+    automatycznie (nakładanie >= min_overlap, spójne składowe grafu). Przy
+    p.enabled = False każdy skan spoza ręcznych grup jest osobną kością.
+
+    Args:
+        scans: wszystkie skany.
+        pairs: wyniki pairwise (dla p.enabled = False mogą być puste).
+        p:     ustawienia (min_overlap, enabled, groups).
 
     Returns:
-        Lista {"name": nazwa ręczna albo None, "members": [indeksy skanów]}.
+        Lista {"name": nazwa ręczna albo None, "members": [indeksy skanów rosnąco]};
+        najpierw grupy ręczne w kolejności z settings.json.
+
+    Raises:
+        ValueError: wzorzec ręcznej grupy nie pasuje do żadnego skanu albo skan
+                    pasuje do dwóch różnych ręcznych grup.
     """
     n = len(scans)
     assigned: dict[int, str] = {}
@@ -295,6 +427,7 @@ def group_scans(scans: list[PreparedScan], pairs: dict, p: MergeParams) -> list[
     parent = list(range(n))
 
     def find(x):
+        """Korzeń grupy skanu x (union-find ze skracaniem ścieżek)."""
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
@@ -324,6 +457,16 @@ def align_group(scans: list[PreparedScan], members: list[int], pairs: dict, p: M
     Kolejność dołączania: drzewo najlepszych nakładań od skanu referencyjnego
     (algorytm Prima), potem każdy skan jest dopracowany ICP względem już
     ustawionych skanów (a nie tylko jednego sąsiada).
+
+    Args:
+        scans:   wszystkie skany.
+        members: indeksy skanów grupy (z `ref`).
+        pairs:   wyniki pairwise - muszą zawierać wszystkie pary w grupie.
+        p:       ustawienia łączenia.
+        ref:     indeks skanu referencyjnego.
+
+    Returns:
+        {indeks skanu: macierz 4x4 z układu tego skanu do układu `ref`}; T[ref] = I.
     """
     T = {ref: np.eye(4)}
     order = [ref]
@@ -346,6 +489,15 @@ def align_group(scans: list[PreparedScan], members: list[int], pairs: dict, p: M
 
 def component_support(scans: list[PreparedScan], members: list[int], T: dict, p: MergeParams) -> dict:
     """Dla każdego skanu: jaka część punktów każdego kawałka leży na innym skanie grupy.
+
+    Liczone na WSZYSTKICH kawałkach (także podejrzanych o szum), z luźniejszą tolerancją
+    niż przy grupowaniu: 2 x tolerance_mm i normalne do ~60 stopni - skany są już ustawione.
+
+    Args:
+        scans:   wszystkie skany.
+        members: indeksy skanów grupy.
+        T:       przekształcenia z align_group (skan -> układ referencyjny).
+        p:       ustawienia łączenia.
 
     Returns:
         {indeks_skanu: tablica (K,) ułamków w [0, 1]}; dla grupy z jednym skanem - zera.
@@ -370,7 +522,20 @@ def component_support(scans: list[PreparedScan], members: list[int], T: dict, p:
 
 
 def decide_components(scan: PreparedScan, support: np.ndarray, p: MergeParams) -> tuple[np.ndarray, list[str]]:
-    """Które kawałki skanu zostają. Zwraca (maska (K,), powód dla każdego kawałka)."""
+    """Które kawałki skanu zostają, a które są szumem.
+
+    Kawałek zostaje, jeśli jest głównym kawałkiem (0), albo potwierdzają go inne skany
+    (support >= p.min_support), albo jest duży i blisko głównego (scan.base_keep).
+
+    Args:
+        scan:    skan.
+        support: (K,) potwierdzenie kawałków z component_support.
+        p:       ustawienia (min_support).
+
+    Returns:
+        (maska (K,) - True = zostaje, czytelny powód dla każdego kawałka - do meta.json
+         i wizualizacji; powody usuniętych zaczynają się od "SZUM").
+    """
     keep = scan.base_keep | (support >= p.min_support)
     keep[0] = True
     reasons = []
@@ -397,10 +562,17 @@ def fuse_union(meshes: list[o3d.geometry.TriangleMesh], spacing: float,
     """Suma skanów bez nakładania: pierwszy w całości, z kolejnych tylko nowe miejsca.
 
     Trójkąt kolejnego skanu jest dodawany, jeśli jego środek jest dalej niż `cover_mm`
-    od powierzchni już dodanej. Bardzo małe dodane skrawki (wzdłuż szwów) są pomijane.
+    od powierzchni już dodanej. Bardzo małe dodane skrawki (< 2 mm², wzdłuż szwów)
+    są pomijane. Geometria i kolory zostają oryginalne, ale w miejscach styku skanów
+    są szwy (siatka nie jest zszywana).
+
+    Args:
+        meshes:   siatki skanów w jednym układzie, najważniejszy (referencyjny) pierwszy.
+        spacing:  odstęp punktów, którymi opisywana jest już dodana powierzchnia [mm].
+        cover_mm: odległość, od której miejsce uznaje się za jeszcze niepokryte [mm].
 
     Returns:
-        (siatka, numer skanu źródłowego dla każdego trójkąta (T,)).
+        (siatka, numer skanu źródłowego dla każdego trójkąta (T,) - indeks w `meshes`).
     """
     out = o3d.geometry.TriangleMesh(meshes[0])
     source = np.zeros(len(out.triangles), dtype=np.int32)
@@ -428,7 +600,16 @@ def fuse_poisson(meshes: list[o3d.geometry.TriangleMesh], spacing: float, depth:
     """Jedna powierzchnia z rekonstrukcji Poissona (punkty bez nakładania, jak w fuse_union).
 
     Powierzchnia Poissona dalej niż 2 x `spacing` od punktów skanów (domknięcia
-    "na wyobraźnię") jest wycinana.
+    "na wyobraźnię") jest wycinana, tak samo kawałki mniejsze niż 5% największego.
+
+    Args:
+        meshes:   siatki skanów w jednym układzie, najważniejszy pierwszy.
+        spacing:  odstęp punktów [mm].
+        depth:    głębokość drzewa Poissona (większa = więcej szczegółów, wolniej).
+        cover_mm: punkty kolejnego skanu bliżej niż to od wcześniejszych są pomijane [mm].
+
+    Returns:
+        (siatka, zera (T,) - powierzchnia jest wspólna, nie pochodzi z jednego skanu).
     """
     pts, nrm, col = [], [], []
     for m in meshes:
@@ -458,11 +639,27 @@ class MergedBone:
     scan_ids: list[str]                                 # kolejność = kolejność w `source`
     scan_meshes: dict[str, o3d.geometry.TriangleMesh]   # zostawione kawałki każdego skanu
     noise_meshes: dict[str, o3d.geometry.TriangleMesh]  # usunięte kawałki (szum)
-    meta: dict
+    meta: dict                                          # opis do meta.json: skany, kawałki, ustawienia
 
 
 def merge_group(scans: list[PreparedScan], group: dict, pairs: dict, p: MergeParams) -> MergedBone:
-    """Ustawia skany grupy, usuwa szum i skleja jedną powierzchnię."""
+    """Ustawia skany grupy, usuwa szum i skleja jedną powierzchnię (kroki 3-5 z opisu modułu).
+
+    Skan referencyjny = skan o największym polu pewnych kawałków; jego układ jest układem
+    kości. Id kości = nazwa ręcznej grupy (jako slug) albo id skanu referencyjnego.
+
+    Args:
+        scans: wszystkie skany.
+        group: jedna grupa z group_scans ({"name", "members"}).
+        pairs: wyniki pairwise.
+        p:     ustawienia łączenia (fuse_method, poisson_depth, min_support, ...).
+
+    Returns:
+        MergedBone - jeszcze bez wyśrodkowania i chmury punktów (to bones.finalize_bone).
+
+    Raises:
+        ValueError: nieznane p.fuse_method (sprawdzane tylko dla grup z kilku skanów).
+    """
     from data_parsing import slugify
 
     members = group["members"]

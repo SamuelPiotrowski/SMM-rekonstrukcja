@@ -1,5 +1,10 @@
 // Narzędzie do oznaczania powierzchni styku (serwer: src/contact_tool.py).
 // Etykiety są przypisane do wierzchołków siatki: 0 = brak, k = powierzchnia k.
+//
+// Przebieg: init() pobiera listę kości (GET /api/bones) -> loadBone() pobiera siatkę
+// i etykiety (GET /api/bones/<id>) -> malowanie zmienia S.cur.labels w pamięci ->
+// save() wysyła etykiety na serwer (PUT /api/bones/<id>/contacts).
+// Współrzędne P / N są w układzie kości (mm); obrót do widoku robi tylko mesh.matrix.
 import * as THREE from 'three';
 import { OrbitControls } from '/vendor/OrbitControls.js';
 
@@ -8,6 +13,17 @@ const MAX_UNDO = 60;
 const BONE_COLOR = [0.86, 0.82, 0.75];
 const MIX = 0.78;                      // jak mocno kolor powierzchni przykrywa kolor skanu
 
+/**
+ * Stan strony.
+ * - bones, palette, detectors: z GET /api/bones (ToolState.summary),
+ * - cur: wczytana kość (loadBone) - {id, label, nV: liczba wierzchołków, P: pozycje (3*nV),
+ *   N: normalne, Ns: wygładzone normalne (do różdżki), I: trójkąty (3*T), C: kolory skanera
+ *   uint8, adj: sąsiedztwo (buildAdjacency), area: pole na wierzchołek [mm²],
+ *   labels: Uint8Array etykiet, names: {k: nazwa}},
+ * - tool / brush [mm] / wand [stopnie] / active (malowana powierzchnia) / scanColors,
+ * - dirty: są niezapisane zmiany, undo / redo: stos snapshot(), painting / lastHit: trwa
+ *   pociągnięcie pędzla, busy: trwa wczytywanie albo algorytm.
+ */
 const S = {
   bones: [], palette: [], detectors: [],
   cur: null,                           // aktualna kość
@@ -43,6 +59,7 @@ cursor.renderOrder = 10;
 cursor.visible = false;
 scene.add(cursor);
 
+/** Dopasowuje rozmiar obrazu i proporcje kamery do rozmiaru obszaru 3D. */
 function resize() {
   const r = canvas.parentElement.getBoundingClientRect();
   renderer.setSize(r.width, r.height, false);
@@ -54,21 +71,33 @@ resize();
 renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
 
 // ---------------------------------------------------------------- pomocnicze
+// Kolory w buforze three.js są liniowe, a skaner i paleta zapisują sRGB - stąd przeliczenia.
+// SRGB_LIN[0..255] = wartość liniowa składowej sRGB.
 const SRGB_LIN = new Float32Array(256).map((_, i) => { const c = i / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
 const hexLin = (hex) => { const c = new THREE.Color(hex); return [c.r, c.g, c.b]; };   // THREE.Color zamienia sRGB -> liniowy
 const boneLin = BONE_COLOR.map((c) => SRGB_LIN[Math.round(c * 255)]);
+/** Kolor "#rrggbb" powierzchni k - ta sama paleta co w Pythonie (contacts.surface_color). */
 const surfColor = (k) => S.palette[(k - 1) % S.palette.length];
 
+/** Base64 -> Uint8Array; `.buffer` można potem czytać jako Float32Array / Uint32Array. */
 function b64ToBytes(b64) {
   const bin = atob(b64); const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
+/** Uint8Array -> base64 (w kawałkach po 32 KB, bo duże tablice przepełniają stos w apply). */
 function bytesToB64(bytes) {
   let s = '';
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   return btoa(s);
 }
+/**
+ * Zapytanie JSON do serwera narzędzia.
+ * @param {string} path  np. '/api/bones'
+ * @param {object} opts  opcje fetch (method, body, ...)
+ * @returns {Promise<object>} odpowiedź serwera
+ * @throws {Error} z komunikatem serwera ({"error": ...}), gdy odpowiedź nie jest OK
+ */
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
   const data = await r.json().catch(() => ({}));
@@ -76,13 +105,22 @@ async function api(path, opts = {}) {
   return data;
 }
 let toastTimer;
+/** Dymek z komunikatem na dole strony; kind: '' / 'ok' / 'error' (błąd wisi dłużej). */
 function toast(msg, kind = '') {
   const t = $('toast'); t.textContent = msg; t.className = `toast show ${kind}`;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.className = 'toast'), kind === 'error' ? 6000 : 2600);
 }
+/** Liczba w polskim formacie (przecinek dziesiętny) z dokładnie `d` miejscami po przecinku. */
 const fmt = (x, d = 0) => x.toLocaleString('pl-PL', { maximumFractionDigits: d, minimumFractionDigits: d });
 
 // ---------------------------------------------------------------- kość
+/**
+ * Sąsiedzi każdego wierzchołka po krawędziach siatki (format CSR).
+ * Sąsiedzi wierzchołka i: nb[start[i]] ... nb[start[i + 1] - 1] (mogą się powtarzać).
+ * @param {number} nV            liczba wierzchołków
+ * @param {Uint32Array} idx      trójkąty (3 indeksy na trójkąt)
+ * @returns {{start: Uint32Array, nb: Uint32Array}}
+ */
 function buildAdjacency(nV, idx) {
   const deg = new Uint32Array(nV + 1);
   for (let t = 0; t < idx.length; t += 3) { deg[idx[t]] += 2; deg[idx[t + 1]] += 2; deg[idx[t + 2]] += 2; }
@@ -96,6 +134,11 @@ function buildAdjacency(nV, idx) {
   return { start, nb };
 }
 
+/**
+ * Normalne wygładzone `iters` razy (średnia z sąsiadami). Różdżka porównuje wygładzone
+ * normalne, żeby drobna szorstkość przełomu jej nie zatrzymywała - tylko ostre krawędzie.
+ * @returns {Float32Array} nowe normalne jednostkowe (N bez zmian)
+ */
 function smoothNormals(N, adj, iters) {
   let cur = N.slice();
   for (let it = 0; it < iters; it++) {
@@ -110,6 +153,7 @@ function smoothNormals(N, adj, iters) {
   return cur;
 }
 
+/** Pole na wierzchołek = 1/3 pól sąsiednich trójkątów [mm²] - jak contacts.vertex_areas. */
 function vertexAreas(P, idx, nV) {
   const A = new Float32Array(nV);
   for (let t = 0; t < idx.length; t += 3) {
@@ -122,6 +166,11 @@ function vertexAreas(P, idx, nV) {
   return A;
 }
 
+/**
+ * Wczytuje kość z serwera i pokazuje ją. Niezapisane zmiany poprzedniej kości są
+ * najpierw zapisywane; historia cofania jest czyszczona. Id kości trafia do adresu (#id),
+ * więc odświeżenie strony wraca do tej samej kości.
+ */
 async function loadBone(id) {
   if (S.busy) return;
   if (S.cur && S.dirty) await save(true);
@@ -169,6 +218,7 @@ async function loadBone(id) {
   }
 }
 
+/** Kamera na wprost całej kości; flip = true - od drugiej strony. */
 function resetView(flip = false) {
   if (!mesh) return;
   const s = mesh.geometry.boundingSphere;
@@ -181,6 +231,7 @@ function resetView(flip = false) {
 }
 
 // ---------------------------------------------------------------- kolory i statystyki
+/** Przelicza kolory wszystkich wierzchołków: skaner (albo jednolity) + kolor powierzchni (MIX). */
 function recolor() {
   const c = S.cur; if (!c) return;
   const col = mesh.geometry.attributes.color.array;
@@ -196,6 +247,10 @@ function recolor() {
   mesh.geometry.attributes.color.needsUpdate = true;
 }
 
+/**
+ * Numery powierzchni bieżącej kości, rosnąco.
+ * @param {boolean} includeNamed  true = także nazwane, ale jeszcze puste (np. świeżo dodane)
+ */
 function surfaceIds(includeNamed = true) {
   const c = S.cur; if (!c) return [];
   const seen = new Set();
@@ -204,12 +259,14 @@ function surfaceIds(includeNamed = true) {
   return [...seen].sort((a, b) => a - b);
 }
 
+/** Pole każdej powierzchni {k: mm²} (tylko niepuste). */
 function surfaceAreas() {
   const c = S.cur; const out = {};
   for (let i = 0; i < c.nV; i++) { const k = c.labels[i]; if (k) out[k] = (out[k] || 0) + c.area[i]; }
   return out;
 }
 
+/** Pasek statystyk: wierzchołki, pole kości, pole oznaczone. */
 function updateStats() {
   const c = S.cur; if (!c) return;
   const areas = surfaceAreas(); const marked = Object.values(areas).reduce((a, b) => a + b, 0);
@@ -218,8 +275,10 @@ function updateStats() {
 }
 
 // ---------------------------------------------------------------- listy
+/** Tekst bezpieczny do wstawienia w innerHTML (nazwy nadaje użytkownik). */
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 
+/** Lista kości w panelu (z filtrem z pola wyszukiwania) i licznik oznaczonych. */
 function renderBoneList() {
   const q = $('boneSearch').value.trim().toLowerCase();
   const ul = $('boneList'); ul.innerHTML = '';
@@ -239,6 +298,7 @@ function renderBoneList() {
   $('boneCount').textContent = `${S.bones.filter((b) => b.surfaces.length).length}/${S.bones.length} oznaczonych`;
 }
 
+/** Lista powierzchni bieżącej kości: kolor, nazwa (dwuklik = zmiana), pole, usuwanie. */
 function renderSurfaces() {
   const ul = $('surfaceList'); ul.innerHTML = '';
   const c = S.cur; if (!c) return;
@@ -261,6 +321,7 @@ function renderSurfaces() {
   }
 }
 
+/** Zamienia nazwę powierzchni k na pole tekstowe; Enter / wyjście = zapisz, Esc = anuluj. */
 function renameSurface(li, k) {
   const span = li.querySelector('.label');
   const input = document.createElement('input');
@@ -274,6 +335,7 @@ function renameSurface(li, k) {
   input.onblur = () => done(true);
 }
 
+/** Dodaje pustą powierzchnię o kolejnym numerze i ustawia ją jako malowaną (najwyżej 255). */
 function newSurface() {
   if (!S.cur) return;
   const ids = surfaceIds();
@@ -284,6 +346,7 @@ function newSurface() {
   S.active = k; setDirty(true); renderSurfaces(); updateCursorColor();
 }
 
+/** Usuwa powierzchnię k (niepustą - po potwierdzeniu); Ctrl+Z cofa. */
 function deleteSurface(k) {
   const c = S.cur;
   const area = surfaceAreas()[k] || 0;
@@ -296,8 +359,11 @@ function deleteSurface(k) {
 }
 
 // ---------------------------------------------------------------- cofanie
+/** Kopia etykiet i nazw bieżącej kości (jeden krok historii). */
 function snapshot() { return { labels: S.cur.labels.slice(), names: { ...S.cur.names } }; }
+/** Zapamiętuje stan PRZED zmianą (najwyżej MAX_UNDO kroków); nowa zmiana czyści "ponów". */
 function pushUndo() { S.undo.push(snapshot()); if (S.undo.length > MAX_UNDO) S.undo.shift(); S.redo = []; }
+/** Cofnij: restore(S.undo, S.redo); ponów: restore(S.redo, S.undo). */
 function restore(from, to) {
   if (!S.cur || !from.length) return;
   to.push(snapshot());
@@ -305,8 +371,11 @@ function restore(from, to) {
   if (!surfaceIds().includes(S.active)) S.active = surfaceIds()[0] || 1;
   setDirty(true); afterEdit();
 }
+/** Odświeża wszystko, co zależy od etykiet (kolory, lista powierzchni, statystyki, przyciski). */
 function afterEdit() { recolor(); renderSurfaces(); updateStats(); updateButtons(); }
+/** Ustawia znacznik niezapisanych zmian (plakietka przy tytule). */
 function setDirty(v) { S.dirty = v; $('dirtyBadge').hidden = !v; updateButtons(); }
+/** Włącza / wyłącza przyciski cofnij, ponów, zapisz. */
 function updateButtons() {
   $('undoBtn').disabled = !S.undo.length; $('redoBtn').disabled = !S.redo.length;
   $('saveBtn').disabled = !S.cur;
@@ -317,6 +386,11 @@ const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 const invMatrix = new THREE.Matrix4();
 
+/**
+ * Punkt kości pod kursorem myszy.
+ * @returns {null | {world, local, normal, face, viewNormal}} - local / normal w układzie
+ *   kości (jak P, N), world / viewNormal w układzie sceny (do kursora), face: trafiony trójkąt
+ */
 function pick(ev) {
   if (!mesh) return null;
   const r = canvas.getBoundingClientRect();
@@ -329,6 +403,12 @@ function pick(ev) {
   return { world: hit.point, local, normal: hit.face.normal.clone(), face: hit.face, viewNormal: hit.face.normal.clone().transformDirection(mesh.matrixWorld) };
 }
 
+/**
+ * Nadaje etykietę `label` wierzchołkom w kuli o promieniu S.brush wokół p (układ kości).
+ * Pomija wierzchołki z normalną przeciwną do n - inaczej pędzel przebiłby cienką kość
+ * i malował też drugą stronę.
+ * @returns {boolean} czy coś się zmieniło
+ */
 function paintSphere(p, n, label) {
   const c = S.cur, P = c.P, N = c.N, L = c.labels, r2 = S.brush * S.brush;
   let changed = false;
@@ -341,6 +421,7 @@ function paintSphere(p, n, label) {
   return changed;
 }
 
+/** Jeden krok pociągnięcia pędzlem / gumką do punktu `hit` (z wypełnieniem przerw po drodze). */
 function strokeTo(hit) {
   const label = S.tool === 'eraser' ? 0 : S.active;
   let changed = false;
@@ -360,6 +441,11 @@ function strokeTo(hit) {
   if (changed) { recolor(); setDirty(true); }
 }
 
+/**
+ * Różdżka: wypełnia obszar od klikniętego wierzchołka po sąsiadach, dopóki wygładzone
+ * normalne sąsiadów różnią się o mniej niż S.wand stopni (zatrzymuje się na ostrych krawędziach).
+ * Nie wchodzi na inne powierzchnie. erase = true - usuwa oznaczenia z obszaru.
+ */
 function wandAt(hit, erase) {
   const c = S.cur;
   const f = hit.face;
@@ -407,6 +493,7 @@ canvas.addEventListener('pointermove', (ev) => {
   placeCursor(hit);
   if (S.painting && hit) strokeTo(hit);
 });
+/** Koniec pociągnięcia; jeśli nic nie zmieniło, nie zostawia pustego kroku w historii. */
 const endStroke = () => {
   if (!S.painting) return;
   S.painting = false; S.lastHit = null;
@@ -417,8 +504,10 @@ canvas.addEventListener('pointerup', endStroke);
 canvas.addEventListener('pointercancel', endStroke);
 canvas.addEventListener('pointerleave', () => (cursor.visible = false));
 
+/** Czy dwie tablice mają te same elementy. */
 function arraysEqual(a, b) { if (a.length !== b.length) return false; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; }
 
+/** Kółko kursora na powierzchni kości (rozmiar = pędzel; przy różdżce stały, mały). */
 function placeCursor(hit) {
   if (!hit) { cursor.visible = false; return; }
   cursor.visible = true;
@@ -428,6 +517,7 @@ function placeCursor(hit) {
   cursor.lookAt(hit.world.clone().add(hit.viewNormal));
 }
 
+/** Kolor kursora = kolor malowanej powierzchni (gumka - ciemny). */
 function updateCursorColor() {
   cursor.material.color.set(S.tool === 'eraser' ? '#1f2a36' : surfColor(S.active));
 }
@@ -443,6 +533,7 @@ const HINTS = {
   eraser: '<b>Lewy</b>: usuń oznaczenie · <b>Prawy</b>: obracaj · <b>Kółko</b>: zoom · <b>[ ]</b>: rozmiar',
   wand: '<b>Klik</b>: zaznacz obszar · <b>Shift+klik</b>: usuń obszar · <b>Prawy</b>: obracaj · <b>[ ]</b>: tolerancja',
 };
+/** Wybiera narzędzie 'brush' / 'eraser' / 'wand' (przyciski, suwaki, podpowiedzi). */
 function setTool(t) {
   S.tool = t;
   document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
@@ -450,7 +541,9 @@ function setTool(t) {
   $('toolTip').textContent = TIPS[t]; $('hint').innerHTML = HINTS[t];
   updateCursorColor();
 }
+/** Promień pędzla / gumki [mm], 0.2-10. */
 function setBrush(v) { S.brush = Math.min(10, Math.max(0.2, v)); $('brushSize').value = S.brush; $('brushVal').textContent = `${fmt(S.brush, 1)} mm`; }
+/** Tolerancja kąta różdżki [stopnie], 5-70. */
 function setWand(v) { S.wand = Math.min(70, Math.max(5, Math.round(v))); $('wandAngle').value = S.wand; $('wandVal').textContent = `${S.wand}°`; }
 
 document.querySelectorAll('.tool').forEach((b) => (b.onclick = () => setTool(b.dataset.tool)));
@@ -474,6 +567,10 @@ $('helpBtn').onclick = () => ($('help').hidden = false);
 $('helpClose').onclick = () => { $('help').hidden = true; try { localStorage.setItem('contactToolHelpSeen', '1'); } catch (e) { /* brak dostępu */ } };
 $('help').onclick = (e) => { if (e.target.id === 'help') $('help').hidden = true; };
 
+/**
+ * Zapisuje etykiety i nazwy niepustych powierzchni na serwerze (contacts/<id>.json).
+ * @param {boolean} silent  true = przy błędzie rzuca wyjątek (np. przy zmianie kości)
+ */
 async function save(silent) {
   const c = S.cur; if (!c) return;
   const ids = new Set(surfaceIds(false));
@@ -491,6 +588,7 @@ async function save(silent) {
   }
 }
 
+/** Zastępuje oznaczenia propozycją algorytmu (po potwierdzeniu; Ctrl+Z cofa). Nie zapisuje. */
 async function detect() {
   const c = S.cur; if (!c || S.busy) return;
   if (surfaceIds(false).length && !confirm('Zastąpić obecne oznaczenia propozycją algorytmu? (Ctrl+Z cofa)')) return;
@@ -510,6 +608,7 @@ async function detect() {
   }
 }
 
+// Skróty klawiszowe (pełna lista w oknie pomocy, klawisz H). Nie działają podczas pisania w polu tekstowym.
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
   const k = e.key.toLowerCase();
@@ -539,6 +638,10 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('beforeunload', (e) => { if (S.dirty) { e.preventDefault(); e.returnValue = ''; } });
 
 // ---------------------------------------------------------------- start
+/**
+ * Start strony: lista kości i ustawienia z serwera, potem pierwsza kość - z adresu (#id),
+ * a gdy go nie ma, pierwsza jeszcze nieoznaczona. Pomoc pokazuje się przy pierwszej wizycie.
+ */
 (async function init() {
   try {
     const d = await api('/api/bones');

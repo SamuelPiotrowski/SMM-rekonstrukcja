@@ -15,6 +15,15 @@ głębokości. Skaner Medit zapisuje każdą sesję jako folder, np.
 Dlatego skan = (folder, nazwa pliku bez rozszerzenia). Ten sam skan zapisany
 w kilku formatach (ply / obj / stl) jest wczytywany tylko raz.
 
+Zawartość:
+    nazwy           - slugify, parse_name,
+    wyszukiwanie    - find_scans -> lista ScanFile,
+    wczytanie       - load_mesh, repair_mesh,
+    kawałki skanu   - components, component_gaps, submesh, mesh_stats,
+    próbkowanie     - sample_surface -> SurfaceSample, voxel_keep, to_cloud,
+    deskryptory     - compute_fpfh.
+Wszystkie długości są w mm (tak zapisuje skaner), pola w mm².
+
 Uwaga: open3d na Windowsie nie otwiera ścieżek z polskimi znakami, dlatego
 wczytujemy przez trimesh, a nazwy wyjściowe są zamieniane na ASCII (slug).
 """
@@ -40,18 +49,27 @@ DATE_PREFIX = re.compile(r"^\d{1,2}\.\d{1,2}\.\d{4}-")
 
 @dataclass(frozen=True)
 class ScanParams:
+    """Ustawienia wyszukiwania i wstępnego czyszczenia skanów (settings.json, sekcja "scans").
+
+    Oderwany kawałek skanu zostaje bez dodatkowego sprawdzania, jeśli jest duży
+    (>= min_component_area_ratio x pole największego) i leży blisko głównego
+    (<= max_component_gap_mm). Pozostałe kawałki zostają tylko wtedy, gdy potwierdzą
+    je inne skany tej samej kości (merging.decide_components) - inaczej to szum.
+    """
+
     preferred_formats: tuple = ("ply", "obj", "stl")  # kolejność wyboru formatu tego samego skanu
     exclude: tuple = ("occlusion",)       # pomiń skany, których ścieżka zawiera któryś z tych tekstów
-    min_component_area_ratio: float = 0.05  # kawałek mniejszy niż ten ułamek największego = szum
-    max_component_gap_mm: float = 3.0     # kawałek dalej od głównego niż to = inny obiekt (szum)
+    min_component_area_ratio: float = 0.05  # kawałek mniejszy niż ten ułamek największego = podejrzany o szum
+    max_component_gap_mm: float = 3.0     # kawałek dalej od głównego niż to = podejrzany o szum (inny obiekt)
 
 
 @dataclass(frozen=True)
 class ScanFile:
-    """Jeden plik skanu znaleziony w DATA_IN.
+    """Jeden plik skanu znaleziony w DATA_IN (wynik find_scans).
 
     Attributes:
-        id:     unikalna nazwa ASCII, np. "23.11.2026-modelowanie_matematyczne_6-lowerjaw".
+        id:     unikalna nazwa ASCII, np. "23.11.2026-modelowanie_matematyczne_6-lowerjaw";
+                używana w nazwach plików wynikowych i jako klucz w meta.json.
         label:  czytelna nazwa do wyświetlania, np. "modelowanie matematyczne_(6) / lowerjaw".
         path:   wybrany plik (.ply / .obj / .stl).
         folder: folder względem DATA_IN ("" = bezpośrednio w DATA_IN).
@@ -73,7 +91,7 @@ def slugify(text: str) -> str:
     """Zamienia nazwę na bezpieczną nazwę ASCII (polskie znaki -> ASCII, spacje -> "_").
 
     Potrzebne, bo open3d na Windowsie nie umie zapisywać/czytać plików ze ścieżek
-    z polskimi znakami. Przykład:
+    z polskimi znakami. Zostają tylko litery ASCII, cyfry i znaki ". _ -". Przykład:
         '23.11.2026-kośc strzałkowa 3-lowerjaw' -> '23.11.2026-kosc_strzalkowa_3-lowerjaw'
     """
     text = text.replace("ł", "l").replace("Ł", "L")
@@ -84,6 +102,13 @@ def slugify(text: str) -> str:
 
 def parse_name(stem: str) -> dict:
     """Rozbija nazwę pliku ze skanera Medit "<data>-<kość>-<część>" na części.
+
+    Przykład:
+        "23.11.2026-kośc strzałkowa 3-lowerjaw"
+        -> {"date": "23.11.2026", "bone": "kośc strzałkowa 3", "part": "lowerjaw"}
+
+    Args:
+        stem: nazwa pliku bez rozszerzenia.
 
     Returns:
         {"date", "bone", "part"}; jeśli nazwa nie pasuje do wzorca: date i bone = None,
@@ -106,9 +131,16 @@ def find_scans(data_dir: Path, params: ScanParams = ScanParams()) -> tuple[list[
     w kilku formatach - wybierany jest format stojący najwcześniej w
     `params.preferred_formats`. Te same nazwy w RÓŻNYCH folderach to różne skany.
 
+    Nazwy skanów (ScanFile.id i ScanFile.label):
+        - skan w podfolderze: id = folder (ze ścieżką, "/" -> "-") + "-" + część,
+          label = "<nazwa folderu bez daty> / <część>",
+        - skan bezpośrednio w `data_dir`: id = nazwa pliku, label = nazwa pliku bez daty.
+    Jeśli dwa id wyjdą takie same (bardzo nietypowe nazwy), drugie dostaje "_2" itd.
+
     Args:
         data_dir: folder ze skanami.
-        params:   formaty i wzorce wykluczeń.
+        params:   formaty i wzorce wykluczeń (wzorzec porównywany bez wielkości liter
+                  ze ścieżką pliku względem `data_dir`).
 
     Returns:
         (skany posortowane po id, pominięte pliki pasujące do `params.exclude`).
@@ -159,8 +191,15 @@ def find_scans(data_dir: Path, params: ScanParams = ScanParams()) -> tuple[list[
 def load_mesh(path: Path) -> o3d.geometry.TriangleMesh:
     """Wczytuje plik ze skanem (przez trimesh, bo open3d nie otwiera ścieżek z polskimi znakami).
 
+    Siatka jest wczytywana bez żadnych poprawek (wierzchołki nie są scalane - to robi
+    repair_mesh). Brane są tylko kolory wierzchołków; tekstury są pomijane.
+
+    Args:
+        path: plik .ply / .obj / .stl.
+
     Returns:
-        Siatka open3d z wierzchołkami w mm i kolorami wierzchołków w [0, 1] (jeśli są).
+        Siatka open3d z wierzchołkami w mm i kolorami wierzchołków w [0, 1] (jeśli są),
+        jeszcze bez normalnych.
 
     Raises:
         ValueError: jeśli plik nie zawiera żadnych trójkątów.
@@ -183,8 +222,14 @@ def repair_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
 
     Scala zduplikowane wierzchołki (STL zapisuje każdy trójkąt osobno), usuwa trójkąty
     zdegenerowane i zduplikowane, krawędzie nierozmaitościowe (wspólne dla >2 trójkątów)
-    i nieużywane wierzchołki; liczy normalne. Celowo NIE wygładza ani nie upraszcza -
-    szczegóły powierzchni złamania są potrzebne do dopasowania.
+    i nieużywane wierzchołki; liczy normalne wierzchołków i trójkątów. Celowo NIE
+    wygładza ani nie upraszcza - szczegóły powierzchni złamania są potrzebne do dopasowania.
+
+    Args:
+        mesh: siatka z load_mesh.
+
+    Returns:
+        Ta sama siatka `mesh` (już naprawiona).
     """
     mesh.remove_duplicated_vertices()
     mesh.remove_degenerate_triangles()
@@ -199,6 +244,12 @@ def repair_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
 def components(mesh: o3d.geometry.TriangleMesh) -> tuple[np.ndarray, np.ndarray]:
     """Dzieli siatkę na oderwane kawałki (komponenty spójne).
 
+    Skan zwykle ma jeden duży kawałek (kość) i czasem drobne oderwane kawałki: szum,
+    fragment podłoża albo leżący obok inny fragment kości.
+
+    Args:
+        mesh: siatka (najlepiej po repair_mesh, inaczej STL rozpada się na pojedyncze trójkąty).
+
     Returns:
         (numer kawałka dla każdego trójkąta (T,), pola kawałków [mm^2] (K,)).
         Kawałki są ponumerowane od największego (0 = największy).
@@ -212,7 +263,17 @@ def components(mesh: o3d.geometry.TriangleMesh) -> tuple[np.ndarray, np.ndarray]
 
 
 def component_gaps(mesh: o3d.geometry.TriangleMesh, tri_comp: np.ndarray) -> np.ndarray:
-    """Odległość [mm] każdego kawałka od największego (kawałek 0 ma 0)."""
+    """Odległość [mm] każdego kawałka od największego (kawałka 0).
+
+    Odległość = najmniejsza odległość wierzchołka danego kawałka od wierzchołków kawałka 0.
+
+    Args:
+        mesh:     siatka.
+        tri_comp: (T,) numer kawałka każdego trójkąta - z components().
+
+    Returns:
+        (K,) odległości w mm; kawałek 0 ma 0.
+    """
     from scipy.spatial import cKDTree
 
     v = np.asarray(mesh.vertices)
@@ -228,7 +289,15 @@ def component_gaps(mesh: o3d.geometry.TriangleMesh, tri_comp: np.ndarray) -> np.
 
 
 def submesh(mesh: o3d.geometry.TriangleMesh, keep_triangles: np.ndarray) -> o3d.geometry.TriangleMesh:
-    """Kopia siatki tylko z wybranymi trójkątami (maska bool (T,))."""
+    """Kopia siatki tylko z wybranymi trójkątami (oryginał zostaje bez zmian).
+
+    Args:
+        mesh:           siatka źródłowa.
+        keep_triangles: (T,) maska bool - True = trójkąt zostaje.
+
+    Returns:
+        Nowa siatka bez nieużywanych wierzchołków (numeracja wierzchołków się zmienia).
+    """
     out = o3d.geometry.TriangleMesh(mesh)
     out.remove_triangles_by_mask(~np.asarray(keep_triangles, dtype=bool))
     out.remove_unreferenced_vertices()
@@ -236,7 +305,12 @@ def submesh(mesh: o3d.geometry.TriangleMesh, keep_triangles: np.ndarray) -> o3d.
 
 
 def mesh_stats(mesh: o3d.geometry.TriangleMesh) -> dict:
-    """Podstawowe statystyki siatki: wierzchołki, trójkąty, pole [mm^2], wymiary [mm]."""
+    """Podstawowe statystyki siatki (zapisywane w meta.json i summary.csv).
+
+    Returns:
+        {"vertices", "triangles", "area_mm2", "extent_mm": [x, y, z]} - wymiary pudełka
+        równoległego do osi układu [mm], zaokrąglone do 0.01.
+    """
     extent = mesh.get_axis_aligned_bounding_box().get_extent() if len(mesh.vertices) else np.zeros(3)
     return {
         "vertices": len(mesh.vertices),
@@ -252,7 +326,10 @@ def mesh_stats(mesh: o3d.geometry.TriangleMesh) -> dict:
 
 @dataclass
 class SurfaceSample:
-    """Równomierne punkty na powierzchni siatki (ok. 1 punkt na woksel `spacing`)."""
+    """Równomierne punkty na powierzchni siatki (wynik sample_surface, ~1 punkt na woksel `spacing`).
+
+    Wszystkie tablice mają tę samą długość N i tę samą kolejność punktów.
+    """
 
     points: np.ndarray     # (N, 3)
     normals: np.ndarray    # (N, 3), jednostkowe, z trójkątów (skierowane na zewnątrz skanu)
@@ -261,7 +338,19 @@ class SurfaceSample:
 
 
 def voxel_keep(points: np.ndarray, voxel: float) -> np.ndarray:
-    """Indeksy punktów zostawionych po przerzedzeniu: pierwszy punkt w każdym wokselu."""
+    """Przerzedzenie chmury: indeksy punktów, po jednym na każdy zajęty woksel.
+
+    Przestrzeń jest dzielona na sześciany o boku `voxel` [mm]; z każdego zostaje pierwszy
+    punkt (wg kolejności w `points`). Zwracane są indeksy, a nie punkty, żeby tak samo
+    przerzedzić normalne, kolory itp.
+
+    Args:
+        points: (N, 3) punkty.
+        voxel:  bok woksela [mm] ~ odstęp punktów po przerzedzeniu.
+
+    Returns:
+        Indeksy zostawionych punktów, rosnąco.
+    """
     keys = np.floor(points / voxel).astype(np.int64)
     _, idx = np.unique(keys, axis=0, return_index=True)
     return np.sort(idx)
@@ -273,12 +362,19 @@ def sample_surface(mesh: o3d.geometry.TriangleMesh, spacing: float, density: flo
 
     Dzięki przerzedzeniu gęstość punktów nie zależy od gęstości oryginalnej siatki.
     Każdy punkt pamięta swój trójkąt (np. żeby wiedzieć, z którego kawałka pochodzi).
+    Trójkąt jest losowany z prawdopodobieństwem proporcjonalnym do pola, punkt w nim -
+    równomiernie. Normalna punktu = normalna trójkąta (z kolejności wierzchołków),
+    kolor = kolory wierzchołków zmieszane wg położenia w trójkącie.
 
     Args:
-        mesh:    siatka z normalnymi trójkątów.
+        mesh:    siatka z co najmniej jednym trójkątem o niezerowym polu.
         spacing: rozmiar woksela [mm] ~ odstęp między punktami.
-        density: ile punktów losować na spacing^2 powierzchni przed przerzedzeniem.
+        density: ile punktów losować na spacing^2 powierzchni przed przerzedzeniem
+                 (losowanych jest zawsze co najmniej 1000).
         seed:    ziarno losowania (stałe = powtarzalne wyniki).
+
+    Returns:
+        SurfaceSample z punktami, normalnymi, kolorami i numerami trójkątów.
     """
     v = np.asarray(mesh.vertices)
     t = np.asarray(mesh.triangles)
@@ -305,7 +401,13 @@ def sample_surface(mesh: o3d.geometry.TriangleMesh, spacing: float, density: flo
 
 def to_cloud(points: np.ndarray, normals: np.ndarray | None = None,
              colors: np.ndarray | None = None) -> o3d.geometry.PointCloud:
-    """Tablice numpy -> chmura punktów open3d."""
+    """Tablice numpy -> chmura punktów open3d.
+
+    Args:
+        points:  (N, 3) punkty.
+        normals: (N, 3) normalne albo None.
+        colors:  (N, 3) kolory w [0, 1] (wartości spoza są przycinane) albo None.
+    """
     cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float64)))
     if normals is not None:
         cloud.normals = o3d.utility.Vector3dVector(np.asarray(normals, dtype=np.float64))
@@ -318,7 +420,17 @@ def compute_fpfh(cloud: o3d.geometry.PointCloud, radius: float) -> o3d.pipelines
     """Deskryptory FPFH (33 liczby na punkt opisujące lokalny kształt w promieniu `radius`).
 
     Nie zależą od położenia ani obrotu, więc pozwalają znaleźć te same miejsca na dwóch
-    skanach / fragmentach. Chmura musi mieć normalne.
+    skanach / fragmentach. Zależą od kierunku normalnych (odwrócone normalne = inny opis).
+
+    Args:
+        cloud:  chmura punktów z normalnymi.
+        radius: promień sąsiedztwa [mm] (brane jest najwyżej 100 najbliższych sąsiadów).
+
+    Returns:
+        Obiekt open3d Feature; `.data` ma kształt (33, N), więc tablica (N, 33) to `.data.T`.
+
+    Raises:
+        ValueError: chmura nie ma normalnych.
     """
     if not cloud.has_normals():
         raise ValueError("FPFH wymaga normalnych")

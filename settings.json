@@ -128,7 +128,10 @@
     "collision_mm": 1.0,        // KOLIZJA: punkt jednej kości głębiej niż to pod powierzchnią drugiej [mm]
     "collision_search_mm": 4.0, // ... szukane tylko w tej odległości od powierzchni drugiej kości [mm]
 
-    "max_shown": 15             // ile najlepszych par pokazać w 3D (matching.html)
+    "max_shown": 15,            // ile najlepszych par pokazać w 3D (matching.html)
+
+    // Podgląd z suwakami (python scripts/tune_matching.py): zmiana suwaka przelicza wybraną parę
+    "port": 8766                // port lokalnego serwera podglądu
   },
 
   // -----------------

@@ -30,13 +30,14 @@ DLA KAŻDEJ PARY POWIERZCHNI (A z jednej kości, B z innej):
    - styk [mm²]:    punkty A bliżej niż `tolerance_mm` od B, z normalnymi przeciwnymi
                     z dokładnością do `normal_angle_deg` (i odwrotnie, B na A);
                     pole styku = mniejsze z pól obu stron (część pokryta x pole powierzchni),
-   - RMSE [mm]:     średnia odległość punktów A w styku od B,
+   - RMSE [mm]:     średnia kwadratowa odległość punktów A w styku od B,
    - kolizja [mm²]: pole CAŁEJ kości A, które leży pod powierzchnią kości B głębiej niż
                     `collision_mm` (sprawdzane do `collision_search_mm` od B), i odwrotnie -
                     prawdziwe dopasowanie przełomów nie może wbijać jednej kości w drugą,
    - WYNIK = styk - kolizja [mm²]; pary są sortowane od najlepszego wyniku.
 
-Użycie: scripts/match_surfaces.py (wyniki: out/3d/matching.json, out/3d/matching.html).
+Użycie: scripts/match_surfaces.py (wyniki: out/3d/matching.json, out/3d/matching.html),
+podgląd z suwakami ustawień i przeliczaniem jednej pary: scripts/tune_matching.py (src/match_tool.py).
 W kodzie:
     surfaces, info = extract_surfaces(load_bones(features=True), params, contact_params)
     results = match_all(surfaces, params)     # [{"a", "b", "score", "contact_mm2", "T", ...}, ...]
@@ -66,7 +67,10 @@ SOURCES = ("manual", "auto", "manual-auto")
 
 @dataclass(frozen=True)
 class SurfaceMatchParams:
-    """Ustawienia dopasowania - opisy w settings.json, sekcja "matching"."""
+    """Ustawienia dopasowania powierzchni styku (settings.json, sekcja "matching" - tam pełne opisy).
+
+    Jak każde ustawienie wpływa na algorytm: kroki 1-5 w docstringu modułu.
+    """
 
     source: str = "manual"                 # "manual" / "auto" / "manual-auto"
     min_area_mm2: float = 20.0             # mniejsze powierzchnie styku są pomijane [mm²]
@@ -90,32 +94,51 @@ class SurfaceMatchParams:
 
 @dataclass
 class Surface:
-    """Jedna powierzchnia styku jednej kości, w układzie tej kości (jak out/3d/bones/<id>/mesh.ply)."""
+    """Jedna powierzchnia styku jednej kości, w układzie tej kości (jak out/3d/bones/<id>/mesh.ply).
+
+    Tworzona przez extract_surfaces. Punkty są równomierną próbką samej powierzchni
+    styku (co sample_mm), a bone_tree - punktami całej kości (do liczenia kolizji).
+    """
 
     bone: Bone
     contacts: Contacts
     sid: int                       # numer powierzchni w etykietach kości
     points: np.ndarray             # (N, 3)
     normals: np.ndarray            # (N, 3), na zewnątrz kości
-    area_mm2: float
+    area_mm2: float                # pole powierzchni (z siatki, nie z punktów)
     bone_tree: cKDTree | None = None   # punkty CAŁEJ kości (do kolizji), wspólne dla powierzchni kości
-    _cache: dict = field(default_factory=dict, repr=False)
+    _cache: dict = field(default_factory=dict, repr=False)   # chmury i KD-drzewo (clouds, tree)
 
     @property
     def key(self) -> str:
+        """Unikalny klucz "<id kości>#<numer powierzchni>" - tak zapisany w matching.json."""
         return f"{self.bone.id}#{self.sid}"
 
     @property
     def name(self) -> str:
+        """Czytelna nazwa "<nazwa kości> · <nazwa powierzchni>"."""
         return f"{self.bone.label} · {self.contacts.name(self.sid)}"
 
     @property
     def is_manual(self) -> bool:
+        """True = powierzchnia oznaczona ręcznie, False = z algorytmu."""
         return self.contacts.source == "manual"
 
     def clouds(self, p: SurfaceMatchParams, flip: bool):
-        """(gęsta, 2x rzadsza, zgrubna, FPFH zgrubnej); flip = normalne odwrócone (strona "A")."""
-        key = ("clouds", flip)
+        """Chmury punktów powierzchni do rejestracji - liczone raz dla każdej wartości `flip`.
+
+        Pamięć podręczna pamięta ustawienia, z którymi chmury policzono (sample_mm,
+        coarse_voxel_mm, fpfh_radius_mm) - po ich zmianie chmury są liczone od nowa.
+
+        Args:
+            p:    ustawienia (sample_mm, coarse_voxel_mm, fpfh_radius_mm).
+            flip: True = normalne odwrócone - tak przygotowuje się stronę "A" pary.
+
+        Returns:
+            (gęsta - wszystkie punkty, średnia - co 2 x sample_mm, zgrubna - co coarse_voxel_mm,
+             FPFH zgrubnej w promieniu fpfh_radius_mm); chmury z normalnymi.
+        """
+        key = ("clouds", flip, p.sample_mm, p.coarse_voxel_mm, p.fpfh_radius_mm)
         if key not in self._cache:
             nrm = -self.normals if flip else self.normals
             mid = voxel_keep(self.points, 2 * p.sample_mm)
@@ -126,6 +149,7 @@ class Surface:
         return self._cache[key]
 
     def tree(self) -> cKDTree:
+        """KD-drzewo punktów powierzchni (szukanie najbliższych sąsiadów) - liczone raz."""
         if "tree" not in self._cache:
             self._cache["tree"] = cKDTree(self.points)
         return self._cache["tree"]
@@ -135,11 +159,20 @@ def bone_contacts(bone: Bone, source: str, contact_params: ContactParams = Conta
                   root: Path | None = None) -> tuple[Contacts | None, str]:
     """Powierzchnie styku kości wg trybu `source` (opis trybów: docstring modułu).
 
+    W trybach "auto" i "manual-auto" może uruchomić algorytm wykrywania i zapisać jego
+    wynik w contacts/auto/ (contacts.auto_contacts) - za pierwszym razem trwa to dłużej.
+
     Args:
-        root: folder oznaczeń zamiast contacts/ z settings.json (np. w testach).
+        bone:           kość.
+        source:         "manual" / "auto" / "manual-auto".
+        contact_params: algorytm wykrywania i jego ustawienia (dla "auto").
+        root:           folder oznaczeń zamiast contacts/ z settings.json (np. w testach).
 
     Returns:
         (etykiety albo None, skąd: "ręczne" / "algorytm (cache)" / "algorytm (policzone)" / "brak ...").
+
+    Raises:
+        ValueError: nieznany tryb `source`.
     """
     if source not in SOURCES:
         raise ValueError(f"matching.source = {source!r}, dostępne: {', '.join(SOURCES)}")
@@ -155,14 +188,50 @@ def bone_contacts(bone: Bone, source: str, contact_params: ContactParams = Conta
     return c, "algorytm (policzone)" if computed else "algorytm (cache)"
 
 
+def make_surface(bone: Bone, contacts: Contacts, sid: int, sample_mm: float,
+                 tri_labels: np.ndarray | None = None, bone_tree: cKDTree | None = None) -> Surface | None:
+    """Jedna powierzchnia styku kości: punkty co `sample_mm` z normalnymi i pole.
+
+    Args:
+        bone:       kość wczytana z chmurą punktów (load_bones(features=True)).
+        contacts:   etykiety powierzchni tej kości.
+        sid:        numer powierzchni.
+        sample_mm:  odstęp punktów [mm].
+        tri_labels: etykiety trójkątów (triangle_labels) - podane, żeby nie liczyć ich dla każdej powierzchni.
+        bone_tree:  KD-drzewo punktów całej kości (do kolizji); None = zbudowane tutaj.
+
+    Returns:
+        Powierzchnia albo None, gdy etykieta `sid` nie ma żadnego trójkąta.
+    """
+    tl = triangle_labels(bone.mesh, contacts.labels) if tri_labels is None else tri_labels
+    m = submesh(bone.mesh, tl == sid)
+    if not len(m.triangles):
+        return None
+    if bone_tree is None:
+        bone_tree = cKDTree(np.asarray(bone.cloud.points))
+    s = sample_surface(m, sample_mm)
+    return Surface(bone=bone, contacts=contacts, sid=sid, points=s.points, normals=s.normals,
+                   area_mm2=float(m.get_surface_area()), bone_tree=bone_tree)
+
+
 def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: ContactParams = ContactParams(),
                      root: Path | None = None) -> tuple[list[Surface], dict[str, str]]:
     """Powierzchnie styku wszystkich kości (każda osobno), bez mniejszych niż p.min_area_mm2.
 
     Kości muszą być wczytane z chmurą punktów (load_bones(features=True)) - do kolizji.
 
+    Args:
+        bones:          kości do dopasowania.
+        p:              ustawienia (source, min_area_mm2, sample_mm).
+        contact_params: algorytm wykrywania (tryby "auto" i "manual-auto").
+        root:           folder oznaczeń zamiast contacts/ z settings.json.
+
     Returns:
-        (powierzchnie, {id kości: skąd wzięte powierzchnie - jak w bone_contacts}).
+        (powierzchnie, {id kości: skąd wzięte powierzchnie - jak w bone_contacts; gdy
+         wszystkie odpadły jako za małe, z dopiskiem ", powierzchnie < ... mm²"}).
+
+    Raises:
+        ValueError: kość bez chmury punktów albo nieznany p.source.
     """
     out, info = [], {}
     for b in bones:
@@ -174,15 +243,11 @@ def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: C
         tl = triangle_labels(b.mesh, c.labels)
         tree = None
         for k in c.surface_ids:
-            m = submesh(b.mesh, tl == k)
-            area = float(m.get_surface_area()) if len(m.triangles) else 0.0
-            if area < p.min_area_mm2:
-                continue
             if tree is None:
                 tree = cKDTree(np.asarray(b.cloud.points))
-            s = sample_surface(m, p.sample_mm)
-            out.append(Surface(bone=b, contacts=c, sid=k, points=s.points, normals=s.normals, area_mm2=area,
-                               bone_tree=tree))
+            s = make_surface(b, c, k, p.sample_mm, tl, tree)
+            if s is not None and s.area_mm2 >= p.min_area_mm2:
+                out.append(s)
         if not any(s.bone.id == b.id for s in out):
             info[b.id] += f", powierzchnie < {p.min_area_mm2:g} mm²"
     return out, info
@@ -193,7 +258,21 @@ def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: C
 # -----------------
 
 def contact_score(a: Surface, b: Surface, T: np.ndarray, p: SurfaceMatchParams) -> dict:
-    """Styk powierzchni a (przekształconej T) z b: części pokryte, pole styku, RMSE."""
+    """Jak dobrze powierzchnia a, przeniesiona przekształceniem T, przylega do b (krok 5 modułu).
+
+    Punkt jest "w styku", gdy druga powierzchnia jest bliżej niż p.tolerance_mm, a normalne
+    są przeciwne z dokładnością do p.normal_angle_deg. Sprawdzane w obie strony.
+
+    Args:
+        a, b: powierzchnie (każda w układzie swojej kości).
+        T:    przekształcenie 4x4 z układu kości a do układu kości b.
+        p:    ustawienia (tolerance_mm, normal_angle_deg).
+
+    Returns:
+        {"cover_a", "cover_b": ułamek punktów a / b w styku,
+         "contact_mm2": min(cover_a x pole a, cover_b x pole b),
+         "rmse_mm": RMSE odległości punktów a w styku od b (nan, gdy styku brak)}.
+    """
     min_dot = float(np.cos(np.deg2rad(p.normal_angle_deg)))
     pa = transform_points(T, a.points)
     na = -(a.normals @ T[:3, :3].T)                  # odwrócone: w styku mają być zgodne z normalnymi b
@@ -214,9 +293,19 @@ def collision_area(a: Surface, b: Surface, T: np.ndarray, p: SurfaceMatchParams)
     Punkt jest "w środku" kości, jeśli najbliższy jej punkt jest bliżej niż collision_search_mm,
     a punkt leży za jej powierzchnią (po przeciwnej stronie niż normalna) o więcej niż
     collision_mm. Skany są otwarte, więc to przybliżenie - wystarcza do odrzucenia
-    ustawień "kość w kości".
+    ustawień "kość w kości". Pole = liczba takich punktów chmury x (pole kości / liczba
+    punktów chmury).
+
+    Args:
+        a, b: powierzchnie - liczone są ich CAŁE kości (bone.cloud, bone_tree).
+        T:    przekształcenie 4x4 z układu kości a do układu kości b.
+        p:    ustawienia (collision_mm, collision_search_mm).
+
+    Returns:
+        Suma pól z obu kierunków [mm²].
     """
     def one_way(src: Surface, dst: Surface, M: np.ndarray) -> float:
+        """Pole kości src (przeniesionej M) wbite w kość dst [mm²]."""
         ps = transform_points(M, np.asarray(src.bone.cloud.points))
         pd, nd = np.asarray(dst.bone.cloud.points), np.asarray(dst.bone.cloud.normals)
         d, idx = dst.bone_tree.query(ps, distance_upper_bound=p.collision_search_mm)
@@ -228,8 +317,34 @@ def collision_area(a: Surface, b: Surface, T: np.ndarray, p: SurfaceMatchParams)
     return one_way(a, b, T) + one_way(b, a, np.linalg.inv(T))
 
 
+def evaluate(a: Surface, b: Surface, T: np.ndarray, p: SurfaceMatchParams) -> dict:
+    """Pełna ocena ustawienia T (krok 5 modułu): contact_score + collision_area + wynik.
+
+    Bez szukania ustawienia - szybkie, więc nadaje się do sprawdzenia, jak wynik
+    zmienia się z ustawieniami oceny (tolerance_mm, normal_angle_deg, collision_*).
+
+    Returns:
+        {"cover_a", "cover_b", "contact_mm2", "rmse_mm", "collision_mm2",
+         "score" = contact_mm2 - collision_mm2}.
+    """
+    sc = contact_score(a, b, T, p)
+    sc["collision_mm2"] = collision_area(a, b, T, p)
+    sc["score"] = sc["contact_mm2"] - sc["collision_mm2"]
+    return sc
+
+
 def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, p: SurfaceMatchParams) -> np.ndarray:
-    """ICP point-to-plane: icp_start_mm i połowa tego na rzadszych chmurach, potem 2 x sample_mm na gęstych."""
+    """ICP point-to-plane: icp_start_mm i połowa tego na rzadszych chmurach, potem 2 x sample_mm na gęstych.
+
+    Args:
+        src_clouds: chmury strony A z Surface.clouds(flip=True) (używane [0] i [1]).
+        tgt_clouds: chmury strony B z Surface.clouds(flip=False).
+        T:          przekształcenie startowe A -> B (z RANSAC).
+        p:          ustawienia (icp_start_mm, sample_mm).
+
+    Returns:
+        Poprawione przekształcenie 4x4 A -> B.
+    """
     crit = reg.ICPConvergenceCriteria(max_iteration=50)
     for dist, k in ((p.icp_start_mm, 1), (p.icp_start_mm / 2, 1), (2 * p.sample_mm, 0)):
         T = reg.registration_icp(src_clouds[k], tgt_clouds[k], dist, T,
@@ -239,6 +354,13 @@ def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, p: SurfaceMatchParams) -> 
 
 def match_pair(a: Surface, b: Surface, p: SurfaceMatchParams) -> dict:
     """Szuka T kładącego powierzchnię a na b (twarzą w twarz). Zwraca najlepszą z p.ransac_seeds prób.
+
+    Każda próba: RANSAC na FPFH (ziarno = numer próby) -> refine_icp -> ocena
+    (contact_score, collision_area). Wygrywa największy wynik = styk - kolizja.
+
+    Args:
+        a, b: powierzchnie dwóch różnych kości.
+        p:    ustawienia dopasowania.
 
     Returns:
         {"score", "contact_mm2", "collision_mm2", "cover_a", "cover_b", "rmse_mm",
@@ -257,16 +379,26 @@ def match_pair(a: Surface, b: Surface, p: SurfaceMatchParams) -> dict:
              reg.CorrespondenceCheckerBasedOnNormal(np.deg2rad(p.ransac_normal_angle_deg))],
             reg.RANSACConvergenceCriteria(p.ransac_iterations, 1.0))    # 1.0 = bez wczesnego końca
         T = refine_icp(ca, cb, coarse.transformation, p)
-        sc = contact_score(a, b, T, p)
-        sc["collision_mm2"] = collision_area(a, b, T, p)
-        sc["score"] = sc["contact_mm2"] - sc["collision_mm2"]
+        sc = evaluate(a, b, T, p)
         if best is None or sc["score"] > best["score"]:
             best = {**sc, "T": T.tolist(), "seed": seed}
     return best
 
 
 def match_all(surfaces: list[Surface], p: SurfaceMatchParams, progress=print) -> list[dict]:
-    """Dopasowuje każdą parę powierzchni z różnych kości. Wynik posortowany od najlepszej pary."""
+    """Dopasowuje każdą parę powierzchni z różnych kości. Wynik posortowany od najlepszej pary.
+
+    Liczba par rośnie kwadratowo z liczbą powierzchni (~N²/2), każda para trwa ~1-3 s.
+
+    Args:
+        surfaces: powierzchnie z extract_surfaces.
+        p:        ustawienia dopasowania.
+        progress: funkcja do wypisywania postępu (co 10 par); lambda _: None = cisza.
+
+    Returns:
+        Wyniki match_pair uzupełnione o opis pary: "a", "b" (Surface.key), "a_name",
+        "b_name", "a_area_mm2", "b_area_mm2", "a_manual", "b_manual"; od największego "score".
+    """
     pairs = [(i, j) for i in range(len(surfaces)) for j in range(i + 1, len(surfaces))
              if surfaces[i].bone.id != surfaces[j].bone.id]
     progress(f"Powierzchnie: {len(surfaces)}, pary do sprawdzenia: {len(pairs)}")
@@ -286,7 +418,14 @@ def match_all(surfaces: list[Surface], p: SurfaceMatchParams, progress=print) ->
 
 def report(surfaces: list[Surface], results: list[dict], p: SurfaceMatchParams,
            contact_params: ContactParams = ContactParams()) -> dict:
-    """Słownik do zapisu w matching.json."""
+    """Słownik do zapisu w matching.json (i do visualization_3d.match_matrix_figure).
+
+    Returns:
+        {"params": ustawienia dopasowania, "contact_params": ustawienia wykrywania,
+         "surfaces": [{"key", "bone", "bone_label", "surface", "name", "source",
+                       "area_mm2", "points"}],
+         "pairs": wyniki match_all (liczby zaokrąglone do 4 miejsc)}.
+    """
     return {"params": asdict(p), "contact_params": asdict(contact_params),
             "surfaces": [{"key": s.key, "bone": s.bone.id, "bone_label": s.bone.label, "surface": s.sid,
                           "name": s.contacts.name(s.sid), "source": s.contacts.source,

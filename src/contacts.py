@@ -69,6 +69,8 @@ PALETTE = ("#e8508f", "#18b0a6", "#f2b134", "#7b61ff", "#2b9be0", "#9bc53d", "#f
 
 @dataclass(frozen=True)
 class ContactParams:
+    """Ustawienia narzędzia do oznaczania i algorytmu wykrywania (settings.json, sekcja "contacts")."""
+
     method: str = "roughness"         # algorytm wykrywania (detect_contacts.py, narzędzie, dopasowanie "auto")
     brush_mm: float = 2.0             # startowy promień pędzla w narzędziu [mm]
     wand_angle_deg: float = 25.0      # startowa tolerancja kąta różdżki [stopnie]
@@ -79,25 +81,32 @@ class ContactParams:
 
 @dataclass
 class Contacts:
-    """Etykiety powierzchni styku jednej kości."""
+    """Etykiety powierzchni styku jednej kości (zawartość jednego pliku contacts/...json).
+
+    Etykiety dotyczą konkretnej siatki kości - labels[i] odpowiada wierzchołkowi i
+    siatki mesh.ply (znaczenie wartości: docstring modułu).
+    """
 
     bone_id: str
-    labels: np.ndarray                          # (V,) uint8
-    names: dict[int, str] = field(default_factory=dict)
-    source: str = "manual"
-    updated: str = ""
+    labels: np.ndarray                          # (V,) uint8: 0 = brak, k = powierzchnia k
+    names: dict[int, str] = field(default_factory=dict)   # {k: nazwa nadana w narzędziu}
+    source: str = "manual"                      # "manual" albo "auto:<metoda>"
+    updated: str = ""                           # data i czas zapisu (ISO), "" = jeszcze niezapisane
     remapped: bool = False                      # True = przeniesione ze starej wersji siatki
     detector: dict = field(default_factory=dict)  # wynik algorytmu: {"method", "params"}
 
     @property
     def surface_ids(self) -> list[int]:
+        """Numery powierzchni obecnych w etykietach (bez 0), rosnąco."""
         return [int(k) for k in np.unique(self.labels) if k > 0]
 
     def name(self, k: int) -> str:
+        """Nazwa powierzchni k; gdy nie nadano - "Powierzchnia k"."""
         return self.names.get(k) or f"Powierzchnia {k}"
 
 
 def surface_color(k: int) -> str:
+    """Kolor "#rrggbb" powierzchni nr k (z PALETTE, od k = 1, po kolei w kółko)."""
     return PALETTE[(k - 1) % len(PALETTE)]
 
 
@@ -106,19 +115,37 @@ def surface_color(k: int) -> str:
 # -----------------
 
 def mesh_fingerprint(mesh: o3d.geometry.TriangleMesh) -> str:
+    """Odcisk siatki: SHA-1 (16 znaków) współrzędnych wierzchołków zaokrąglonych do 0.001 mm.
+
+    Zapisywany razem z etykietami. Inny odcisk przy odczycie = siatka kości się zmieniła
+    (np. inne ustawienia prepare_data), więc etykiet nie da się wziąć wprost - trzeba je
+    przenieść po położeniu punktów.
+    """
     v = np.round(np.asarray(mesh.vertices), 3).astype(np.float32)
     return hashlib.sha1(v.tobytes()).hexdigest()[:16]
 
 
 def vertex_areas(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
-    """Pole przypadające na wierzchołek = 1/3 pól sąsiednich trójkątów [mm^2]."""
+    """Pole przypadające na wierzchołek = 1/3 pól sąsiednich trójkątów [mm^2].
+
+    Suma po wierzchołkach = pole całej siatki, więc suma po wierzchołkach powierzchni
+    styku = jej pole.
+
+    Returns:
+        (V,) pola.
+    """
     v, t = np.asarray(mesh.vertices), np.asarray(mesh.triangles)
     a = 0.5 * np.linalg.norm(np.cross(v[t[:, 1]] - v[t[:, 0]], v[t[:, 2]] - v[t[:, 0]]), axis=1)
     return np.bincount(t.ravel(), weights=np.repeat(a / 3, 3), minlength=len(v))
 
 
 def vertex_adjacency(mesh: o3d.geometry.TriangleMesh):
-    """Macierz sąsiedztwa wierzchołków (krawędzie siatki), scipy.sparse CSR."""
+    """Macierz sąsiedztwa wierzchołków (krawędzie siatki), scipy.sparse CSR (V, V).
+
+    Element [i, j] > 0, gdy i oraz j łączy krawędź (symetryczna; wartość = liczba
+    trójkątów z tą krawędzią). (adj @ maska_0_1) > 0 = wierzchołki, które mają
+    zaznaczonego sąsiada.
+    """
     t = np.asarray(mesh.triangles)
     n = len(mesh.vertices)
     i = np.concatenate([t[:, 0], t[:, 1], t[:, 2], t[:, 1], t[:, 2], t[:, 0]])
@@ -127,7 +154,17 @@ def vertex_adjacency(mesh: o3d.geometry.TriangleMesh):
 
 
 def triangle_labels(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray) -> np.ndarray:
-    """Etykieta trójkąta: ta, którą mają co najmniej 2 z 3 wierzchołków (inaczej 0)."""
+    """Etykiety wierzchołków -> etykiety trójkątów.
+
+    Trójkąt dostaje etykietę, którą mają co najmniej 2 z 3 jego wierzchołków (inaczej 0).
+
+    Args:
+        mesh:   siatka kości.
+        labels: (V,) etykiety wierzchołków.
+
+    Returns:
+        (T,) etykiety trójkątów.
+    """
     lt = labels[np.asarray(mesh.triangles)]
     out = np.where((lt[:, 0] == lt[:, 1]) | (lt[:, 0] == lt[:, 2]), lt[:, 0], lt[:, 1])
     out[(out != lt[:, 0]) & (out != lt[:, 1]) & (out != lt[:, 2])] = 0
@@ -136,7 +173,18 @@ def triangle_labels(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray) -> np.n
 
 
 def max_diameter(points: np.ndarray) -> float:
-    """Największa odległość między dwoma punktami ("średnica" powierzchni) [mm]."""
+    """Największa odległość między dwoma punktami ("średnica" powierzchni) [mm].
+
+    Liczona tylko na wierzchołkach otoczki wypukłej (najdalsza para zawsze na niej leży).
+    Gdy wierzchołków otoczki jest ponad 3000, brana jest ich losowa próbka (stałe ziarno) -
+    wynik może być wtedy minimalnie zaniżony.
+
+    Args:
+        points: (N, 3) punkty.
+
+    Returns:
+        Średnica; 0 dla mniej niż 2 punktów.
+    """
     if len(points) < 2:
         return 0.0
     try:
@@ -151,6 +199,14 @@ def max_diameter(points: np.ndarray) -> float:
 
 def surface_stats(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray) -> list[dict]:
     """Miary każdej powierzchni styku - do wstępnej selekcji par kości (podproblem 5).
+
+    Środek i normalna są ważone polem wierzchołków, wymiary liczone wzdłuż osi
+    głównych (PCA) punktów powierzchni. Jeśli siatka nie ma normalnych wierzchołków,
+    są liczone (siatka jest zmieniana).
+
+    Args:
+        mesh:   siatka kości.
+        labels: (V,) etykiety wierzchołków.
 
     Returns:
         Lista słowników {"id", "area_mm2", "centroid", "normal" (średnia ważona polem),
@@ -187,7 +243,14 @@ def surface_stats(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray) -> list[d
 # -----------------
 
 def contacts_path(bone_id: str, source: str = "manual", root: Path | None = None) -> Path:
-    """manual -> contacts/<id>.json, auto -> contacts/auto/<id>.json (root = inny folder niż contacts/)."""
+    """Ścieżka pliku etykiet kości.
+
+    Args:
+        bone_id: id kości.
+        source:  "manual" -> <root>/<id>.json, cokolwiek innego (np. "auto")
+                 -> <root>/auto/<id>.json.
+        root:    folder oznaczeń (domyślnie CONTACTS_DIR z settings.json, np. inny w testach).
+    """
     if root is None:
         from config import CONTACTS_DIR as root
     root = Path(root)
@@ -195,10 +258,23 @@ def contacts_path(bone_id: str, source: str = "manual", root: Path | None = None
 
 
 def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Path | None = None) -> Path | None:
-    """Zapisuje etykiety do JSON i zwraca ścieżkę.
+    """Zapisuje etykiety do JSON (format: docstring modułu) i zwraca ścieżkę.
 
     Ręczne bez żadnej powierzchni = plik jest usuwany (zwraca None). Wynik algorytmu jest
     zapisywany zawsze, także pusty - żeby nie liczyć go na nowo przy każdym uruchomieniu.
+    Oprócz etykiet zapisuje statystyki każdej powierzchni (surface_stats) i jej punkty
+    co POINTS_MM - po nich etykiety da się przenieść na zmienioną siatkę.
+
+    Args:
+        mesh:     siatka kości, do której należą etykiety.
+        contacts: etykiety; contacts.source decyduje o domyślnym folderze.
+        path:     plik docelowy (domyślnie contacts_path(...) wg contacts.source).
+
+    Returns:
+        Ścieżka zapisanego pliku albo None (usunięte puste ręczne oznaczenia).
+
+    Raises:
+        ValueError: liczba etykiet różni się od liczby wierzchołków siatki.
     """
     manual = contacts.source == "manual"
     path = Path(path or contacts_path(contacts.bone_id, "manual" if manual else "auto"))
@@ -232,6 +308,7 @@ def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Pat
 
 
 def _compact_lists(text: str) -> str:
+    """Skraca tekst JSON: listy liczb i listy punktów [[x, y, z], ...] zapisuje w jednej linii."""
     import re
 
     text = re.sub(r"\[\s*([-0-9.,\s]+?)\s*\]", lambda m: "[" + " ".join(m.group(1).split()) + "]", text)
@@ -242,10 +319,22 @@ def _compact_lists(text: str) -> str:
 
 def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "manual",
                   path: Path | None = None, root: Path | None = None) -> Contacts | None:
-    """Wczytuje zapisane etykiety kości: "manual" (ręczne) albo "auto" (wynik algorytmu). None = brak pliku.
+    """Wczytuje zapisane etykiety kości: "manual" (ręczne) albo "auto" (wynik algorytmu).
 
     Jeśli siatka zmieniła się od zapisu (inny fingerprint), etykiety są przenoszone
-    po położeniu punktów, a `remapped` = True.
+    po położeniu punktów, a `remapped` = True: wierzchołek dostaje etykietę najbliższego
+    zapisanego punktu, jeśli ten jest bliżej niż REMAP_MM (inaczej 0). Plik nie jest
+    przy tym zmieniany - przeniesione etykiety trzeba zapisać samemu.
+
+    Args:
+        bone_id: id kości.
+        mesh:    aktualna siatka kości (out/3d/bones/<id>/mesh.ply).
+        source:  "manual" albo "auto" - który plik czytać (gdy nie podano `path`).
+        path:    konkretny plik zamiast contacts_path(bone_id, source, root).
+        root:    folder oznaczeń zamiast CONTACTS_DIR.
+
+    Returns:
+        Contacts z etykietami (V,) dla `mesh` albo None, gdy pliku nie ma.
     """
     path = Path(path or contacts_path(bone_id, source, root))
     if not path.exists():
@@ -279,7 +368,11 @@ DETECTORS: dict[str, Callable] = {}
 
 
 def detector(name: str):
-    """Dekorator rejestrujący algorytm: funkcja(bone, params) -> labels (V,)."""
+    """Dekorator rejestrujący algorytm wykrywania w DETECTORS pod nazwą `name`.
+
+    Funkcja dostaje (bone: Bone, params: ContactParams) i zwraca labels (V,) dla
+    wierzchołków bone.mesh. Przykład: docstring modułu, "Jak dodać własny algorytm".
+    """
     def wrap(fn):
         DETECTORS[name] = fn
         return fn
@@ -287,7 +380,19 @@ def detector(name: str):
 
 
 def split_regions(mesh: o3d.geometry.TriangleMesh, mask: np.ndarray, min_area: float) -> np.ndarray:
-    """Maska wierzchołków -> etykiety 1..K spójnych obszarów (od największego), małe pominięte."""
+    """Maska wierzchołków -> etykiety 1..K spójnych obszarów (od największego), małe pominięte.
+
+    Obszar = wierzchołki z maski połączone krawędziami siatki. Przydatne na końcu
+    każdego algorytmu: zamienia "te wierzchołki wyglądają na przełom" na osobne powierzchnie.
+
+    Args:
+        mesh:     siatka kości.
+        mask:     (V,) bool.
+        min_area: obszary o mniejszym polu [mm²] dostają 0.
+
+    Returns:
+        (V,) uint8 etykiety; najwyżej 255 obszarów (największych).
+    """
     adj = vertex_adjacency(mesh)
     idx = np.flatnonzero(mask)
     labels = np.zeros(len(mask), dtype=np.uint8)
@@ -305,6 +410,13 @@ def split_regions(mesh: o3d.geometry.TriangleMesh, mask: np.ndarray, min_area: f
 
 def local_shape(mesh: o3d.geometry.TriangleMesh, radius: float) -> tuple[np.ndarray, np.ndarray]:
     """Lokalne miary kształtu dla każdego wierzchołka (sąsiedzi w promieniu `radius`).
+
+    Sąsiedzi to punkty równomiernej próbki powierzchni (co radius / 3), więc wynik nie
+    zależy od gęstości siatki. Wierzchołki z mniej niż 6 sąsiadami dostają 0.
+
+    Args:
+        mesh:   siatka kości.
+        radius: promień sąsiedztwa [mm].
 
     Returns:
         (szorstkość: odchylenie sąsiadów od dopasowanej płaszczyzny / promień,
@@ -340,7 +452,19 @@ def _rings(mesh: o3d.geometry.TriangleMesh, mm: float) -> int:
 
 
 def morph(mesh: o3d.geometry.TriangleMesh, mask: np.ndarray, mm: float, grow: bool) -> np.ndarray:
-    """Dylatacja (grow=True) albo erozja maski wierzchołków o ~`mm` po siatce."""
+    """Dylatacja (grow=True) albo erozja (grow=False) maski wierzchołków o ~`mm` po siatce.
+
+    Jeden krok = jeden pierścień sąsiadów (krawędzie siatki); liczba kroków z _rings.
+
+    Args:
+        mesh: siatka kości.
+        mask: (V,) bool - nie jest zmieniana.
+        mm:   o ile poszerzyć / zwęzić [mm].
+        grow: True = poszerz, False = zwęź.
+
+    Returns:
+        Nowa maska (V,) bool.
+    """
     adj = vertex_adjacency(mesh)
     m = mask.copy()
     for _ in range(_rings(mesh, mm)):
@@ -355,11 +479,19 @@ def detect_roughness(bone, params: ContactParams) -> np.ndarray:
 
     1. Szorstkość każdego wierzchołka: odchylenie powierzchni od płaszczyzny w promieniu
        roughness_radius_mm, względem promienia (kora ~0.04, przełom gąbczasty ~0.15).
-    2. Szorstkie = powyżej rough_threshold.
+    2. Szorstkie = powyżej rough_threshold, z pominięciem pasa ~roughness_radius_mm
+       wzdłuż otwartego brzegu skanu (brzeg jest postrzępiony, ale to nie przełom).
     3. Otwarcie morfologiczne (erozja, potem dylatacja o ~0.6 x promień): znikają cienkie
        linie ostrych krawędzi, zostają szerokie ściany przełomu.
     4. Spójne obszary >= min_surface_mm2 = wykryte powierzchnie (od największej).
     Słabo działa na gładkich, świeżych przełomach kości zbitej - tu potrzebny lepszy algorytm.
+
+    Args:
+        bone:   kość (wystarczy bone.mesh).
+        params: roughness_radius_mm, rough_threshold, min_surface_mm2.
+
+    Returns:
+        (V,) uint8 etykiety wierzchołków bone.mesh.
     """
     mesh = bone.mesh
     rough, _ = local_shape(mesh, params.roughness_radius_mm)
@@ -385,12 +517,29 @@ def boundary_vertices(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
 
 
 def detection_params(params: ContactParams) -> dict:
-    """Ustawienia wpływające na wynik algorytmu (bez ustawień narzędzia i nazwy algorytmu)."""
+    """Ustawienia wpływające na wynik algorytmu (bez ustawień narzędzia i nazwy algorytmu).
+
+    Zapisywane w pliku wyniku ("detector" -> "params"); auto_contacts porównuje je
+    z bieżącymi, żeby wiedzieć, czy zapisany wynik jest aktualny.
+    """
     return {k: v for k, v in asdict(params).items() if k not in ("method", "brush_mm", "wand_angle_deg")}
 
 
 def detect_contacts(bone, method: str | None = None, params: ContactParams = ContactParams()) -> Contacts:
-    """Uruchamia algorytm `method` (z DETECTORS; None = params.method) na kości. Nic nie zapisuje."""
+    """Uruchamia algorytm `method` na kości. Nic nie zapisuje (zapis: save_contacts).
+
+    Args:
+        bone:   kość.
+        method: nazwa z DETECTORS; None = params.method.
+        params: ustawienia algorytmu.
+
+    Returns:
+        Contacts z source = "auto:<method>", nazwami "Wykryta k" i opisem algorytmu
+        w `detector` (żeby auto_contacts mógł sprawdzić aktualność).
+
+    Raises:
+        ValueError: nieznany algorytm.
+    """
     method = method or params.method
     if method not in DETECTORS:
         raise ValueError(f"Nieznany algorytm {method!r}, dostępne: {', '.join(DETECTORS)}")
@@ -406,6 +555,11 @@ def auto_contacts(bone, params: ContactParams = ContactParams(),
 
     Liczy na nowo, gdy pliku nie ma albo powstał innym algorytmem, z innymi ustawieniami
     lub na innej siatce kości.
+
+    Args:
+        bone:   kość.
+        params: algorytm (params.method) i jego ustawienia.
+        root:   folder oznaczeń zamiast CONTACTS_DIR (wynik w <root>/auto/).
 
     Returns:
         (etykiety - puste, gdy algorytm nic nie znalazł; True = właśnie policzone, False = z cache).
@@ -425,6 +579,14 @@ def auto_contacts(bone, params: ContactParams = ContactParams(),
 
 def compare(mesh: o3d.geometry.TriangleMesh, predicted: np.ndarray, truth: np.ndarray) -> dict:
     """Porównuje wynik algorytmu z ręcznymi oznaczeniami (ważone polem wierzchołków).
+
+    IoU = część wspólna / suma, precyzja = jaka część wykrytego to naprawdę styk,
+    czułość = jaka część prawdziwego styku została wykryta.
+
+    Args:
+        mesh:      siatka kości.
+        predicted: (V,) etykiety z algorytmu.
+        truth:     (V,) etykiety ręczne.
 
     Returns:
         {"iou", "precision", "recall"} dla podziału styk / nie-styk oraz "surfaces":

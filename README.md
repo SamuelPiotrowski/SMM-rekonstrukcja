@@ -79,6 +79,7 @@ Wszystko uruchamiamy z głównego folderu projektu, przy aktywnym `.venv`. Skryp
 | 3 | `python scripts/mark_contacts.py` | **ręczne oznaczanie powierzchni styku** w przeglądarce | `contacts/*.json` |
 | 4 | `python scripts/show_bones.py` | wszystkie kości + oznaczone powierzchnie styku | `out/3d/bones.html` |
 | 5 | `python scripts/match_surfaces.py` | **dopasowanie fragmentów po powierzchniach styku** (RANSAC + ICP) | `out/3d/matching.html` |
+| 6 | `python scripts/tune_matching.py` | **podgląd dopasowania z suwakami** - zmiana ustawienia przelicza pokazaną parę | – (nic nie zapisuje) |
 | – | `python scripts/detect_contacts.py` | algorytm wykrywania powierzchni styku + porównanie z ręcznymi | `contacts/auto/*.json` |
 | – | `python tests/test_pipeline.py` | test całości na sztucznych skanach (~20 s) | – |
 
@@ -196,6 +197,12 @@ python scripts/match_surfaces.py --source manual-auto # jednorazowo inny tryb
 ```
 
 Strona `out/3d/matching.html`: najlepsze pary w 3D (kość A ustawiona na B, lista wybiera parę) + macierz wyników wszystkich par. Wszystkie pary z przekształceniami: `out/3d/matching.json`.
+
+**Podgląd z suwakami: `python scripts/tune_matching.py`** (po `match_surfaces.py`). Lokalna strona w przeglądarce (jak narzędzie do oznaczania, działa bez internetu): lista par z `matching.json`, para w 3D i suwaki ustawień z sekcji `matching`. Po puszczeniu suwaka przeliczana jest **tylko pokazana para**:
+- suwaki „Szukanie ustawienia” (odstęp punktów, FPFH, RANSAC, ICP) - dopasowanie od nowa (~2-3 s przy 1 mln iteracji × 2 próby),
+- suwaki „Ocena” (styk, kolizja) - tylko nowa ocena obecnego ustawienia (ułamek sekundy).
+
+Lista par pokazuje stary → nowy wynik, „Przelicz od nowa” powtarza losowy RANSAC, „Przywróć ustawienia” wraca do `matching.json`. Nic nie jest zapisywane - zmienione ustawienia strona wypisuje gotowe do wklejenia w `settings.json`; potem `match_surfaces.py` przelicza wszystkie pary. Port: `settings.json` → `matching` → `port` (8766).
 
 Na naszych danych (24.11.2026, ręczne oznaczenia 4 kości): `modelowanie matematyczne / lowerjaw` ↔ `modelowanie matematyczne_(1) / upperjaw` 179 mm² i oba fragmenty kości strzałkowej (`first_test` lowerjaw pow. 2 ↔ upperjaw pow. 2) 118 mm², obie pary bez kolizji, RMSE ~0.17 mm, fragmenty układają się w jednej osi; najlepsza przypadkowa para ma 55. Im więcej kości ma ręczne oznaczenia, tym więcej par da się sprawdzić.
 

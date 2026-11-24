@@ -29,8 +29,24 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
                 features: bones_mod.FeatureParams | None = None, verbose: bool = True) -> list[bones_mod.Bone]:
     """Przetwarza wszystkie skany z `data_in` i zapisuje kości do `out_dir`.
 
+    Kolejne kroki opisuje docstring modułu. Zapisuje: out_dir/bones/<id>/ (każda kość),
+    out_dir/cache/pairs.json (wyniki rejestracji par - kolejne uruchomienia są szybkie),
+    out_dir/merging.json i out_dir/summary.csv. Foldery kości z poprzednich uruchomień,
+    których już nie ma, są usuwane.
+
+    Args:
+        data_in:  folder ze skanami (domyślnie DATA_IN z settings.json).
+        out_dir:  folder wyników (domyślnie DATA_OUT z settings.json).
+        scan:     ustawienia wyszukiwania skanów (domyślnie sekcja "scans").
+        merge:    ustawienia łączenia skanów (domyślnie sekcja "merging").
+        features: ustawienia chmury i FPFH (domyślnie sekcja "features").
+        verbose:  wypisuj postęp w konsoli (z czasem od startu).
+
     Returns:
-        Lista zapisanych kości (z chmurą i FPFH).
+        Lista zapisanych kości (z chmurą i FPFH), posortowana po id - jak w load_bones.
+
+    Raises:
+        FileNotFoundError: brak folderu `data_in` albo brak w nim skanów.
     """
     import config
 
@@ -42,6 +58,7 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
     start = time.perf_counter()
 
     def log(msg):
+        """Wypisuje komunikat z czasem od startu (tylko gdy verbose)."""
         if verbose:
             print(f"[{time.perf_counter() - start:6.1f} s] {msg}", flush=True)
 
@@ -103,7 +120,25 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
 
 
 def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path) -> Path:
-    """merging.json: wszystkie skany, nakładania par i przydział do kości (do wizualizacji)."""
+    """Zapisuje out_dir/merging.json - dane do wizualizacji łączenia (scripts/show_merging.py).
+
+    Zawartość:
+        "params": {"min_overlap", "tolerance_mm"},
+        "scans":  [{"id", "label", "path", "bone": id kości, do której trafił skan}],
+        "pairs":  [{"a", "b": id skanów, "overlap": nakładanie}],
+        "bones":  [{"id", "label", "scans": [id skanów]}].
+
+    Args:
+        prepared: wszystkie skany (merging.prepare_scan).
+        pairs:    wyniki rejestracji par {(i, j): wynik} (merging.pairwise).
+        groups:   grupy skanów w tej samej kolejności co `result`.
+        result:   zapisane kości.
+        merge:    użyte ustawienia łączenia.
+        out_dir:  folder wyników.
+
+    Returns:
+        Ścieżka do merging.json.
+    """
     scan_bone = {}
     for g, b in zip(groups, result):
         for i in g["members"]:
