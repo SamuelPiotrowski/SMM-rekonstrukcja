@@ -8,6 +8,7 @@ __pycache__/
 
 # data: skany (duże, każdy trzyma lokalnie) i wyniki (generowane przez scripts/prepare_data.py)
 scanned_bones/
+bone_photos/
 out/
 
 # sources

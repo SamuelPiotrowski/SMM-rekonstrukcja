@@ -2,12 +2,16 @@
 Wczytuje ustawienia projektu z settings.json (w głównym folderze projektu).
 
 Wszystkie wartości i ich opisy są w settings.json - ten plik tylko je wczytuje
-i udostępnia jako stałe dla reszty kodu. settings.json może mieć komentarze //,
-które są usuwane przed wczytaniem (zwykły JSON ich nie obsługuje).
+i zamienia na obiekty parametrów poszczególnych modułów. settings.json może mieć
+komentarze //, które są usuwane przed wczytaniem (zwykły JSON ich nie obsługuje).
+
+Brakujący klucz w settings.json = wartość domyślna z danego modułu.
+Literówka w nazwie klucza = czytelny błąd z listą poprawnych nazw.
 """
 
 import json
 import re
+from dataclasses import fields
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,55 +25,66 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict:
     """Wczytuje plik JSON, w którym mogą być komentarze //."""
     text = path.read_text(encoding="utf-8")
     text = _STRING_OR_COMMENT.sub(lambda m: m.group(1) or "", text)
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"Błąd składni w {path.name}, linia {e.lineno}: {e.msg}\n"
+                         "Sprawdź przecinki (bez przecinka po ostatnim elemencie), cudzysłowy \"...\" "
+                         "i true/false/null małymi literami.") from None
 
 
-_s = load_settings()
-_paths, _parsing, _vis, _view = _s["paths"], _s["data_parsing"], _s["visualizing"], _s["view"]
+SETTINGS = load_settings()
+_paths = SETTINGS.get("paths", {})
 
 # -----------------
 # PATHS
 # -----------------
 
-DATA_IN = ROOT / _paths["data_in"]
-DATA_OUT = ROOT / _paths["data_out"]
+DATA_IN = ROOT / _paths.get("data_in", "scanned_bones")      # surowe skany (z podfolderami)
+DATA_OUT = ROOT / _paths.get("data_out", "out/3d")           # wyniki - generowane, można usunąć
+CONTACTS_DIR = ROOT / _paths.get("contacts", "contacts")     # ręczne oznaczenia powierzchni styku
+
 
 # -----------------
-# DATA PARSING
+# PARAMETRY MODUŁÓW
 # -----------------
 
-PREFERRED_FORMATS = tuple(_parsing["preferred_formats"])
-MIN_COMPONENT_AREA_RATIO = float(_parsing["min_component_area_ratio"])
-CENTER_FRAGMENTS = bool(_parsing["center_fragments"])
-VOXEL_SIZE = float(_parsing["voxel_size"])
-SAMPLING_DENSITY = _parsing["sampling_density"]
-NORMAL_RADIUS_FACTOR = float(_parsing["normal_radius_factor"])
-FPFH_RADIUS_FACTOR = float(_parsing["fpfh_radius_factor"])
+def _section(name: str, cls, skip=()):
+    """Tworzy obiekt parametrów `cls` z sekcji `name` settings.json."""
+    values = {k: v for k, v in SETTINGS.get(name, {}).items() if k not in skip}
+    known = {f.name for f in fields(cls)}
+    unknown = sorted(set(values) - known)
+    if unknown:
+        raise SystemExit(f"settings.json, sekcja \"{name}\": nieznane klucze {unknown}. "
+                         f"Dostępne: {sorted(known)}")
+    values = {k: tuple(v) if isinstance(v, list) else v for k, v in values.items()}
+    return cls(**values)
 
-# -----------------
-# 3D VISUALIZING
-# -----------------
 
-VIS_WINDOW_SIZE = tuple(_vis["window_size"])
-VIS_NORMAL_LENGTH_MM = float(_vis["normal_length_mm"])
-VIS_MAX_NORMALS = int(_vis["max_normals"])
-AXES_SIZE_MM = float(_vis["axes_size_mm"])
-VIS_BACKGROUND = tuple(_vis["background"])
-VIS_BONE_COLOR = tuple(_vis["bone_color"])
-VIS_NORMAL_COLOR = tuple(_vis["normal_color"])
-CAMERA_TILT = float(_vis["camera_tilt"])
-CAMERA_ZOOM = float(_vis["camera_zoom"])
+def scan_params():
+    from data_parsing import ScanParams
+    return _section("scans", ScanParams)
 
-# -----------------
-# VIEW - co pokazuje tests/visualize.py
-# -----------------
 
-VIEW_SHOW = _view["show"]
-VIEW_LAYOUT = _view["layout"]
-VIEW_COLORS = _view["colors"]
-VIEW_ONLY = _view["only"]
-VIEW_NORMALS = bool(_view["normals"])
-VIEW_AXES = bool(_view["axes"])
-VIS_GAP_MM = float(_view["gap"])
-VIS_POINT_SIZE = float(_view["point_size"])
-VIEW_SCREENSHOT = ROOT / _view["screenshot"] if _view["screenshot"] else None
+def merge_params():
+    from merging import MergeParams
+    return _section("merging", MergeParams)
+
+
+def feature_params():
+    from bones import FeatureParams
+    return _section("features", FeatureParams)
+
+
+def contact_params():
+    from contacts import ContactParams
+    return _section("contacts", ContactParams, skip=("port",))
+
+
+def view3d_params():
+    from visualization_3d import View3DParams
+    return _section("visualization_3d", View3DParams, skip=("open_browser",))
+
+
+OPEN_BROWSER = bool(SETTINGS.get("visualization_3d", {}).get("open_browser", True))
+CONTACT_TOOL_PORT = int(SETTINGS.get("contacts", {}).get("port", 8765))
