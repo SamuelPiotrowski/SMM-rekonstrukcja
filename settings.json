@@ -7,6 +7,71 @@
   // Foldery (względem głównego folderu projektu)
   // -----------------
   "paths": {
-    "data_in": "bone_photos",   // surowe skany (.ply, .obj, .stl)
-    "data_out": "out"                   // wyniki przygotowania danych
+    "data_in": "bone_photos",  // własne zdjęcia fragmentów + annotations.json
+    "data_out": "out"          // wyniki (każdy przypadek w osobnym podfolderze)
   },
+
+  // -----------------
+  // Segmentacja zdjęć - src/approximation.py
+  // -----------------
+  "segmentation": {
+    "foreground": "auto",      // "auto" / "bright" (jasna kość, ciemne tło) / "dark" (ciemna kość, jasne tło)
+    "blur_sigma_px": 0.0,      // rozmycie przed progowaniem [px]; 1-3 pomaga przy szumie / teksturze tła
+    "fill_holes": false        // wypełnij zamknięte dziury w masce (refleksy przy brzegu kości)
+  },
+
+  // -----------------
+  // Aproksymacja konturu i przełomów B-splajnami - src/approximation.py
+  // -----------------
+  "approximation": {
+    "roi_step_mm": 0.20,          // krok próbkowania surowego przełomu [mm]
+    "spline_input_step_mm": 0.25, // krok punktów wejściowych do splajnu [mm]
+    "contour_points": 599,        // liczba punktów zapisanego konturu fragmentu (wpływa na pole kolizji)
+    "spline_points": 181,         // liczba punktów zapisanego splajnu
+    // poziomy wygładzenia: oczekiwany szum konturu [mm] (s = N * sigma^2) i ich nazwy
+    "smoothing_sigmas": [0.04, 0.12, 0.35],
+    "smoothing_labels": ["Szczegóły: 0,04 mm", "Roboczy: 0,12 mm", "Silne: 0,35 mm"]
+  },
+
+  // -----------------
+  // Dopasowanie par przełomów i złożenie - src/matching.py
+  // Wartości dobrane dla kości ~150 mm i zdjęć ~0.25 mm/piksel.
+  // Dla małych kości zmniejsz min_contact_mm (musi być krótsze niż przełomy).
+  // -----------------
+  "matching": {
+    "tolerance_mm": 0.60,          // punkty bliżej niż to = styk
+    // zmienić dla małych kości
+    "min_contact_mm": 12.0,        // minimalna długość styku, by przyjąć połączenie
+    "min_score": 6.0,              // minimalny wynik pary (~styk ważony jakością [mm]); ok. połowa min_contact_mm
+    "max_collision_ratio": 0.025,  // maks. nakładanie głębsze niż tolerance_mm / pole mniejszego fragmentu
+    "spline_level": 1,             // który poziom wygładzenia (0, 1, 2) używać do dopasowania
+    "resample_step_mm": 0.20,
+    "window_step_mm": 0.75,        // krok przesuwania okien (mniej = dokładniej, wolniej)
+    "window_fractions": [1.0, 0.90, 0.75, 0.60],  // długości okien (ułamek krótszego przełomu)
+    "window_samples": 64,
+    "hypotheses_verified": 12,     // ile najlepszych hipotez na parę dostaje pełną ocenę
+    "grid_step_mm": 0.50           // krok siatki do liczenia kolizji [mm]
+  },
+
+  // -----------------
+  // Wizualizacja 3D (plik HTML) - src/visualization_3d.py
+  // -----------------
+  "visualization_3d": {
+    "thickness_mm": null,   // grubość brył [mm]; null = automatycznie
+    "frames": 36,           // klatki animacji składania (więcej = płynniej, większy plik)
+    "mesh_points": 260,     // punkty konturu na bryłę
+    "lift_factor": 3.0,     // wysokość "lotu" fragmentów w animacji (x grubość)
+    "embed_plotly": true,   // true = działa bez internetu; false = mniejszy plik, wymaga internetu
+    "open_browser": true    // otwórz wynik w przeglądarce po obliczeniach
+  },
+
+  // -----------------
+  // Dane syntetyczne - src/synthetic.py, scripts/run_synthetic.py
+  // -----------------
+  "synthetic": {
+    "seed": 20261124,
+    "mm_per_pixel": 0.25,
+    "image_size": 512,
+    "cases": ["clean", "noise", "loss"]
+  }
+}

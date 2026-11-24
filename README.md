@@ -60,9 +60,53 @@ Inny folder można ustawić w `settings.json` (`paths.data_in`).
 
 ### Zdjęcia
 
+Zdjęcia fragmentów (jeden fragment na zdjęcie) trzeba wrzucić do `bone_photos/` (nie ma ich w repo).
+Zasady: kontrastowe tło (jasna kość na ciemnym albo odwrotnie), aparat prostopadle do stołu,
+ta sama odległość dla wszystkich zdjęć albo linijka na każdym zdjęciu.
 
+## Dopasowanie 2D (B-splajny)
 
+### Struktura kodu (`src/`)
 
+| plik | etap | co robi |
+|---|---|---|
+| `geometry.py` | – | wspólna geometria 2D: transformacje sztywne, pola, łamane, Kabsch/SVD |
+| `synthetic.py` | 1 | syntetyczna kość, poszarpane przełomy (`seam`), obrazy testowe + `truth.json` |
+| `approximation.py` | 2 | segmentacja (Otsu), kontur, wycięcie przełomów, B-splajny i krzywizna |
+| `matching.py` | 3–5 | dopasowanie par przełomów, odrzucanie złych połączeń, złożenie, ocena względem prawdy |
+| `results.py` | 6 | zapis wyników: `case.json`, CSV, maski, obrazy PNG |
+| `visualization_3d.py` | – | interaktywna wizualizacja 3D (plik HTML, animacja składania) |
+| `pipeline.py` | – | cały przebieg jednego przypadku (`run_case`) |
+| `annotate.py` | – | klikanie końców przełomów na zdjęciach → `annotations.json` |
+| `config.py` | – | wczytuje `settings.json` (wszystkie progi i parametry) |
+
+### Dane syntetyczne (test metody)
+
+```powershell
+python scripts/run_synthetic.py
+```
+
+Wyniki w `out/synthetic/<clean|noise|loss>/`, m.in. `assembly_3d.html` (otwórz w przeglądarce).
+
+### Własne zdjęcia
+
+```powershell
+# 1. kliknij końce przełomów (2 kliknięcia = 1 przełom, Enter = następne zdjęcie)
+python scripts/annotate_photos.py --mm-per-pixel 0.1     # znana skala
+python scripts/annotate_photos.py --ruler-mm 10          # albo skala z linijki na zdjęciu
+
+# 2. analiza -> out/<nazwa>/ i wizualizacja 3D w przeglądarce
+python scripts/run_own_data.py
+
+# ponowna wizualizacja 3D bez liczenia od nowa
+python scripts/show_3d.py out/<nazwa>/case.json
+```
+
+Format `annotations.json` jest opisany na początku `src/approximation.py`. Progi dopasowania są w `settings.json`
+(sekcja `matching`). Dla małych kości zmniejsz `min_contact_mm`, bo musi być krótsze niż przełomy.
+
+Test ogólności (inny rozmiar i skala zdjęć, ciemna kość na jasnym tle, JPG, bez prawdy):
+`python tests/test_own_data.py`
 
 # Szczegółowe notatki podproblemów
 

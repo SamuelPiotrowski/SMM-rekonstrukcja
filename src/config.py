@@ -2,8 +2,10 @@
 Wczytuje ustawienia projektu z settings.json (w głównym folderze projektu).
 
 Wszystkie wartości i ich opisy są w settings.json - ten plik tylko je wczytuje
-i udostępnia jako stałe dla reszty kodu. settings.json może mieć komentarze //,
-które są usuwane przed wczytaniem (zwykły JSON ich nie obsługuje).
+i zamienia na obiekty parametrów poszczególnych modułów. settings.json może mieć
+komentarze //, które są usuwane przed wczytaniem (zwykły JSON ich nie obsługuje).
+
+Brakujący klucz w settings.json = wartość domyślna z danego modułu.
 """
 
 import json
@@ -24,52 +26,51 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict:
     return json.loads(text)
 
 
-_s = load_settings()
-_paths, _parsing, _vis, _view = _s["paths"], _s["data_parsing"], _s["visualizing"], _s["view"]
+SETTINGS = load_settings()
+_paths = SETTINGS.get("paths", {})
 
 # -----------------
 # PATHS
 # -----------------
 
-DATA_IN = ROOT / _paths["data_in"]
-DATA_OUT = ROOT / _paths["data_out"]
+DATA_IN = ROOT / _paths.get("data_in", "bone_photos")
+DATA_OUT = ROOT / _paths.get("data_out", "out")
+
 
 # -----------------
-# DATA PARSING
+# PARAMETRY MODUŁÓW
 # -----------------
 
-PREFERRED_FORMATS = tuple(_parsing["preferred_formats"])
-MIN_COMPONENT_AREA_RATIO = float(_parsing["min_component_area_ratio"])
-CENTER_FRAGMENTS = bool(_parsing["center_fragments"])
-VOXEL_SIZE = float(_parsing["voxel_size"])
-SAMPLING_DENSITY = _parsing["sampling_density"]
-NORMAL_RADIUS_FACTOR = float(_parsing["normal_radius_factor"])
-FPFH_RADIUS_FACTOR = float(_parsing["fpfh_radius_factor"])
+def _section(name: str, cls, skip=()):
+    values = {k: v for k, v in SETTINGS.get(name, {}).items() if k not in skip}
+    values = {k: tuple(v) if isinstance(v, list) else v for k, v in values.items()}
+    return cls(**values)
 
-# -----------------
-# 3D VISUALIZING
-# -----------------
 
-VIS_WINDOW_SIZE = tuple(_vis["window_size"])
-VIS_NORMAL_LENGTH_MM = float(_vis["normal_length_mm"])
-VIS_MAX_NORMALS = int(_vis["max_normals"])
-AXES_SIZE_MM = float(_vis["axes_size_mm"])
-VIS_BACKGROUND = tuple(_vis["background"])
-VIS_BONE_COLOR = tuple(_vis["bone_color"])
-VIS_NORMAL_COLOR = tuple(_vis["normal_color"])
-CAMERA_TILT = float(_vis["camera_tilt"])
-CAMERA_ZOOM = float(_vis["camera_zoom"])
+def segmentation_params():
+    from approximation import SegmentationParams
+    return _section("segmentation", SegmentationParams)
 
-# -----------------
-# VIEW - co pokazuje tests/visualize.py
-# -----------------
 
-VIEW_SHOW = _view["show"]
-VIEW_LAYOUT = _view["layout"]
-VIEW_COLORS = _view["colors"]
-VIEW_ONLY = _view["only"]
-VIEW_NORMALS = bool(_view["normals"])
-VIEW_AXES = bool(_view["axes"])
-VIS_GAP_MM = float(_view["gap"])
-VIS_POINT_SIZE = float(_view["point_size"])
-VIEW_SCREENSHOT = ROOT / _view["screenshot"] if _view["screenshot"] else None
+def approximation_params():
+    from approximation import ApproximationParams
+    return _section("approximation", ApproximationParams)
+
+
+def match_params():
+    from matching import MatchParams
+    return _section("matching", MatchParams)
+
+
+def view3d_params():
+    from visualization_3d import View3DParams
+    return _section("visualization_3d", View3DParams, skip=("open_browser",))
+
+
+def synthetic_params():
+    from synthetic import SyntheticParams
+    return _section("synthetic", SyntheticParams, skip=("cases",))
+
+
+OPEN_BROWSER = bool(SETTINGS.get("visualization_3d", {}).get("open_browser", True))
+SYNTHETIC_CASES = tuple(SETTINGS.get("synthetic", {}).get("cases", ("clean", "noise", "loss")))
