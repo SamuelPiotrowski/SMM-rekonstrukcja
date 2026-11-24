@@ -401,8 +401,8 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
                           showarrow=False, align="left", xanchor="left", yanchor="top",
                           bgcolor="rgba(255,255,255,0.88)", bordercolor="#c9d2db", borderwidth=1, borderpad=10,
                           font=dict(size=13))],
-        updatemenus=[dict(type="dropdown", x=0.01, y=0.02, xanchor="left", yanchor="bottom", buttons=buttons,
-                          active=0, bgcolor="#ffffff", bordercolor="#c9d2db")])
+        updatemenus=[dict(type="dropdown", direction="up", x=0.01, y=0.02, xanchor="left", yanchor="bottom",
+                          buttons=buttons, active=0, bgcolor="#ffffff", bordercolor="#c9d2db")])
     return fig
 
 
@@ -443,6 +443,130 @@ def overlap_figure(report: dict, params: View3DParams = View3DParams()) -> go.Fi
     fig.update_layout(paper_bgcolor=params.background, plot_bgcolor=params.background, font=FONT,
                       height=size, margin=dict(l=10, r=10, t=10, b=10),
                       xaxis=dict(tickangle=-40, side="bottom"), yaxis=dict(autorange="reversed"))
+    return fig
+
+
+# -----------------
+# 3. DOPASOWANIE POWIERZCHNI STYKU
+# -----------------
+
+MATCH_COLORS = {"a": "#6f9fd8", "b": "#e0c9a0", "surf_a": "#e8508f", "surf_b": "#18b0a6"}
+
+
+def _surface_overlay(bone: Bone, labels: np.ndarray, sid: int, d: o3d.geometry.TriangleMesh, v: np.ndarray):
+    """Trójkąty uproszczonej siatki `d` (wierzchołki `v` już przekształcone) należące do powierzchni sid."""
+    _, near = cKDTree(np.asarray(bone.mesh.vertices)).query(np.asarray(d.vertices))
+    t = np.asarray(d.triangles)
+    tri = t[(labels[near][t] == sid).all(axis=1)]
+    return _compact(v, tri) if len(tri) else (None, None)
+
+
+def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[str, Contacts],
+                    params: View3DParams = View3DParams(), max_shown: int = 15) -> go.Figure:
+    """Najlepsze pary powierzchni: kość A ustawiona na kości B (lista wybiera parę).
+
+    Args:
+        results:  pary z matching_surfaces.match_all (posortowane od najlepszej).
+        bones:    {id: kość}, contacts: {id: Contacts} - te same, których użyto do dopasowania.
+    """
+    shown = results[:max_shown]
+    per_bone = max(4000, params.triangles_total // max(1, 2 * len(shown)))
+    traces, groups, boxes, notes = [], [], [], []
+    light = dict(lighting=LIGHTING, lightposition=dict(x=-1e4, y=-2e4, z=3e4))
+    for n, r in enumerate(shown):
+        idx, pts = [], []
+        T = np.asarray(r["T"])
+        for side in ("a", "b"):
+            bone_id, sid = r[side].rsplit("#", 1)
+            bone = bones[bone_id]
+            d = decimate(bone.mesh, per_bone)
+            v = np.asarray(d.vertices)
+            if side == "a":
+                v = v @ T[:3, :3].T + T[:3, 3]
+            pts.append(v)
+            t = np.asarray(d.triangles)
+            idx.append(len(traces))
+            traces.append(go.Mesh3d(x=_f32(v[:, 0]), y=_f32(v[:, 1]), z=_f32(v[:, 2]), **_ijk(t, len(v)),
+                                    color=MATCH_COLORS[side], name=f"{side.upper()}: {bone.label}", showlegend=True,
+                                    legendgroup=f"{n}-{side}", hovertemplate=f"<b>{bone.label}</b><extra></extra>",
+                                    visible=n == 0, **light))
+            nrm = np.asarray(d.vertex_normals) @ (T[:3, :3].T if side == "a" else np.eye(3))
+            q, tri = _surface_overlay(bone, contacts[bone_id].labels, int(sid), d, v + 0.04 * nrm)
+            if q is not None:
+                idx.append(len(traces))
+                traces.append(go.Mesh3d(x=_f32(q[:, 0]), y=_f32(q[:, 1]), z=_f32(q[:, 2]), **_ijk(tri, len(q)),
+                                        color=MATCH_COLORS[f"surf_{side}"], name=f"powierzchnia {side.upper()}",
+                                        showlegend=True, legendgroup=f"{n}-{side}s", visible=n == 0,
+                                        hovertemplate=f"<b>{r[side + '_name']}</b><extra></extra>", **light))
+        groups.append(idx)
+        allp = np.vstack(pts)
+        boxes.append((allp.min(axis=0), allp.max(axis=0)))
+        notes.append("<br>".join([
+            f"<b>{n + 1}. miejsce</b>   wynik: <b>{r['score']:.0f}</b> mm²",
+            f"<span style='color:{MATCH_COLORS['surf_a']}'>■</span> A: {r['a_name']} ({r['a_area_mm2']:.0f} mm²"
+            f"{', ręczna' if r.get('a_manual', True) else ', z algorytmu'})",
+            f"<span style='color:{MATCH_COLORS['surf_b']}'>■</span> B: {r['b_name']} ({r['b_area_mm2']:.0f} mm²"
+            f"{', ręczna' if r.get('b_manual', True) else ', z algorytmu'})",
+            f"styk: {r['contact_mm2']:.0f} mm²  (A pokryte w {r['cover_a']:.0%}, B w {r['cover_b']:.0%})",
+            f"RMSE w styku: {r['rmse_mm']:.2f} mm",
+            f"kolizja kości: {r['collision_mm2']:.0f} mm²",
+            "", "<i>wynik = styk - kolizja</i>"]))
+
+    def layout_for(k):
+        lo, hi = boxes[k]
+        c, half = (lo + hi) / 2, (hi - lo).max() / 2 * 1.05
+        return {"scene.xaxis.range": [c[0] - half, c[0] + half], "scene.yaxis.range": [c[1] - half, c[1] + half],
+                "scene.zaxis.range": [c[2] - half, c[2] + half], "annotations[0].text": notes[k]}
+
+    buttons = []
+    for k, r in enumerate(shown):
+        vis = [False] * len(traces)
+        for i in groups[k]:
+            vis[i] = True
+        buttons.append(dict(label=f"{k + 1}. {r['a_name']}  ↔  {r['b_name']}  ({r['score']:.0f})",
+                            method="update", args=[{"visible": vis}, layout_for(k)]))
+    first = layout_for(0)
+    axis = dict(backgroundcolor="#eef2f5", showticklabels=False, title="")
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        paper_bgcolor=params.background, font=FONT, margin=dict(l=0, r=0, t=10, b=0), height=760,
+        legend=dict(x=0.99, y=0.97, xanchor="right", bgcolor="rgba(255,255,255,0.85)"),
+        scene=dict(xaxis=dict(range=first["scene.xaxis.range"], **axis),
+                   yaxis=dict(range=first["scene.yaxis.range"], **axis),
+                   zaxis=dict(range=first["scene.zaxis.range"], **axis), aspectmode="cube"),
+        annotations=[dict(text=first["annotations[0].text"], x=0.01, y=0.97, xref="paper", yref="paper",
+                          showarrow=False, align="left", xanchor="left", yanchor="top",
+                          bgcolor="rgba(255,255,255,0.88)", bordercolor="#c9d2db", borderwidth=1, borderpad=10,
+                          font=dict(size=13))],
+        # direction="up": lista na dole wykresu rozwijana w dół chowała się pod następną sekcją strony
+        updatemenus=[dict(type="dropdown", direction="up", x=0.01, y=0.02, xanchor="left", yanchor="bottom",
+                          buttons=buttons, active=0, bgcolor="#ffffff", bordercolor="#c9d2db")])
+    return fig
+
+
+def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> go.Figure:
+    """Macierz wyników wszystkich par powierzchni (puste = ta sama kość)."""
+    surfs = report["surfaces"]
+    keys = [s["key"] for s in surfs]
+    pos = {k: i for i, k in enumerate(keys)}
+    n = len(keys)
+    m = np.full((n, n), np.nan)
+    for p in report["pairs"]:
+        i, j = pos[p["a"]], pos[p["b"]]
+        m[i, j] = m[j, i] = p["score"]
+    labels = [f"{s['bone_label']} · {s['surface']}{'' if s['source'] == 'manual' else ' (algorytm)'}" for s in surfs]
+    text = [["" if np.isnan(x) else f"{x:.0f}" for x in row] for row in m]
+    top = np.nanmax(m) if np.isfinite(m).any() else 1.0
+    fig = go.Figure(go.Heatmap(
+        z=m, x=labels, y=labels, text=text, texttemplate="%{text}", textfont=dict(size=9),
+        colorscale=[[0, "#f4f6f8"], [0.5, "#8fb8de"], [1, "#1d4f91"]], zmin=0, zmax=max(top, 1.0),
+        colorbar=dict(title="wynik [mm²]"), xgap=1, ygap=1,
+        hovertemplate="%{y}<br>%{x}<br>wynik: %{z:.0f} mm²<extra></extra>"))
+    size = max(480, 22 * n + 260)
+    fig.update_layout(paper_bgcolor=params.background, plot_bgcolor=params.background, font=FONT,
+                      height=size, margin=dict(l=10, r=10, t=10, b=10),
+                      xaxis=dict(tickangle=-40, side="bottom", tickfont=dict(size=10)),
+                      yaxis=dict(autorange="reversed", tickfont=dict(size=10)))
     return fig
 
 

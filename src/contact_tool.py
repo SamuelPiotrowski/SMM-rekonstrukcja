@@ -127,7 +127,7 @@ class ToolState:
 
     def detect(self, bone_id: str, method: str | None) -> dict:
         b = self.bone(bone_id)
-        method = method or next(iter(ct.DETECTORS))
+        method = method or self.params.method
         c = ct.detect_contacts(b, method, self.params)
         return {"labels": _b64(c.labels), "names": {str(k): v for k, v in c.names.items()}, "method": method}
 

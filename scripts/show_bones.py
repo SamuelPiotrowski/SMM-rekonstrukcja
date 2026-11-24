@@ -43,7 +43,7 @@ def main() -> None:
     numbers = [all_bones.index(b) + 1 for b in bones]
     source = "auto" if args.auto else "manual"
     contacts = {b.id: load_contacts(b.id, b.mesh, source) for b in bones}
-    marked = sum(c is not None for c in contacts.values())
+    marked = sum(c is not None and c.labels.any() for c in contacts.values())
     print(f"Kości: {len(bones)}, z oznaczonymi powierzchniami styku ({source}): {marked}")
 
     params = config.view3d_params()

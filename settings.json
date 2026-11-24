@@ -10,7 +10,7 @@
   "paths": {
     "data_in": "scanned_bones",   // surowe skany (.ply/.obj/.stl), mogą być w podfolderach
     "data_out": "out/3d",         // wyniki - generowane, można je usunąć i policzyć od nowa
-    "contacts": "contacts"        // ręczne oznaczenia powierzchni styku (praca ręczna - commituj!)
+    "contacts": "contacts"        // powierzchnie styku: ręczne (commituj!) + podfolder auto/ (generowane)
   },
 
   // -----------------
@@ -40,7 +40,7 @@
     // Dwa skany = ta sama kość, gdy co najmniej taka część mniejszego leży na drugim
     // (bliżej niż tolerance_mm, normalne w tę samą stronę). Różne fragmenty: ~0.05-0.16,
     // ten sam fragment: ~0.35-0.6.
-    "min_overlap": 0.3,
+    "min_overlap": 0.25,
     "tolerance_mm": 0.15,
 
     // Kawałek skanu potwierdzony przez inne skany kości w mniejszej części niż to = szum.
@@ -73,16 +73,62 @@
   },
 
   // -----------------
-  // Powierzchnie styku - scripts/mark_contacts.py (ręcznie) i scripts/detect_contacts.py (algorytm)
+  // Powierzchnie styku (przełomy) - src/contacts.py
+  //   ręcznie:   scripts/mark_contacts.py   -> contacts/<id kości>.json       (w repozytorium)
+  //   algorytm:  scripts/detect_contacts.py -> contacts/auto/<id kości>.json  (generowane)
   // -----------------
   "contacts": {
-    "port": 8765,               // port lokalnego serwera narzędzia do oznaczania
+    // Narzędzie do ręcznego oznaczania
+    "port": 8765,               // port lokalnego serwera narzędzia
     "brush_mm": 2.0,            // startowy promień pędzla [mm]
     "wand_angle_deg": 25,       // startowa tolerancja kąta "różdżki" (zaznacza obszar do ostrej krawędzi)
-    // Algorytm bazowy "roughness" (detect_contacts.py): przełom = szorstka powierzchnia
-    "roughness_radius_mm": 1.0, // promień sąsiedztwa do liczenia szorstkości
+
+    // Algorytm wykrywania - używany przez detect_contacts.py, przycisk "Propozycja algorytmu"
+    // w narzędziu i dopasowanie w trybie "auto" / "manual-auto". Po zmianie któregokolwiek
+    // ustawienia poniżej dopasowanie samo policzy wyniki algorytmu od nowa.
+    "method": "roughness",      // nazwa algorytmu (@detector w src/contacts.py)
+    // "roughness" = algorytm bazowy: przełom to szorstka powierzchnia, kora kości gładka (słaby!)
+    "roughness_radius_mm": 1.0, // promień sąsiedztwa do liczenia szorstkości [mm]
     "rough_threshold": 0.09,    // od tej szorstkości powierzchnia = przełom (kora ~0.04, gąbczasty przełom ~0.15)
-    "min_surface_mm2": 15.0     // mniejsze wykryte obszary są pomijane
+    "min_surface_mm2": 15.0     // mniejsze wykryte obszary są pomijane [mm²]
+  },
+
+  // -----------------
+  // Dopasowanie fragmentów po powierzchniach styku - scripts/match_surfaces.py, src/matching_surfaces.py
+  // Każda powierzchnia styku jest ustawiana (RANSAC + ICP) na każdej powierzchni innej kości,
+  // twarzą w twarz; wynik pary = pole styku - pole kolizji [mm²].
+  // -----------------
+  "matching": {
+    // Skąd powierzchnie styku:
+    //   "manual"      = tylko ręczne (contacts/<id>.json); kości bez nich są pomijane,
+    //   "auto"        = tylko z algorytmu (sekcja "contacts"): z contacts/auto/, a gdy brak
+    //                   albo nieaktualne - liczone i zapisywane; bazowy "roughness" jest słaby,
+    //   "manual-auto" = ręczne, a dla kości bez ręcznych - z algorytmu.
+    // Jednorazowo: python scripts/match_surfaces.py --source auto
+    "source": "manual",
+    "min_area_mm2": 20.0,       // mniejsze powierzchnie styku są pomijane [mm²]
+
+    // Punkty i deskryptory
+    "sample_mm": 0.3,           // odstęp punktów powierzchni [mm]; mniej = dokładniej, wolniej
+    "coarse_voxel_mm": 1.0,     // odstęp punktów do zgrubnego ustawienia (RANSAC) [mm]
+    "fpfh_radius_mm": 4.0,      // promień deskryptora kształtu FPFH [mm]; ~ wielkość charakterystycznych nierówności przełomu
+
+    // Zgrubne ustawienie: RANSAC losuje trójki podobnych punktów (wg FPFH) i sprawdza, ile pasuje
+    "ransac_iterations": 1000000, // zawsze wszystkie (bez wczesnego końca): 50 tys. trafia dobre ustawienie ~40% prób, 1 mln ~100%
+    "ransac_seeds": 2,          // ile niezależnych prób RANSAC na parę (wygrywa najlepsza); czas rośnie liniowo
+    "ransac_normal_angle_deg": 35.0, // RANSAC odrzuca ustawienia, w których normalne par punktów różnią się bardziej
+
+    // Dokładne ustawienie: ICP dociska powierzchnie, szukając par punktów najpierw do icp_start_mm,
+    // potem do połowy tej odległości, na koniec do 2 x sample_mm
+    "icp_start_mm": 2.0,
+
+    // Ocena ustawienia
+    "tolerance_mm": 0.5,        // STYK: punkty bliżej niż to ...
+    "normal_angle_deg": 45.0,   // ... i z normalnymi przeciwnymi z dokładnością do tego kąta [stopnie]
+    "collision_mm": 1.0,        // KOLIZJA: punkt jednej kości głębiej niż to pod powierzchnią drugiej [mm]
+    "collision_search_mm": 4.0, // ... szukane tylko w tej odległości od powierzchni drugiej kości [mm]
+
+    "max_shown": 15             // ile najlepszych par pokazać w 3D (matching.html)
   },
 
   // -----------------

@@ -78,7 +78,8 @@ Wszystko uruchamiamy z głównego folderu projektu, przy aktywnym `.venv`. Skryp
 | 2 | `python scripts/show_merging.py` | pokazuje, jak połączyły się skany | `out/3d/merging.html` |
 | 3 | `python scripts/mark_contacts.py` | **ręczne oznaczanie powierzchni styku** w przeglądarce | `contacts/*.json` |
 | 4 | `python scripts/show_bones.py` | wszystkie kości + oznaczone powierzchnie styku | `out/3d/bones.html` |
-| – | `python scripts/detect_contacts.py` | algorytm wykrywania powierzchni styku + porównanie z ręcznymi | `out/3d/bones/*/contacts_auto.json` |
+| 5 | `python scripts/match_surfaces.py` | **dopasowanie fragmentów po powierzchniach styku** (RANSAC + ICP) | `out/3d/matching.html` |
+| – | `python scripts/detect_contacts.py` | algorytm wykrywania powierzchni styku + porównanie z ręcznymi | `contacts/auto/*.json` |
 | – | `python tests/test_pipeline.py` | test całości na sztucznych skanach (~20 s) | – |
 
 Wizualizacje (krok 2 i 4) to pojedyncze pliki HTML - otwierają się same, działają bez internetu i można je komuś wysłać.
@@ -127,7 +128,7 @@ Otwiera w przeglądarce narzędzie do malowania powierzchni styku (przełomów) 
 - Obracanie **prawym** przyciskiem, przesuwanie środkowym, zoom kółkiem. `H` - pomoc.
 - `Ctrl+S` zapisuje do `contacts/<id kości>.json`; przy zmianie kości zapis jest automatyczny.
 
-Folder `contacts/` **jest w repozytorium** - to ręczna praca, warto ją commitować i dzielić się nią. Jeśli siatka kości się zmieni (np. po zmianie ustawień i ponownym `prepare_data.py`), oznaczenia są automatycznie przenoszone na nową siatkę po położeniu punktów.
+Folder `contacts/` **jest w repozytorium** - to ręczna praca, warto ją commitować i dzielić się nią (poza podfolderem `contacts/auto/` z wynikami algorytmu, który jest generowany). Jeśli siatka kości się zmieni (np. po zmianie ustawień i ponownym `prepare_data.py`), oznaczenia są automatycznie przenoszone na nową siatkę po położeniu punktów.
 
 Za pierwszym razem narzędzie potrzebuje internetu (pobiera bibliotekę three.js do `out/3d/.cache/`), potem działa offline. Zakończenie: `Ctrl+C` w konsoli.
 
@@ -147,7 +148,9 @@ python scripts/show_bones.py 3 strzalkowa       # tylko kość nr 3 i kości z "
 
 Wszystko jest przygotowane pod algorytm, który zastąpi ręczne oznaczanie:
 - algorytm to funkcja `(kość, parametry) -> etykiety wierzchołków` zarejestrowana dekoratorem `@detector("nazwa")` w `src/contacts.py`,
-- wynik ma **ten sam format** co ręczne oznaczenia (pole `source` = `auto:<nazwa>`), więc działa z wizualizacją (`show_bones.py --auto`) i narzędziem („Propozycja algorytmu”),
+- wynik ma **ten sam format** co ręczne oznaczenia i leży obok nich: `contacts/auto/<id kości>.json` (pole `source` = `auto:<nazwa>`, pole `detector` = algorytm i jego ustawienia). Działa z wizualizacją (`show_bones.py --auto`), narzędziem („Propozycja algorytmu”) i dopasowaniem (`match_surfaces.py --source auto`),
+- który algorytm jest używany: `settings.json`, sekcja `contacts`, klucz `method` (jednorazowo: `--method`),
+- `detect_contacts.py` liczy zawsze od nowa; dopasowanie bierze zapisany wynik i liczy sam tylko wtedy, gdy go brak albo zmienił się algorytm, jego ustawienia lub siatka kości,
 - `detect_contacts.py` od razu **porównuje wynik z ręcznymi oznaczeniami** (IoU, precyzja, czułość) - ręczne oznaczenia są „prawdą” do oceny algorytmu.
 
 Teraz jest tylko prosty algorytm bazowy `roughness` (przełom = szorstka powierzchnia, kora = gładka): punkt wyjścia, nie rozwiązanie.
@@ -165,6 +168,37 @@ def moja_metoda(bone, params):
 python scripts/detect_contacts.py --method moja_metoda
 ```
 
+### 5. Dopasowanie po powierzchniach styku: `scripts/match_surfaces.py`
+
+Pierwsza wersja dopasowania fragmentów (podproblem 6). Bierze **tylko punkty powierzchni styku**, każdą powierzchnię osobno, i dopasowuje każdą do każdej powierzchni **innej** kości.
+
+Skąd powierzchnie (`settings.json` → `matching` → `source`, jednorazowo `--source`):
+
+| tryb | powierzchnie |
+|---|---|
+| `manual` (domyślny) | tylko ręczne (`contacts/<id>.json`); kości bez nich są pomijane |
+| `auto` | tylko z algorytmu (`contacts/auto/<id>.json`; gdy brak albo nieaktualne - liczone i zapisywane) |
+| `manual-auto` | ręczne, a dla kości bez ręcznych - z algorytmu |
+
+Algorytm bazowy `roughness` jest słaby: na jego powierzchniach para kości strzałkowej w ogóle nie wychodzi, dlatego domyślnie tylko ręczne.
+
+Jak działa:
+1. Normalne powierzchni A są **odwracane**: dwa przełomy stykają się twarzą w twarz (wypukłość na A = wklęsłość na B), więc po odwróceniu A „wygląda jak” B i działa ta sama rejestracja co przy łączeniu skanów.
+2. **RANSAC** na deskryptorach FPFH (zgrubnie) + **ICP** (dokładnie) → przekształcenie A → B. RANSAC w open3d jest losowy (wielowątkowy), dlatego zawsze przechodzi wszystkie 1 mln iteracji - przy 50 tys. dobre ustawienie wychodziło tylko w ~40% prób.
+3. Ocena: **styk** = pole, na którym powierzchnie leżą bliżej niż `tolerance_mm` (0.5 mm) z przeciwnymi normalnymi; **kolizja** = pole, na którym całe kości wchodzą w siebie głębiej niż `collision_mm` (1 mm). **Wynik = styk − kolizja** [mm²].
+
+Wszystkie ustawienia z opisami: `settings.json`, sekcja `matching`.
+
+```powershell
+python scripts/match_surfaces.py                      # wszystkie kości (~1-3 s na parę powierzchni)
+python scripts/match_surfaces.py first_test 3         # tylko wybrane kości
+python scripts/match_surfaces.py --source manual-auto # jednorazowo inny tryb
+```
+
+Strona `out/3d/matching.html`: najlepsze pary w 3D (kość A ustawiona na B, lista wybiera parę) + macierz wyników wszystkich par. Wszystkie pary z przekształceniami: `out/3d/matching.json`.
+
+Na naszych danych (24.11.2026, ręczne oznaczenia 4 kości): `modelowanie matematyczne / lowerjaw` ↔ `modelowanie matematyczne_(1) / upperjaw` 179 mm² i oba fragmenty kości strzałkowej (`first_test` lowerjaw pow. 2 ↔ upperjaw pow. 2) 118 mm², obie pary bez kolizji, RMSE ~0.17 mm, fragmenty układają się w jednej osi; najlepsza przypadkowa para ma 55. Im więcej kości ma ręczne oznaczenia, tym więcej par da się sprawdzić.
+
 ## Ustawienia
 
 Wszystkie ustawienia są w **`settings.json`** (z komentarzem przy każdej wartości); `src/config.py` tylko je wczytuje. Brakujący klucz = wartość domyślna z kodu, literówka w nazwie = czytelny błąd z listą poprawnych nazw. Zmiany działają przy następnym uruchomieniu skryptu.
@@ -173,11 +207,12 @@ Składnia JSON: `true` / `false` / `null` małymi literami, tekst w `"..."`, lic
 
 | sekcja | najważniejsze klucze | do czego |
 |---|---|---|
-| `paths` | `data_in`, `data_out`, `contacts` | foldery: skany, wyniki (`out/3d`), ręczne oznaczenia |
+| `paths` | `data_in`, `data_out`, `contacts` | foldery: skany, wyniki (`out/3d`), powierzchnie styku |
 | `scans` | `exclude`, `min_component_area_ratio`, `max_component_gap_mm` | które skany pominąć; kiedy oderwany kawałek to szum |
 | `merging` | `min_overlap`, `tolerance_mm`, `min_support`, `fuse_method`, `groups` | kiedy skany to ta sama kość; jak skleić; ręczne grupy |
 | `features` | `voxel_size`, `fpfh_radius_factor` | chmura punktów i FPFH do dopasowania |
-| `contacts` | `port`, `brush_mm`, `wand_angle_deg`, `rough_threshold`, ... | narzędzie do oznaczania i algorytm bazowy |
+| `contacts` | `method`, `rough_threshold`, `port`, `brush_mm`, ... | algorytm wykrywania i narzędzie do oznaczania |
+| `matching` | `source`, `tolerance_mm`, `collision_mm`, `ransac_iterations`, ... | dopasowanie po powierzchniach styku |
 | `visualization_3d` | `triangles_total`, `embed_plotly`, `open_browser` | wizualizacje HTML |
 
 ## Wyniki: `out/3d/` (generowane, można usunąć i policzyć od nowa)
@@ -191,12 +226,13 @@ out/3d/
         fpfh.npy            deskryptory FPFH chmury, (N, 33)
         meta.json           skany, ich przekształcenia, usunięty szum, statystyki
         scans/*.ply         każdy skan w układzie kości (*_noise.ply = usunięty szum)
-        contacts_auto.json  wynik algorytmu (detect_contacts.py)
     merging.json            nakładania wszystkich par skanów i przydział do kości
+    matching.json           dopasowanie powierzchni styku: wszystkie pary, wyniki, przekształcenia
     summary.csv             tabela kości (separator ";", otwiera się w Excelu)
-    bones.html, merging.html
+    bones.html, merging.html, matching.html
     cache/pairs.json        cache rejestracji par skanów
-contacts/<id kości>.json    RĘCZNE oznaczenia powierzchni styku (w repozytorium!)
+contacts/<id kości>.json         RĘCZNE oznaczenia powierzchni styku (w repozytorium!)
+contacts/auto/<id kości>.json    wynik algorytmu wykrywania (generowany, nie ma w repo)
 ```
 
 Kości w innym kodzie:
@@ -210,7 +246,7 @@ from bones import load_bones
 from contacts import load_contacts, surface_stats
 
 for bone in load_bones(features=True):              # bone.mesh, bone.cloud, bone.fpfh, bone.meta
-    c = load_contacts(bone.id, bone.mesh)            # None = nie oznaczona
+    c = load_contacts(bone.id, bone.mesh)            # ręczne; None = nie oznaczona ("auto" = wynik algorytmu)
     if c:
         print(bone.label, surface_stats(bone.mesh, c.labels))   # pole, średnica, normalna, ...
 ```
@@ -226,12 +262,13 @@ src/
     bones.py             kość (siatka, chmura, FPFH, meta): zapis / odczyt
     pipeline.py          cały krok 1 (prepare_all)
     contacts.py          powierzchnie styku: format, statystyki, algorytmy, ocena
+    matching_surfaces.py dopasowanie fragmentów po powierzchniach styku (RANSAC + ICP)
     contact_tool.py      serwer narzędzia do oznaczania
     web/                 strona narzędzia (HTML, CSS, JS - three.js)
     visualization_3d.py  wizualizacje plotly (HTML)
 scripts/         skrypty uruchamiające (patrz „Jak używać”)
 tests/           test_pipeline.py - test na sztucznych skanach
-contacts/        ręczne oznaczenia powierzchni styku
+contacts/        ręczne oznaczenia powierzchni styku (+ auto/ - wyniki algorytmu, generowane)
 settings.json    wszystkie ustawienia
 out/             wyniki (generowane, nie ma w repo)
 ```

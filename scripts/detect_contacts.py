@@ -5,11 +5,13 @@ Na razie jest tylko prosty algorytm bazowy "roughness" (szorstkość) - to punkt
 do pisania lepszego. Nowy algorytm dodaje się w src/contacts.py dekoratorem @detector.
 
 Użycie (z głównego folderu projektu, po scripts/prepare_data.py):
-    python scripts/detect_contacts.py                      # wszystkie kości, domyślny algorytm
+    python scripts/detect_contacts.py                      # wszystkie kości, algorytm z settings.json
     python scripts/detect_contacts.py --method roughness   # wybrany algorytm
     python scripts/detect_contacts.py 3 5                  # tylko kości nr 3 i 5
 
-Wyniki: out/3d/bones/<id>/contacts_auto.json (ręczne oznaczenia w contacts/ NIE są ruszane).
+Algorytm i jego ustawienia: settings.json, sekcja "contacts" ("method", "rough_threshold", ...).
+Wyniki: contacts/auto/<id>.json - zawsze liczone od nowa (ręczne oznaczenia contacts/<id>.json
+NIE są ruszane). Te same pliki czyta dopasowanie (match_surfaces.py w trybie auto / manual-auto).
 Jeśli kość ma ręczne oznaczenia, wypisuje IoU / precyzję / czułość algorytmu względem nich.
 Podgląd: python scripts/show_bones.py --auto
 """
@@ -41,7 +43,7 @@ def main() -> None:
     except ValueError as e:
         raise SystemExit(str(e)) from None
     params = config.contact_params()
-    method = args.method or next(iter(ct.DETECTORS))
+    method = args.method or params.method
     print(f"Algorytm: {method}, kości: {len(bones)}")
 
     scores = []

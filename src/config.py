@@ -81,6 +81,11 @@ def contact_params():
     return _section("contacts", ContactParams, skip=("port",))
 
 
+def matching_params():
+    from matching_surfaces import SurfaceMatchParams
+    return _section("matching", SurfaceMatchParams)
+
+
 def view3d_params():
     from visualization_3d import View3DParams
     return _section("visualization_3d", View3DParams, skip=("open_browser",))

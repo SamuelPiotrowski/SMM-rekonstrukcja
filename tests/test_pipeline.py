@@ -11,7 +11,8 @@ Tworzy w folderze tymczasowym:
     - kopię skanu A1 jako .stl - ma być wybrany .ply.
 Sprawdza: wyszukiwanie w podfolderach, grupowanie (A razem, B osobno), usunięcie szumu,
 zapis / odczyt kości, oznaczenia styku (zapis, odczyt, przeniesienie na inną siatkę),
-algorytm wykrywania i budowę wizualizacji.
+algorytm wykrywania (zapis w contacts/auto/, cache), dopasowanie powierzchni styku
+(tryby manual / auto / manual-auto, odnalezienie drugiej strony przełomu) i budowę wizualizacji.
 
 Uruchomienie (z głównego folderu projektu):
     python tests/test_pipeline.py
@@ -20,6 +21,7 @@ Uruchomienie (z głównego folderu projektu):
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -29,11 +31,13 @@ import numpy as np  # noqa: E402
 import trimesh  # noqa: E402
 
 import contacts as ct  # noqa: E402
+import matching_surfaces as ms  # noqa: E402
 from bones import FeatureParams, load_bones  # noqa: E402
 from data_parsing import ScanParams, find_scans  # noqa: E402
 from merging import MergeParams  # noqa: E402
 from pipeline import prepare_all  # noqa: E402
-from visualization_3d import View3DParams, bones_figure, merging_figure  # noqa: E402
+from visualization_3d import (View3DParams, bones_figure, match_matrix_figure, matching_figure,  # noqa: E402
+                              merging_figure)
 
 
 def bumpy_sphere(seed: int, radius: float = 12.0) -> trimesh.Trimesh:
@@ -161,11 +165,56 @@ def main() -> None:
             found = ct.detect_contacts(bone, name, ct.ContactParams())
             check(len(found.labels) == len(v), f"algorytm \"{name}\" działa ({len(found.surface_ids)} pow.)")
 
+        print("Wynik algorytmu: zapis w contacts/auto/ i cache")
+        root = tmp / "contacts"
+        other = [x for x in loaded if x.id != bone.id][0]
+        cp = ct.ContactParams(rough_threshold=0.02)                 # niski próg - na gładkiej kuli też coś znajdzie
+        first, computed1 = ct.auto_contacts(other, cp, root)
+        again, computed2 = ct.auto_contacts(other, cp, root)
+        changed, computed3 = ct.auto_contacts(other, replace(cp, rough_threshold=0.03), root)
+        check((root / "auto" / f"{other.id}.json").exists(), "wynik algorytmu w contacts/auto/<id>.json")
+        check(computed1 and not computed2 and np.array_equal(first.labels, again.labels),
+              "drugi raz z cache (bez liczenia)")
+        check(computed3, "inne ustawienia algorytmu -> liczone od nowa")
+
+        print("Dopasowanie powierzchni styku")
+        mp = ms.SurfaceMatchParams(ransac_iterations=200000)
+        modes = {}
+        for source in ms.SOURCES:
+            surfs, info = ms.extract_surfaces(loaded, replace(mp, source=source), cp, root)
+            modes[source] = {b_id: {s.contacts.source for s in surfs if s.bone.id == b_id} for b_id in info}
+        check(modes["manual"][bone.id] == {"manual"} and not modes["manual"][other.id],
+              "tryb manual: tylko ręczne, kość bez nich pominięta")
+        check(modes["auto"][bone.id] == {"auto:roughness"}, "tryb auto: tylko z algorytmu (także gdy są ręczne)")
+        check(modes["manual-auto"][bone.id] == {"manual"} and modes["manual-auto"][other.id] <= {"auto:roughness"},
+              "tryb manual-auto: ręczne, a gdy brak - z algorytmu")
+        # druga strona przełomu = ta sama powierzchnia obrócona, inaczej próbkowana, z szumem, normalne przeciwne
+        surfs, _ = ms.extract_surfaces([bone], mp, cp, root)
+        a_s = surfs[0]
+        rng = np.random.default_rng(3)
+        R = trimesh.transformations.random_rotation_matrix(rng.random(3))
+        R[:3, 3] = [40.0, -15.0, 8.0]
+        keep = rng.random(len(a_s.points)) < 0.8
+        b_pts = a_s.points[keep]
+        b_s = ms.Surface(bone=a_s.bone, contacts=a_s.contacts, sid=99, area_mm2=0.8 * a_s.area_mm2,
+                         points=b_pts @ R[:3, :3].T + R[:3, 3] + rng.normal(0, 0.05, b_pts.shape),
+                         normals=-(a_s.normals[keep] @ R[:3, :3].T), bone_tree=a_s.bone_tree)
+        r = ms.match_pair(a_s, b_s, replace(mp, collision_mm=1e6))   # kolizja bez sensu: B to ta sama kość
+        err = np.linalg.norm(a_s.points @ np.asarray(r["T"])[:3, :3].T + np.asarray(r["T"])[:3, 3]
+                             - (a_s.points @ R[:3, :3].T + R[:3, 3]), axis=1).mean()
+        check(err < 0.3, f"odnalezione przekształcenie drugiej strony przełomu: błąd {err:.3f} mm")
+
         print("Wizualizacje")
         fig = bones_figure(loaded, {bone.id: back}, "fpfh", View3DParams())
         check(len(fig.data) > 4, "figura kości (FPFH + powierzchnie styku)")
         fig = merging_figure(loaded, View3DParams())
         check(len(fig.data) >= 4, "figura łączenia skanów (3 skany + szum)")
+        surfs, _ = ms.extract_surfaces(loaded, replace(mp, source="manual-auto", ransac_seeds=1), cp, root)
+        results = ms.match_all(surfs, replace(mp, source="manual-auto", ransac_seeds=1), progress=lambda _: None)
+        rep = ms.report(surfs, results, mp, cp)
+        fig = matching_figure(results, {s.bone.id: s.bone for s in surfs}, {s.bone.id: s.contacts for s in surfs})
+        check(len(results) > 0 and len(fig.data) >= 2 and len(match_matrix_figure(rep).data) == 1,
+              f"figury dopasowania ({len(results)} par)")
     print(f"Wszystkie testy OK ({time.perf_counter() - start:.0f} s)")
 
 

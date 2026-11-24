@@ -6,11 +6,13 @@ Etykiety są przypisane do WIERZCHOŁKÓW siatki kości (out/3d/bones/<id>/mesh.
     labels[i] = k  -> wierzchołek należy do powierzchni styku nr k (1, 2, ...).
 Jedna kość może mieć kilka powierzchni styku (np. przełom na każdym końcu).
 
-Skąd się biorą etykiety:
+Skąd się biorą etykiety (oba rodzaje w jednym folderze contacts/, ten sam format):
     - RĘCZNIE: scripts/mark_contacts.py (przeglądarka) -> contacts/<id_kości>.json
-      Folder contacts/ jest w repozytorium - to ręczna praca, warto ją commitować.
-    - ALGORYTM: scripts/detect_contacts.py -> out/3d/bones/<id>/contacts_auto.json
-      Ten sam format, pole "source" = "auto:<nazwa algorytmu>".
+      To ręczna praca - jest w repozytorium, warto ją commitować.
+    - ALGORYTM: scripts/detect_contacts.py -> contacts/auto/<id_kości>.json
+      Pole "source" = "auto:<nazwa algorytmu>", pole "detector" = algorytm i jego ustawienia.
+      Generowane (nie ma ich w repozytorium) - auto_contacts() liczy je na nowo, gdy brakuje
+      pliku albo zmienił się algorytm, jego ustawienia lub siatka kości.
 
 Jak dodać własny algorytm:
     @detector("moja_metoda")
@@ -18,6 +20,7 @@ Jak dodać własny algorytm:
         ...  # zwróć labels (V,) jak wyżej
         return labels
     potem: python scripts/detect_contacts.py --method moja_metoda
+    albo na stałe (też dla dopasowania i narzędzia): settings.json, "contacts" -> "method".
     Skrypt porówna wynik z ręcznymi oznaczeniami (IoU, precyzja, czułość), jeśli są.
 
 Format pliku JSON:
@@ -25,6 +28,7 @@ Format pliku JSON:
       "format": "bones-smm-contacts/1",
       "bone": "<id kości>", "source": "manual" | "auto:<metoda>", "updated": "<data>",
       "mesh": {"vertices": V, "fingerprint": "..."},    # do wykrycia zmiany siatki
+      "detector": {"method": "...", "params": {...}},   # tylko wynik algorytmu
       "labels_zlib_b64": "...",          # labels (V,) uint8 skompresowane zlib + base64
       "surfaces": [
         {"id": 1, "name": "...", "area_mm2": ..., "centroid": [x, y, z], "normal": [...],
@@ -43,7 +47,7 @@ import base64
 import hashlib
 import json
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -65,6 +69,7 @@ PALETTE = ("#e8508f", "#18b0a6", "#f2b134", "#7b61ff", "#2b9be0", "#9bc53d", "#f
 
 @dataclass(frozen=True)
 class ContactParams:
+    method: str = "roughness"         # algorytm wykrywania (detect_contacts.py, narzędzie, dopasowanie "auto")
     brush_mm: float = 2.0             # startowy promień pędzla w narzędziu [mm]
     wand_angle_deg: float = 25.0      # startowa tolerancja kąta różdżki [stopnie]
     roughness_radius_mm: float = 1.0  # algorytm bazowy: promień liczenia szorstkości
@@ -82,6 +87,7 @@ class Contacts:
     source: str = "manual"
     updated: str = ""
     remapped: bool = False                      # True = przeniesione ze starej wersji siatki
+    detector: dict = field(default_factory=dict)  # wynik algorytmu: {"method", "params"}
 
     @property
     def surface_ids(self) -> list[int]:
@@ -180,22 +186,26 @@ def surface_stats(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray) -> list[d
 # ZAPIS / ODCZYT
 # -----------------
 
-def contacts_path(bone_id: str, source: str = "manual") -> Path:
-    """manual -> contacts/<id>.json, auto -> out/3d/bones/<id>/contacts_auto.json."""
-    from config import CONTACTS_DIR, DATA_OUT
-
-    if source == "manual":
-        return CONTACTS_DIR / f"{bone_id}.json"
-    return DATA_OUT / "bones" / bone_id / "contacts_auto.json"
+def contacts_path(bone_id: str, source: str = "manual", root: Path | None = None) -> Path:
+    """manual -> contacts/<id>.json, auto -> contacts/auto/<id>.json (root = inny folder niż contacts/)."""
+    if root is None:
+        from config import CONTACTS_DIR as root
+    root = Path(root)
+    return root / f"{bone_id}.json" if source == "manual" else root / "auto" / f"{bone_id}.json"
 
 
 def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Path | None = None) -> Path | None:
-    """Zapisuje etykiety do JSON. Brak oznaczeń = plik jest usuwany. Zwraca ścieżkę (albo None)."""
-    path = Path(path or contacts_path(contacts.bone_id, "manual" if contacts.source == "manual" else "auto"))
+    """Zapisuje etykiety do JSON i zwraca ścieżkę.
+
+    Ręczne bez żadnej powierzchni = plik jest usuwany (zwraca None). Wynik algorytmu jest
+    zapisywany zawsze, także pusty - żeby nie liczyć go na nowo przy każdym uruchomieniu.
+    """
+    manual = contacts.source == "manual"
+    path = Path(path or contacts_path(contacts.bone_id, "manual" if manual else "auto"))
     labels = np.asarray(contacts.labels, dtype=np.uint8)
     if len(labels) != len(mesh.vertices):
         raise ValueError(f"{contacts.bone_id}: {len(labels)} etykiet, a siatka ma {len(mesh.vertices)} wierzchołków")
-    if not labels.any():
+    if manual and not labels.any():
         if path.exists():
             path.unlink()
         return None
@@ -210,6 +220,7 @@ def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Pat
     data = {"format": FORMAT, "bone": contacts.bone_id, "source": contacts.source,
             "updated": datetime.now().isoformat(timespec="seconds"),
             "mesh": {"vertices": len(v), "fingerprint": mesh_fingerprint(mesh)},
+            **({"detector": contacts.detector} if contacts.detector else {}),
             "labels_zlib_b64": base64.b64encode(zlib.compress(labels.tobytes(), 9)).decode("ascii"),
             "surfaces": surfaces}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,13 +241,13 @@ def _compact_lists(text: str) -> str:
 
 
 def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "manual",
-                  path: Path | None = None) -> Contacts | None:
-    """Wczytuje etykiety kości (None = brak pliku).
+                  path: Path | None = None, root: Path | None = None) -> Contacts | None:
+    """Wczytuje zapisane etykiety kości: "manual" (ręczne) albo "auto" (wynik algorytmu). None = brak pliku.
 
     Jeśli siatka zmieniła się od zapisu (inny fingerprint), etykiety są przenoszone
     po położeniu punktów, a `remapped` = True.
     """
-    path = Path(path or contacts_path(bone_id, source))
+    path = Path(path or contacts_path(bone_id, source, root))
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -257,7 +268,7 @@ def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "
             ok = np.isfinite(d)
             labels[ok] = np.concatenate(ids)[idx[ok]]
     return Contacts(bone_id=bone_id, labels=labels, names=names, source=data.get("source", source),
-                    updated=data.get("updated", ""), remapped=not same)
+                    updated=data.get("updated", ""), remapped=not same, detector=data.get("detector", {}))
 
 
 # -----------------
@@ -373,14 +384,39 @@ def boundary_vertices(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
     return mask
 
 
+def detection_params(params: ContactParams) -> dict:
+    """Ustawienia wpływające na wynik algorytmu (bez ustawień narzędzia i nazwy algorytmu)."""
+    return {k: v for k, v in asdict(params).items() if k not in ("method", "brush_mm", "wand_angle_deg")}
+
+
 def detect_contacts(bone, method: str | None = None, params: ContactParams = ContactParams()) -> Contacts:
-    """Uruchamia algorytm `method` (z DETECTORS; None = pierwszy, czyli "edges") na kości."""
-    method = method or next(iter(DETECTORS))
+    """Uruchamia algorytm `method` (z DETECTORS; None = params.method) na kości. Nic nie zapisuje."""
+    method = method or params.method
     if method not in DETECTORS:
         raise ValueError(f"Nieznany algorytm {method!r}, dostępne: {', '.join(DETECTORS)}")
     labels = np.asarray(DETECTORS[method](bone, params), dtype=np.uint8)
-    names = {k: f"Wykryta {k}" for k in np.unique(labels) if k > 0}
-    return Contacts(bone_id=bone.id, labels=labels, names=names, source=f"auto:{method}")
+    names = {int(k): f"Wykryta {k}" for k in np.unique(labels) if k > 0}
+    return Contacts(bone_id=bone.id, labels=labels, names=names, source=f"auto:{method}",
+                    detector={"method": method, "params": detection_params(params)})
+
+
+def auto_contacts(bone, params: ContactParams = ContactParams(),
+                  root: Path | None = None) -> tuple[Contacts, bool]:
+    """Wynik algorytmu params.method dla kości: z cache (contacts/auto/) albo policzony i zapisany.
+
+    Liczy na nowo, gdy pliku nie ma albo powstał innym algorytmem, z innymi ustawieniami
+    lub na innej siatce kości.
+
+    Returns:
+        (etykiety - puste, gdy algorytm nic nie znalazł; True = właśnie policzone, False = z cache).
+    """
+    want = {"method": params.method, "params": detection_params(params)}
+    cached = load_contacts(bone.id, bone.mesh, "auto", root=root)
+    if cached is not None and not cached.remapped and cached.detector == want:
+        return cached, False
+    found = detect_contacts(bone, params.method, params)
+    save_contacts(bone.mesh, found, contacts_path(bone.id, "auto", root))
+    return found, True
 
 
 # -----------------
