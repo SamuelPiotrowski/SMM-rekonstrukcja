@@ -2,10 +2,10 @@
 Test całego przygotowania danych na SZTUCZNYCH skanach (nie potrzebuje prawdziwych skanów).
 
 Tworzy w folderze tymczasowym:
-    - fragment A (kula ~25 mm z losowymi wybrzuszeniami) zeskanowany 3 razy, za każdym
+    - fragment A (kula ~25 a.u. z losowymi wybrzuszeniami) zeskanowany 3 razy, za każdym
       razem częściowo, z innej strony i w innym układzie współrzędnych (obrót + przesunięcie),
       w podfolderach o TYCH SAMYCH nazwach plików (jak kolejne sesje Medita), jeden głębiej,
-    - do jednego skanu A dołożony szum: oderwany kawałek 60 mm od fragmentu,
+    - do jednego skanu A dołożony szum: oderwany kawałek 60 a.u. od fragmentu,
     - fragment B (inny kształt) zeskanowany raz,
     - skan "occlusion" (A i B razem) - ma być pominięty,
     - kopię skanu A1 jako .stl - ma być wybrany .ply.
@@ -13,7 +13,8 @@ Sprawdza: wyszukiwanie w podfolderach, grupowanie (A razem, B osobno), usunięci
 zapis / odczyt kości, oznaczenia styku (zapis, odczyt, przeniesienie na inną siatkę),
 algorytm wykrywania (zapis w contacts/auto/, cache), dopasowanie powierzchni styku
 (tryby manual / auto / manual-auto, odnalezienie drugiej strony przełomu), przeliczanie jednej
-pary w podglądzie z suwakami (match_tool) i budowę wizualizacji.
+pary w podglądzie z suwakami (match_tool), budowę wizualizacji, zestawy danych oraz przeniesienie
+oznaczeń po zmianie nazwy folderu ze skanem i po wyłączeniu łączenia skanów.
 
 Uruchomienie (z głównego folderu projektu):
     python tests/test_pipeline.py
@@ -32,6 +33,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import numpy as np  # noqa: E402
 import trimesh  # noqa: E402
 
+import config  # noqa: E402
 import contacts as ct  # noqa: E402
 import matching_surfaces as ms  # noqa: E402
 import surface_features as sf  # noqa: E402
@@ -40,7 +42,7 @@ from data_parsing import ScanParams, find_scans  # noqa: E402
 from match_tool import MatchState, matching_page  # noqa: E402
 from merging import MergeParams  # noqa: E402
 from pipeline import prepare_all  # noqa: E402
-from visualization_3d import (View3DParams, bones_figure, match_matrix_figure, matching_figure,  # noqa: E402
+from visualization_3d import (View3DParams, bones_figure, compare_layers,match_matrix_figure, matching_figure,  # noqa: E402
                               merging_figure)
 
 
@@ -49,7 +51,7 @@ def bumpy_sphere(seed: int, radius: float = 12.0) -> trimesh.Trimesh:
 
     Args:
         seed:   ziarno - inne ziarno = inny kształt (inny "fragment kości").
-        radius: promień kuli przed wybrzuszeniami [mm] (30 wybrzuszeń i wgłębień, każde do ±2 mm).
+        radius: promień kuli przed wybrzuszeniami [a.u.] (30 wybrzuszeń i wgłębień, każde do ±2 a.u.).
 
     Returns:
         Zamknięta siatka trimesh (icosphere, ~82 tys. trójkątów), środek w (0, 0, 0).
@@ -71,7 +73,7 @@ def partial_scan(mesh: trimesh.Trimesh, view: np.ndarray, seed: int) -> trimesh.
 
     Zostają trójkąty po stronie `view` (trochę ponad połowę kuli), więc dwa skany z różnych
     stron częściowo się pokrywają - jak prawdziwe skany tego samego fragmentu.
-    Potem losowy obrót i przesunięcie do ±30 mm (ziarno `seed`).
+    Potem losowy obrót i przesunięcie do ±30 a.u. (ziarno `seed`).
 
     Args:
         mesh: cały fragment (np. z bumpy_sphere), środek w (0, 0, 0).
@@ -165,12 +167,12 @@ def main() -> None:
         a = max(bones, key=lambda x: x.n_scans)
         b = min(bones, key=lambda x: x.n_scans)
         check(a.n_scans == 3 and b.n_scans == 1, f"skany w kościach: A={a.n_scans}, B={b.n_scans}")
-        check(a.meta["noise_removed_mm2"] > 100, f"usunięty szum (kawałek 60 mm dalej): {a.meta['noise_removed_mm2']:.0f} mm2")
+        check(a.meta["noise_removed_au2"] > 100, f"usunięty szum (kawałek 60 a.u. dalej): {a.meta['noise_removed_au2']:.0f} a.u.²")
         single = max(s["raw"]["triangles"] for s in a.meta["scans"])
-        check(a.meta["stats"]["area_mm2"] > 1.3 * min(
-            sum(c["area_mm2"] for c in s["components"] if c["kept"]) for s in a.meta["scans"]),
+        check(a.meta["stats"]["area_au2"] > 1.3 * min(
+            sum(c["area_au2"] for c in s["components"] if c["kept"]) for s in a.meta["scans"]),
             "połączona kość ma większe pole niż pojedynczy skan")
-        check(np.ptp(np.asarray(a.mesh.vertices), axis=0).max() < 35, "kość A bez oddalonego szumu (wymiar < 35 mm)")
+        check(np.ptp(np.asarray(a.mesh.vertices), axis=0).max() < 35, "kość A bez oddalonego szumu (wymiar < 35 a.u.)")
         check(single > 0, "statystyki surowych skanów w meta")
 
         print("Ponowne uruchomienie (cache par)")
@@ -204,7 +206,7 @@ def main() -> None:
         check(moved.remapped and (moved.labels == truth).mean() > 0.95,
               f"przeniesienie na zmienioną siatkę: zgodność {(moved.labels == truth).mean():.3f}")
         stats = ct.surface_stats(bone.mesh, labels)
-        check(len(stats) == 2 and all(s["area_mm2"] > 0 and s["max_diameter_mm"] > 0 for s in stats),
+        check(len(stats) == 2 and all(s["area_au2"] > 0 and s["max_diameter_au"] > 0 for s in stats),
               "statystyki powierzchni (pole, średnica)")
         r = ct.compare(bone.mesh, labels, labels)
         check(abs(r["iou"] - 1) < 1e-9, "ocena: te same etykiety -> IoU = 1")
@@ -214,9 +216,9 @@ def main() -> None:
             found = ct.detect_contacts(bone, name, ct.ContactParams())
             check(len(found.labels) == len(v), f"algorytm \"{name}\" działa ({len(found.surface_ids)} pow.)")
         n = 1000
-        fake = {"spread_2": np.r_[np.full(800, 0.02), np.full(200, 0.3)], "edge_mm": np.r_[np.full(800, 0.3), np.full(200, 0.15)]}
+        fake = {"spread_2": np.r_[np.full(800, 0.02), np.full(200, 0.3)], "edge_au": np.r_[np.full(800, 0.3), np.full(200, 0.15)]}
         fake = {k: x * np.random.default_rng(0).uniform(0.9, 1.1, n) for k, x in fake.items()}
-        sc = ct.bone_scores(fake, np.ones(n), ("spread_2", "edge_mm"))
+        sc = ct.bone_scores(fake, np.ones(n), ("spread_2", "edge_au"))
         check(abs(np.median(sc[:800])) < 0.5 and sc[800:].min() > 3,
               "features: wynik ~0 na typowej (korze), wysoki tam, gdzie większy rozrzut i gęstsza siatka")
         try:
@@ -254,17 +256,23 @@ def main() -> None:
         R[:3, 3] = [40.0, -15.0, 8.0]
         keep = rng.random(len(a_s.points)) < 0.8
         b_pts = a_s.points[keep]
-        b_s = ms.Surface(bone=a_s.bone, contacts=a_s.contacts, sid=99, area_mm2=0.8 * a_s.area_mm2,
+        b_s = ms.Surface(bone=a_s.bone, contacts=a_s.contacts, sid=99, area_au2=0.8 * a_s.area_au2,
                          points=b_pts @ R[:3, :3].T + R[:3, 3] + rng.normal(0, 0.05, b_pts.shape),
                          normals=-(a_s.normals[keep] @ R[:3, :3].T), bone_tree=a_s.bone_tree)
-        r = ms.match_pair(a_s, b_s, replace(mp, collision_mm=1e6))   # kolizja bez sensu: B to ta sama kość
+        r = ms.match_pair(a_s, b_s, replace(mp, collision_au=1e6))   # kolizja bez sensu: B to ta sama kość
         err = np.linalg.norm(a_s.points @ np.asarray(r["T"])[:3, :3].T + np.asarray(r["T"])[:3, 3]
                              - (a_s.points @ R[:3, :3].T + R[:3, 3]), axis=1).mean()
-        check(err < 0.3, f"odnalezione przekształcenie drugiej strony przełomu: błąd {err:.3f} mm")
+        check(err < 0.3, f"odnalezione przekształcenie drugiej strony przełomu: błąd {err:.3f} a.u.")
 
         print("Wizualizacje")
         fig = bones_figure(loaded, {bone.id: back}, "fpfh", View3DParams())
         check(len(fig.data) > 4, "figura kości (FPFH + powierzchnie styku)")
+        half = ct.Contacts(bone.id, np.where(np.arange(len(back.labels)) % 2 == 0, back.labels, 0).astype(np.uint8))
+        masks, score = compare_layers(bone, half, back)
+        check(set(masks) == {"both", "manual_only"} and score is not None and score["precision"] > 0.99
+              and 0.2 < score["recall"] < 0.8, f"porównanie ręczne vs algorytm (czułość {score['recall']:.2f})")
+        fig = bones_figure(loaded, {bone.id: half}, "scan", View3DParams(), reference={bone.id: back})
+        check(len(fig.data) > 4 and "ręczne vs algorytm" in fig.layout.title.text, "figura porównania")
         fig = merging_figure(loaded, View3DParams())
         check(len(fig.data) >= 4, "figura łączenia skanów (3 skany + szum)")
         surfs, _ = ms.extract_surfaces(loaded, replace(mp, source="manual-auto", ransac_seeds=1), cp, root)
@@ -299,18 +307,91 @@ def main() -> None:
         top = rep["pairs"][0]
         same = tool.match({"a": top["a"], "b": top["b"], "params": {}, "mode": "score", "T": top["T"]})
         check(abs(same["score"] - top["score"]) < 1e-3, "ta sama para i ustawienia -> ten sam wynik oceny")
-        looser = tool.match({"a": top["a"], "b": top["b"], "params": {"tolerance_mm": 2.0}, "mode": "score",
+        looser = tool.match({"a": top["a"], "b": top["b"], "params": {"tolerance_au": 2.0}, "mode": "score",
                              "T": top["T"]})
-        check(looser["contact_mm2"] >= same["contact_mm2"], "większa tolerancja styku -> styk nie mniejszy")
-        full = tool.match({"a": top["a"], "b": top["b"], "params": {"sample_mm": 0.5, "ransac_iterations": 20000},
+        check(looser["contact_au2"] >= same["contact_au2"], "większa tolerancja styku -> styk nie mniejszy")
+        full = tool.match({"a": top["a"], "b": top["b"], "params": {"sample_au": 0.5, "ransac_iterations": 20000},
                            "mode": "full"})
         check(len(full["T"]) == 4 and full["mode"] == "full", f"dopasowanie pary od nowa ({full['seconds']} s)")
         g = tool.geometry(top["a"])
         check(len(g["positions"]) > 0 and len(g["surf_indices"]) > 0, "geometria do strony (siatka + powierzchnia)")
-        check(tool.warnings(tool.params) == [] and len(tool.warnings(replace(tool.params, tolerance_mm=9.0))) == 1,
+        check(tool.warnings(tool.params) == [] and len(tool.warnings(replace(tool.params, tolerance_au=9.0))) == 1,
               "ostrzeżenie, gdy settings.json różni się od matching.json")
         page = matching_page(tool, out_dir / "matching.html")
         check(page.stat().st_size > 1000, "strona HTML z zapisanego matching.json (tune_matching.py --html)")
+
+        print("Zestawy danych i zmiana nazwy kości")
+        check(config.dataset_dirs("x")[0] == config.SCANS_ROOT / "x"
+              and config.dataset_dirs("x")[2] == config.CONTACTS_ROOT / "x", "foldery zestawu = podfoldery")
+        try:
+            config.use_dataset("nie_ma_takiego_zestawu_123")
+            check(False, "nieistniejący zestaw -> błąd")
+        except SystemExit as e:
+            check("Nie ma zestawu" in str(e), "nieistniejący zestaw -> czytelny błąd z listą zestawów")
+        check(config.DATASET != "nie_ma_takiego_zestawu_123", "po błędzie zestaw bez zmian")
+        check(any(f.id == "01.01.2026-test_1" and f.label == "test_(1)" for f in files),
+              "jedyny skan w folderze: nazwa kości = nazwa folderu")
+        check(all(np.abs(np.asarray(x.mesh.vertices).mean(axis=0)).max() < 1e-6 for x in loaded),
+              "kości wyśrodkowane (także z jednego skanu)")
+        for f in root.glob("*.json"):
+            f.unlink()
+        ct.save_contacts(bone.mesh, ct.Contacts(bone.id, labels), root / f"{bone.id}.json", ct.scan_frames(bone))
+        ct.save_contacts(other.mesh, other_c, root / f"{other.id}.json", ct.scan_frames(other))
+        area_a = ct.vertex_areas(bone.mesh)[labels > 0].sum()
+        (scans_dir / "01.01.2026-test").rename(scans_dir / "nowa_nazwa")
+        renamed = prepare_all(scans_dir, out_dir, contacts_dir=root, scan=ScanParams(), merge=MergeParams(),
+                              features=FeatureParams(), verbose=False)
+        new_ids = {x.id for x in renamed}
+        check(other.id not in new_ids and "nowa_nazwa-lowerjaw" in new_ids, f"nowe nazwy kości: {sorted(new_ids)}")
+        files_now = {f.stem for f in root.glob("*.json")}
+        check(files_now <= new_ids and len(files_now) == 2, f"oznaczenia przeniesione na nowe nazwy: {sorted(files_now)}")
+        nb = [x for x in renamed if x.id == "nowa_nazwa-lowerjaw"][0]
+        got = ct.load_contacts(nb.id, nb.mesh, root=root, frames=ct.scan_frames(nb))
+        check(np.array_equal(got.labels, other_c.labels), "kość z jednego skanu: etykiety bez zmian")
+        na = max(renamed, key=lambda x: x.n_scans)
+        got = ct.load_contacts(na.id, na.mesh, root=root, frames=ct.scan_frames(na))
+        area = ct.vertex_areas(na.mesh)[got.labels > 0].sum()
+        check(0.8 < area / area_a < 1.3, f"połączona kość: oznaczenia po zmianie nazwy ({area:.0f} / {area_a:.0f} a.u.²)")
+
+        split = prepare_all(scans_dir, out_dir, contacts_dir=root, scan=ScanParams(),
+                            merge=MergeParams(enabled=False), features=FeatureParams(), verbose=False)
+        ref = [x for x in split if x.id == na.id][0]
+        got = ct.load_contacts(ref.id, ref.mesh, root=root, frames=ct.scan_frames(ref))
+        area = ct.vertex_areas(ref.mesh)[got.labels > 0].sum()
+        check(len(split) == 4 and area > 0.2 * area_a,
+              f"łączenie wyłączone (inny środek kości): oznaczenia przeniesione przez wspólny skan ({area:.0f} a.u.²)")
+
+        print("Syntetyczne kości (make_synthetic.py)")
+        import synthetic_bones as sb
+        from scipy.spatial import cKDTree
+        synth =sb.generate(sb.SyntheticParams(n_bones=2, fragments=(3, 3), edge_au=0.5, seed=1))
+        meshes = [trimesh.Trimesh(f.vertices, f.faces, process=False) for f in synth.fragments]
+        check(len(synth.fragments) == 6 and all(m.is_watertight and m.is_winding_consistent and m.volume > 0
+                                                for m in meshes), "6 fragmentów, siatki szczelne, normalne na zewnątrz")
+        syn_in, syn_out, syn_ct = tmp / "syn" / "skany", tmp / "syn" / "out", tmp / "syn" / "contacts"
+        gt = sb.write_dataset(synth, syn_in, syn_ct)
+        check(len(gt["pairs"]) == 4, f"4 pary (po 2 przełomy na kość): {len(gt['pairs'])}")
+        saved_in, saved_settings = config.DATA_IN, config.DATASET_SETTINGS
+        config.DATA_IN, config.DATASET_SETTINGS = syn_in, config.load_settings(syn_in / sb.DATASET_SETTINGS)
+        check(not config.merge_params().enabled, "settings.json zestawu wyłącza łączenie skanów")
+        config.DATA_IN, config.DATASET_SETTINGS = saved_in, saved_settings
+        syn_bones = {b.id: b for b in prepare_all(syn_in, syn_out, contacts_dir=syn_ct, scan=ScanParams(),
+                                                  merge=MergeParams(enabled=False), features=FeatureParams(),
+                                                  verbose=False)}
+        p = gt["pairs"][0]
+        a, b = syn_bones[p["a"]], syn_bones[p["b"]]
+        la = ct.load_contacts(a.id, a.mesh, root=syn_ct, frames=ct.scan_frames(a)).labels
+        lb = ct.load_contacts(b.id, b.mesh, root=syn_ct, frames=ct.scan_frames(b)).labels
+        T = sb.true_transform(gt, a, b)
+        pb = np.asarray(b.mesh.vertices)[lb == p["surface_b"]] @ T[:3, :3].T + T[:3, 3]
+        d = cKDTree(np.asarray(a.mesh.vertices)[la == p["surface_a"]]).query(pb)[0]
+        check(np.median(d) < 0.3, f"prawdziwe przełomy na przygotowanych kościach nakładają się "
+                                  f"(true_transform, mediana {np.median(d):.2f} a.u.)")
+        chip = sb.generate(replace(sb.SyntheticParams(edge_au=0.5), **sb.PRESETS["chip"]))
+        thin = [f for f in chip.fragments if f.index == 2][0]
+        tm = trimesh.Trimesh(thin.vertices, thin.faces, process=False)
+        check(len(chip.fragments) == 4 and len(thin.surfaces) == 2 and tm.is_watertight and tm.volume > 0,
+              f"preset chip: 4 części, płaski odłamek szczelny, 2 przełomy ({tm.volume:.0f} a.u.³)")
     print(f"Wszystkie testy OK ({time.perf_counter() - start:.0f} s)")
 
 

@@ -3,7 +3,7 @@ KROK 2: ręczne oznaczanie powierzchni styku (przełomów) na kościach - w prze
 
 Otwiera stronę z kością w 3D: pędzel, gumka i "różdżka" (zaznacza obszar aż do ostrej
 krawędzi), kilka powierzchni na kość, cofanie (Ctrl+Z), zapis (Ctrl+S).
-Oznaczenia trafiają do contacts/<id_kości>.json (format: src/contacts.py).
+Oznaczenia trafiają do contacts/<zestaw>/<id_kości>.json (format: src/contacts.py).
 
 Kość bez ręcznych oznaczeń otwiera się od razu z USTAWIENIEM AUTOMATYCZNYM (wynik algorytmu
 z sekcji "contacts" w settings.json) - wystarczy je poprawić i zapisać (Ctrl+S). Strona pisze
@@ -24,7 +24,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # polskie znaki także przy przekierowaniu do pliku
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # ... i w komunikatach błędów (SystemExit)
 
+import config  # noqa: E402
 from contact_tool import serve  # noqa: E402
 
 
@@ -33,7 +35,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, help="port serwera (domyślnie contacts.port z settings.json)")
     parser.add_argument("--no-open", action="store_true", help="nie otwieraj przeglądarki")
+    config.add_dataset_argument(parser)
     args = parser.parse_args()
+    config.use_dataset(args.dataset)
     serve(port=args.port, open_browser=not args.no_open)
 
 

@@ -11,7 +11,8 @@
 //   computed    - {klucz pary: {result, params}} - wyniki przeliczone na tej stronie,
 //   geometry    - {klucz powierzchni: siatki} - pobierane raz,
 //   current     - indeks pokazanej pary w `pairs`,
-//   busy        - trwa zapytanie POST /api/match, pending - ostatnie żądanie czekające na swoją kolej.
+//   busy        - trwa zapytanie POST /api/match, pending - ostatnie żądanie czekające na swoją kolej,
+//   ruler       - linijka w widoku 3D (src/web/ruler.js; przycisk "📏 Linijka" albo klawisz L).
 // Zmiana suwaka przelicza TYLKO pokazaną parę. Gdy zmieniło się któreś z ustawień
 // szukania (SEARCH), para jest dopasowywana od nowa; gdy tylko ustawienia oceny -
 // oceniane jest obecne ustawienie (szybko). Zapytania nie nakładają się: w trakcie
@@ -27,11 +28,11 @@ const ITERATIONS = [10000, 25000, 50000, 100000, 250000, 500000, 1000000, 200000
 //   values - zamiast min/max: lista dozwolonych wartości (suwak wybiera indeks),
 //   unit, help - opis pod suwakiem. buildSliders dopisuje: input (element <input>), out (pole wartości).
 const SLIDERS = [
-  { group: "search", key: "sample_mm", label: "Odstęp punktów powierzchni", unit: "mm", min: 0.15, max: 1, step: 0.05,
+  { group: "search", key: "sample_au", label: "Odstęp punktów powierzchni", unit: "a.u.", min: 0.15, max: 1, step: 0.05,
     help: "Mniej = dokładniej i wolniej. Wpływa też na ocenę." },
-  { group: "search", key: "coarse_voxel_mm", label: "Odstęp punktów RANSAC", unit: "mm", min: 0.4, max: 3, step: 0.1,
+  { group: "search", key: "coarse_voxel_au", label: "Odstęp punktów RANSAC", unit: "a.u.", min: 0.4, max: 3, step: 0.1,
     help: "Rzadsze punkty zgrubnego ustawienia = szybciej, mniej dokładnie." },
-  { group: "search", key: "fpfh_radius_mm", label: "Promień FPFH", unit: "mm", min: 1, max: 10, step: 0.25,
+  { group: "search", key: "fpfh_radius_au", label: "Promień FPFH", unit: "a.u.", min: 1, max: 10, step: 0.25,
     help: "≈ wielkość nierówności przełomu, po których rozpoznawany jest kształt." },
   { group: "search", key: "ransac_iterations", label: "Iteracje RANSAC", values: ITERATIONS,
     help: "Więcej = pewniej trafia dobre ustawienie, czas rośnie liniowo." },
@@ -39,15 +40,15 @@ const SLIDERS = [
     help: "Niezależne próby, wygrywa najlepsza." },
   { group: "search", key: "ransac_normal_angle_deg", label: "RANSAC: maks. różnica normalnych", unit: "°",
     min: 5, max: 90, step: 1, help: "Odrzuca ustawienia z bardziej rozbieżnymi normalnymi." },
-  { group: "search", key: "icp_start_mm", label: "ICP: promień startowy", unit: "mm", min: 0.5, max: 6, step: 0.1,
+  { group: "search", key: "icp_start_au", label: "ICP: promień startowy", unit: "a.u.", min: 0.5, max: 6, step: 0.1,
     help: "Do jakiej odległości ICP szuka par punktów (potem połowa, na koniec 2 × odstęp)." },
-  { group: "score", key: "tolerance_mm", label: "Styk: maks. odległość", unit: "mm", min: 0.1, max: 2, step: 0.05,
+  { group: "score", key: "tolerance_au", label: "Styk: maks. odległość", unit: "a.u.", min: 0.1, max: 2, step: 0.05,
     help: "Punkty bliżej niż to liczą się do styku…" },
   { group: "score", key: "normal_angle_deg", label: "Styk: tolerancja kąta normalnych", unit: "°",
     min: 5, max: 90, step: 1, help: "…jeśli ich normalne są przeciwne z tą dokładnością." },
-  { group: "score", key: "collision_mm", label: "Kolizja: głębokość", unit: "mm", min: 0.2, max: 4, step: 0.1,
+  { group: "score", key: "collision_au", label: "Kolizja: głębokość", unit: "a.u.", min: 0.2, max: 4, step: 0.1,
     help: "Punkt kości głębiej pod powierzchnią drugiej = kolizja." },
-  { group: "score", key: "collision_search_mm", label: "Kolizja: zasięg szukania", unit: "mm", min: 1, max: 10,
+  { group: "score", key: "collision_search_au", label: "Kolizja: zasięg szukania", unit: "a.u.", min: 1, max: 10,
     step: 0.5, help: "Sprawdzane tylko tak blisko drugiej kości." },
 ];
 const SEARCH = SLIDERS.filter((s) => s.group === "search").map((s) => s.key);   // ustawienia szukania
@@ -56,7 +57,7 @@ const ALL = SLIDERS.map((s) => s.key);                                          
 /** Element strony o danym id. */
 const $ = (id) => document.getElementById(id);
 const state = { pairs: [], base: {}, params: {}, computed: {}, geometry: {}, current: 0,
-                busy: false, pending: null };
+                busy: false, pending: null, ruler: null };
 
 // ---------- pomocnicze ----------
 
@@ -209,7 +210,7 @@ function updateSnippet() {
 
 /**
  * Rysuje listę par (z filtrem z pola wyszukiwania). Przy parach przeliczonych na stronie:
- * stary wynik → nowy, z kolorem wzrostu / spadku (różnica co najmniej 0,5 mm²).
+ * stary wynik → nowy, z kolorem wzrostu / spadku (różnica co najmniej 0,5 a.u.²).
  */
 function renderList() {
   const q = $("pairSearch").value.trim().toLowerCase();
@@ -310,11 +311,14 @@ async function draw() {
   traces.push(meshTrace(ga.pos, ga.idx, T, COLORS.a, "A: " + ga.label));
   if (ga.sidx.length) traces.push(meshTrace(ga.spos, ga.sidx, T, COLORS.surf_a, ga.name));
   const axis = { visible: false };
-  Plotly.react("plot", traces, {
+  await Plotly.react("plot", traces, {
     paper_bgcolor: "#f4f6f8", margin: { l: 0, r: 0, t: 0, b: 0 },
     scene: { xaxis: axis, yaxis: axis, zaxis: axis, aspectmode: "data" },
     uirevision: pairKey(p),                           // kamera zostaje przy przeliczaniu, zmienia się z parą
   }, { displaylogo: false, scrollZoom: true, responsive: true });
+  // linijka (src/web/ruler.js): po każdym przerysowaniu pomiary znikają - kość A mogła się przesunąć
+  if (!state.ruler) state.ruler = attachRuler($("plot"), { place: "right" });
+  else state.ruler.clear();
 }
 
 // ---------- wynik ----------
@@ -335,12 +339,12 @@ function renderResult() {
       ? `<span class="was">było ${fmt(old, d)}${unit}</span>` : "";
   const row = (lbl, val) => `<span class="lbl">${lbl}</span><span class="val">${val}</span>`;
   $("resultCard").innerHTML = [
-    row("wynik = styk − kolizja", `<span class="big">${fmt(r.score)}</span> mm²${was(r.score, p.score)}`),
-    row("styk", `${fmt(r.contact_mm2)} mm²${was(r.contact_mm2, p.contact_mm2)}`),
+    row("wynik = styk − kolizja", `<span class="big">${fmt(r.score)}</span> a.u.²${was(r.score, p.score)}`),
+    row("styk", `${fmt(r.contact_au2)} a.u.²${was(r.contact_au2, p.contact_au2)}`),
     row("pokrycie A / B", `${fmt(100 * r.cover_a)}% / ${fmt(100 * r.cover_b)}%`),
-    row("RMSE w styku", `${fmt(r.rmse_mm, 2)} mm${was(r.rmse_mm, p.rmse_mm, 2)}`),
-    row("kolizja kości", `${fmt(r.collision_mm2)} mm²${was(r.collision_mm2, p.collision_mm2)}`),
-    row("pola powierzchni A / B", `${fmt(p.a_area_mm2)} / ${fmt(p.b_area_mm2)} mm²`),
+    row("RMSE w styku", `${fmt(r.rmse_au, 2)} a.u.${was(r.rmse_au, p.rmse_au, 2)}`),
+    row("kolizja kości", `${fmt(r.collision_au2)} a.u.²${was(r.collision_au2, p.collision_au2)}`),
+    row("pola powierzchni A / B", `${fmt(p.a_area_au2)} / ${fmt(p.b_area_au2)} a.u.²`),
     `<span class="foot">${c
       ? (c.result.mode === "full" ? "Dopasowane od nowa" : "Nowa ocena tego samego ustawienia")
         + ` w ${fmt(c.result.seconds, 1)} s` + (c.result.seed !== null && c.result.seed !== undefined

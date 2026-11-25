@@ -3,7 +3,7 @@ Interaktywne wizualizacje 3D kości - pliki HTML otwierane w przeglądarce (plot
 
 Trzy wizualizacje:
 
-1. KOŚCI (bones_figure; scripts/show_bones.py -> out/3d/bones.html) - wszystkie kości
+1. KOŚCI (bones_figure; scripts/show_bones.py -> out/3d/<zestaw>/bones.html) - wszystkie kości
    ułożone "na stole", każda leży płasko (najdłuższa oś poziomo). Powierzchnie styku
    (jeśli oznaczone) są zaznaczone kolorem.
        - lista "Pokaż" - wszystkie kości albo jedna, z przybliżeniem,
@@ -13,22 +13,25 @@ Trzy wizualizacje:
    Kolory (color_mode): "scan" - kolory skanera, "fragment" - każda kość w innym kolorze,
    "fpfh" - kolor wg deskryptorów FPFH (podobny kolor = podobny lokalny kształt,
    porównywalny między kośćmi).
+   Tryb porównania (show_bones.py --compare -> bones_compare.html): ręczne oznaczenia vs
+   algorytm - zgodne / fałszywy alarm / przeoczone (COMPARE_LAYERS) + IoU, precyzja, czułość.
 
 2. ŁĄCZENIE SKANÓW (merging_figure + overlap_figure; scripts/show_merging.py
-   -> out/3d/merging.html) - jak skany połączyły się w kości: każdy skan w innym
+   -> out/3d/<zestaw>/merging.html) - jak skany połączyły się w kości: każdy skan w innym
    kolorze (drobne "paski" dwóch kolorów = skany dobrze się pokrywają), usunięty szum
    na czerwono, macierz nakładania wszystkich par skanów.
 
 3. DOPASOWANIE POWIERZCHNI STYKU (matching_figure + match_matrix_figure;
-   scripts/tune_matching.py --html -> out/3d/matching.html) - najlepsze pary: kość A
+   scripts/tune_matching.py --html -> out/3d/<zestaw>/matching.html) - najlepsze pary: kość A
    ustawiona na kości B znalezionym przekształceniem, obie powierzchnie styku
    w kolorze; macierz wyników wszystkich par powierzchni.
 
 Zapis: save_figure (jedna figura na całe okno) albo write_page (kilka figur w sekcjach
 z nagłówkami). Przy embed_plotly = True plik HTML działa bez internetu i można go
-po prostu komuś wysłać.
+po prostu komuś wysłać. Każdy widok 3D ma linijkę (src/web/ruler.js): przycisk "📏 Linijka"
+na dole albo klawisz L, potem dwa kliknięcia w kość = odległość w a.u.
 
-Wizualizacja nie zmienia wyników - czyta tylko out/3d/ i contacts/.
+Wizualizacja nie zmienia wyników - czyta tylko out/3d/<zestaw>/ i contacts/.
 """
 
 from __future__ import annotations
@@ -45,7 +48,8 @@ import plotly.graph_objects as go
 from scipy.spatial import cKDTree
 
 from bones import Bone, read_mesh
-from contacts import Contacts, surface_color, surface_stats
+from config import read_json
+from contacts import Contacts, compare, surface_color, surface_stats, vertex_areas
 
 COLORS = ("#477eae", "#299784", "#ce8b3e", "#8b6ab3", "#c4566a", "#5b8f3a", "#3f6fb5", "#a7743a")
 SCAN_COLORS = ("#d9c7a7", "#2b9be0", "#f2b134", "#7b61ff", "#18b0a6", "#e8508f", "#9bc53d", "#ff8a3d")
@@ -53,6 +57,7 @@ NOISE_COLOR = "#d64545"
 COLOR_MODES = ("scan", "fragment", "fpfh")
 FONT = dict(family="Segoe UI, Arial, sans-serif", color="#1f2a36")
 LIGHTING = dict(ambient=0.55, diffuse=0.75, specular=0.12, roughness=0.65, fresnel=0.05)
+RULER_JS = Path(__file__).resolve().parent / "web" / "ruler.js"     # linijka w widokach 3D (pomiar w a.u.)
 
 
 @dataclass(frozen=True)
@@ -63,7 +68,7 @@ class View3DParams:
     embed_plotly: bool = True          # True = działa bez internetu (plik ~4.5 MB większy)
     background: str = "#f4f6f8"        # kolor tła strony
     bone_color: str = "#e3d9c6"        # kolor kości, gdy skan nie ma kolorów
-    gap_mm: float = 10.0               # odstęp między kośćmi na stole
+    gap_au: float = 10.0               # odstęp między kośćmi na stole
     source: str = "manual"             # powierzchnie styku w show_bones.py: "manual" / "auto" / "manual-auto"
 
 
@@ -196,8 +201,8 @@ def shelf_layout(sizes: list[np.ndarray], gap: float, aspect: float = 1.8) -> li
     idą w dół (malejące y).
 
     Args:
-        sizes:  (szerokość, wysokość) każdego prostokąta [mm].
-        gap:    odstęp między prostokątami [mm].
+        sizes:  (szerokość, wysokość) każdego prostokąta [a.u.].
+        gap:    odstęp między prostokątami [a.u.].
         aspect: proporcje szerokość : wysokość całości.
 
     Returns:
@@ -215,38 +220,72 @@ def shelf_layout(sizes: list[np.ndarray], gap: float, aspect: float = 1.8) -> li
     return centers
 
 
-def _bone_hover(nr: int, bone: Bone, stats: list[dict], contacts: Contacts | None) -> str:
+def _bone_hover(nr: int, bone: Bone, stats: list[dict], contacts: Contacts | None,
+                compare_lines: list[str] | None = None) -> str:
     """Podpowiedź po najechaniu na kość (hovertemplate plotly, HTML).
 
     Zawiera: numer i nazwę, skany, pole, wymiary, usunięty szum, powierzchnie styku
-    z ich kolorem, polem i średnicą.
+    z ich kolorem, polem i średnicą (albo - w trybie porównania - wynik porównania).
 
     Args:
-        nr:       numer kości na liście.
-        bone:     kość (dane z bone.meta).
-        stats:    powierzchnie styku z contacts.surface_stats; [] = nie oznaczone.
-        contacts: etykiety kości (nazwy powierzchni) albo None.
+        nr:            numer kości na liście.
+        bone:          kość (dane z bone.meta).
+        stats:         powierzchnie styku z contacts.surface_stats; [] = nie oznaczone.
+        contacts:      etykiety kości (nazwy powierzchni) albo None.
+        compare_lines: linie porównania ręczne vs algorytm (zastępują listę powierzchni) albo None.
 
     Returns:
         Tekst HTML dla hovertemplate (z "<extra></extra>" - bez nazwy śladu obok).
     """
     m = bone.meta
     st = m.get("stats", {})
-    ext = " × ".join(f"{e:.1f}" for e in sorted(st.get("extent_mm", [0, 0, 0]), reverse=True))
+    ext = " × ".join(f"{e:.1f}" for e in sorted(st.get("extent_au", [0, 0, 0]), reverse=True))
     lines = [f"<b>{nr}. {bone.label}</b>",
              f"skany: {len(m.get('scans', []))} ({', '.join(s['label'] for s in m.get('scans', []))})",
-             f"pole: {st.get('area_mm2', 0):.0f} mm²   wymiary: {ext} mm"]
-    if m.get("noise_removed_mm2"):
-        lines.append(f"usunięty szum: {m['noise_removed_mm2']:.0f} mm²")
-    if stats:
+             f"pole: {st.get('area_au2', 0):.0f} a.u.²   wymiary: {ext} a.u."]
+    if m.get("noise_removed_au2"):
+        lines.append(f"usunięty szum: {m['noise_removed_au2']:.0f} a.u.²")
+    if compare_lines is not None:
+        lines += compare_lines
+    elif stats:
         lines.append("<b>powierzchnie styku:</b>")
         for s in stats:
             name = contacts.name(s["id"]) if contacts else f"Powierzchnia {s['id']}"
-            lines.append(f"<span style='color:{surface_color(s['id'])}'>■</span> {name}: {s['area_mm2']:.0f} mm², "
-                         f"średnica {s['max_diameter_mm']:.1f} mm")
+            lines.append(f"<span style='color:{surface_color(s['id'])}'>■</span> {name}: {s['area_au2']:.0f} a.u.², "
+                         f"średnica {s['max_diameter_au']:.1f} a.u.")
     else:
         lines.append("<i>powierzchnie styku: nie oznaczone</i>")
     return "<br>".join(lines) + "<extra></extra>"
+
+
+COMPARE_LAYERS = (   # (klucz, kolor, nazwa) - tryb porównania ręczne vs algorytm
+    ("both", "#2e9e5b", "zgodne (ręczne i algorytm)"),
+    ("auto_only", "#e8622c", "tylko algorytm (fałszywy alarm)"),
+    ("manual_only", "#3b6fd8", "tylko ręczne (przeoczone)"),
+    ("unchecked", "#8a8f98", "algorytm (brak ręcznych do porównania)"),
+)
+
+
+def compare_layers(bone: Bone, predicted: Contacts | None, truth: Contacts | None) -> tuple[dict, dict | None]:
+    """Podział kości na zgodne / fałszywe alarmy / przeoczenia (ręczne oznaczenia = prawda).
+
+    Args:
+        bone:      kość.
+        predicted: wynik algorytmu albo None (nic nie znalazł).
+        truth:     ręczne oznaczenia albo None (brak - wtedy nie ma z czym porównać).
+
+    Returns:
+        ({klucz z COMPARE_LAYERS: maska (V,) wierzchołków bone.mesh} - tylko niepuste,
+         wynik contacts.compare albo None, gdy brak ręcznych oznaczeń).
+    """
+    n = len(bone.mesh.vertices)
+    p = predicted.labels > 0 if predicted is not None else np.zeros(n, bool)
+    if truth is None or not truth.labels.any():
+        return ({"unchecked": p} if p.any() else {}), None
+    t = truth.labels > 0
+    masks = {"both": p & t, "auto_only": p & ~t, "manual_only": ~p & t}
+    pred_labels = predicted.labels if predicted is not None else np.zeros(n, np.uint8)
+    return {k: m for k, m in masks.items() if m.any()}, compare(bone.mesh, pred_labels, truth.labels)
 
 
 # -----------------
@@ -255,21 +294,27 @@ def _bone_hover(nr: int, bone: Bone, stats: list[dict], contacts: Contacts | Non
 
 def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None = None,
                  color_mode: str = "scan", params: View3DParams = View3DParams(),
-                 numbers: list[int] | None = None) -> go.Figure:
+                 numbers: list[int] | None = None,
+                 reference: dict[str, Contacts | None] | None = None) -> go.Figure:
     """Figura plotly: wszystkie kości na stole + powierzchnie styku (opis: docstring modułu, pkt 1).
 
     Każda kość jest uproszczona do ~params.triangles_total / liczba kości trójkątów
     (co najmniej 5000), położona płasko (lying_rotation) i ustawiona na stole
-    (shelf_layout). Powierzchnie styku to osobne nakładki uniesione 0.04 mm nad kością -
-    dzięki temu da się je ukryć przyciskiem. Na stole jest podziałka 10 albo 50 mm.
+    (shelf_layout). Powierzchnie styku to osobne nakładki uniesione 0.04 a.u. nad kością -
+    dzięki temu da się je ukryć przyciskiem. Na stole jest podziałka 10 albo 50 a.u.
+
+    Tryb porównania (podane `reference`): `contacts` = wynik algorytmu, `reference` = ręczne
+    oznaczenia; zamiast kolorów powierzchni są kolory COMPARE_LAYERS (zgodne / fałszywy alarm /
+    przeoczone), a podpowiedź i ramka pokazują IoU, precyzję i czułość.
 
     Args:
         bones:      kości (dla color_mode="fpfh" wczytane z features=True).
         contacts:   {id kości: Contacts albo None}; brak klucza = kość bez oznaczeń.
         color_mode: "scan" / "fragment" / "fpfh".
-        params:     wygląd (triangles_total, bone_color, gap_mm, background).
+        params:     wygląd (triangles_total, bone_color, gap_au, background).
         numbers:    numery kości do wyświetlenia (domyślnie 1..N) - żeby przy wybranych
                     kościach zgadzały się z numerami z pełnej listy.
+        reference:  {id kości: ręczne Contacts albo None} - włącza tryb porównania.
 
     Returns:
         Figura do zapisania przez save_figure.
@@ -295,8 +340,8 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
         v = (np.asarray(d.vertices) - center) @ R.T
         shown.append((d, R, center, v))
         sizes.append(np.ptp(v, axis=0))
-    slots = shelf_layout([s[:2] for s in sizes], params.gap_mm)
-    traces, groups, focus = [], [], []
+    slots = shelf_layout([s[:2] for s in sizes], params.gap_au)
+    traces, groups, focus, scores = [], [], [], []
     for k, (b, (d, R, center, v), fp) in enumerate(zip(bones, shown, fp_rgb)):
         nr = numbers[k]
         offset = np.r_[slots[k], 0.0] - np.r_[(v.min(0) + v.max(0))[:2] / 2, v.min(0)[2]]
@@ -304,7 +349,26 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
         t = np.asarray(d.triangles)
         c = contacts.get(b.id)
         stats = surface_stats(b.mesh, c.labels) if c is not None and c.labels.any() else []
-        hover = _bone_hover(nr, b, stats, c)
+        # nakładki: (maska wierzchołków b.mesh, kolor, podpowiedź)
+        if reference is None:
+            layers = [(c.labels == s["id"], surface_color(s["id"]),
+                       f"<b>{c.name(s['id'])}</b> ({nr}. {b.label})<br>pole: {s['area_au2']:.1f} a.u.²"
+                       f"<br>największa średnica: {s['max_diameter_au']:.1f} a.u.") for s in stats]
+            hover = _bone_hover(nr, b, stats, c)
+        else:
+            masks, score = compare_layers(b, c, reference.get(b.id))
+            va = vertex_areas(b.mesh)
+            layers = [(masks[key], color, f"<b>{name}</b> ({nr}. {b.label})<br>pole: {va[masks[key]].sum():.1f} a.u.²")
+                      for key, color, name in COMPARE_LAYERS if key in masks]
+            if score is None:
+                lines = ["<i>brak ręcznych oznaczeń - nie ma z czym porównać</i>"]
+            else:
+                scores.append(score)
+                lines = [f"<b>vs ręczne:</b> IoU {score['iou']:.2f}, precyzja {score['precision']:.2f}, "
+                         f"czułość {score['recall']:.2f}"]
+            lines += [f"<span style='color:{color}'>■</span> {name}: {va[masks[key]].sum():.0f} a.u.²"
+                      for key, color, name in COMPARE_LAYERS if key in masks]
+            hover = _bone_hover(nr, b, stats, c, lines)
         color = COLORS[k % len(COLORS)]
         mesh_kw = dict(x=_f32(p[:, 0]), y=_f32(p[:, 1]), z=_f32(p[:, 2]), **_ijk(t, len(p)),
                        name=f"{nr}. {b.label}", legendgroup=b.id, showlegend=True, hovertemplate=hover,
@@ -320,21 +384,19 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
         traces.append(go.Mesh3d(**mesh_kw))
 
         # powierzchnie styku: osobne, lekko uniesione nakładki (przycisk pokaż / ukryj)
-        if stats:
+        if layers:
             _, near = cKDTree(np.asarray(b.mesh.vertices)).query(np.asarray(d.vertices))
-            lab = c.labels[near]
             nrm = np.asarray(d.vertex_normals) @ R.T
-            for s in stats:
-                tri = t[(lab[t] == s["id"]).all(axis=1)]
+            for mask, layer_color, layer_hover in layers:
+                tri = t[mask[near][t].all(axis=1)]
                 if not len(tri):
                     continue
                 q, tri = _compact(p + 0.04 * nrm, tri)
                 idx.append(len(traces))
                 traces.append(go.Mesh3d(
                     x=_f32(q[:, 0]), y=_f32(q[:, 1]), z=_f32(q[:, 2]), **_ijk(tri, len(q)),
-                    color=surface_color(s["id"]), opacity=1.0, legendgroup=b.id, showlegend=False,
-                    hovertemplate=(f"<b>{c.name(s['id'])}</b> ({nr}. {b.label})<br>pole: {s['area_mm2']:.1f} mm²"
-                                   f"<br>największa średnica: {s['max_diameter_mm']:.1f} mm<extra></extra>"),
+                    color=layer_color, opacity=1.0, legendgroup=b.id, showlegend=False,
+                    hovertemplate=layer_hover + "<extra></extra>",
                     lighting=LIGHTING, lightposition=dict(x=-1e4, y=-2e4, z=3e4)))
         top = p.max(axis=0)
         mid = (p.min(axis=0) + p.max(axis=0)) / 2
@@ -358,7 +420,7 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
                       i=[0, 0], j=[1, 2], k=[2, 3], color="#dde3e9", hoverinfo="skip", showlegend=False,
                       lighting=dict(ambient=1.0, diffuse=0.0, specular=0.0))
     scale = go.Scatter3d(x=[lo[0] + margin, lo[0] + margin + bar], y=[lo[1] + 3.0] * 2, z=[0.3, 0.3],
-                         mode="lines+text", text=["", f"<b>{bar:g} mm</b>"], textposition="top center",
+                         mode="lines+text", text=["", f"<b>{bar:g} a.u.</b>"], textposition="top center",
                          line=dict(color="#1f2a36", width=6), hoverinfo="skip", showlegend=False)
     traces = [table, scale] + traces
     groups = [[i + 2 for i in g] for g in groups]
@@ -370,10 +432,10 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
     mid_scene = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (z_lo + z_hi) / 2])
 
     def camera(box_lo, box_hi, direction, up=(0, 0, 1), zoom=0.8):
-        """Kamera plotly patrząca na pudełko box_lo..box_hi [mm] z kierunku `direction`.
+        """Kamera plotly patrząca na pudełko box_lo..box_hi [a.u.] z kierunku `direction`.
 
         Args:
-            box_lo, box_hi: rogi pudełka (x, y, z) w mm, w układzie sceny.
+            box_lo, box_hi: rogi pudełka (x, y, z) w a.u., w układzie sceny.
             direction:      kierunek od środka pudełka do kamery (nie musi być jednostkowy).
             up:             kierunek "do góry" na ekranie.
             zoom:           odległość kamery względem rozmiaru pudełka (większa = dalej).
@@ -403,12 +465,17 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
 
     info = [f"<b>Kości: {len(bones)}</b>   (oznaczone powierzchnie styku: {n_marked})",
             f"kolory: {dict(scan='skanera', fragment='osobny dla każdej kości', fpfh='FPFH (podobny kolor = podobny kształt)')[color_mode]}",
-            "",
+            ""]
+    if reference is not None:
+        info[0] = f"<b>Kości: {len(bones)}</b>   (z ręcznymi oznaczeniami: {len(scores)})"
+    info += [
             "<i>lewy przycisk: obrót · kółko: zoom · prawy: przesuwanie</i>",
-            "<i>najedź na kość: szczegóły · legenda: ukryj / pokaż</i>"]
+            "<i>najedź na kość: szczegóły · legenda: ukryj / pokaż</i>",
+            "<i>📏 Linijka (na dole, klawisz L): 2 kliknięcia = odległość w a.u.</i>"]
     fig = go.Figure(data=traces)
     fig.update_layout(
-        title=dict(text="Fragmenty kości", x=0.5, font=dict(size=20)),
+        title=dict(text="Fragmenty kości" if reference is None else "Powierzchnie styku: ręczne vs algorytm",
+                   x=0.5, font=dict(size=20)),
         paper_bgcolor=params.background, font=FONT, margin=dict(l=0, r=0, t=60, b=0),
         legend=dict(x=0.99, y=0.97, xanchor="right", bgcolor="rgba(255,255,255,0.85)", title="Kości",
                     itemclick="toggle", itemdoubleclick="toggleothers"),
@@ -425,6 +492,23 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
                  showactive=True, active=0, buttons=[
                      dict(label=name, method="relayout", args=[{"scene.camera": camera(*whole, d, up)}])
                      for name, (d, up) in views.items()])])
+    if reference is not None:      # legenda porównania: lewy dół, nad przyciskiem pokaż / ukryj
+        legend = []
+        if scores:
+            mean = {key: sum(s[key] for s in scores) / len(scores) for key in ("iou", "precision", "recall")}
+            legend.append(f"<b>Średnio ({len(scores)} kości): IoU {mean['iou']:.2f} · precyzja "
+                          f"{mean['precision']:.2f} · czułość {mean['recall']:.2f}</b>")
+        else:
+            legend.append("<b>Brak ręcznych oznaczeń - nie ma z czym porównać</b>")
+        legend += [f"<span style='color:{color}'>■</span> {name}" for _, color, name in COMPARE_LAYERS]
+        legend += ["",
+                   "<i>IoU = pokrycie wykrytego z ręcznym (wspólne / suma obu)</i>",
+                   "<i>precyzja = ile z wykrytego to naprawdę styk (niska: fałszywe alarmy)</i>",
+                   "<i>czułość = ile prawdziwego styku wykryto (niska: przeoczenia)</i>",
+                   "<i>1.00 = idealnie, 0.00 = zupełnie źle; liczone na polu powierzchni</i>"]
+        fig.add_annotation(text="<br>".join(legend), x=0.01, y=0.09, xref="paper", yref="paper", showarrow=False,
+                           align="left", xanchor="left", yanchor="bottom", bgcolor="rgba(255,255,255,0.85)",
+                           bordercolor="#c9d2db", borderwidth=1, borderpad=10, font=dict(size=13))
     if contact_idx:
         fig.layout.updatemenus += (dict(
             type="buttons", direction="left", x=0.01, y=0.02, xanchor="left", yanchor="bottom", showactive=True,
@@ -455,8 +539,8 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
         Figura; gdy żadna kość nie pasuje - figura z samym komunikatem.
     """
     numbers = numbers or list(range(1, len(bones) + 1))
-    chosen = [(n, b) for n, b in zip(numbers, bones) if b.n_scans > 1 or b.meta.get("noise_removed_mm2")]
-    chosen.sort(key=lambda nb: (-nb[1].n_scans, -nb[1].meta.get("noise_removed_mm2", 0)))   # ciekawsze najpierw
+    chosen = [(n, b) for n, b in zip(numbers, bones) if b.n_scans > 1 or b.meta.get("noise_removed_au2")]
+    chosen.sort(key=lambda nb: (-nb[1].n_scans, -nb[1].meta.get("noise_removed_au2", 0)))   # ciekawsze najpierw
     traces, groups, boxes, notes = [], [], [], []
     per_scan = max(5000, params.triangles_total // max(1, sum(b.n_scans for _, b in chosen)))
     for n, b in chosen:
@@ -474,7 +558,7 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
                 if noise:
                     name = f"szum: {s['label']}"
                     hover = "<br>".join([f"<b>USUNIĘTY SZUM</b> ze skanu {s['label']}"] +
-                                        [f"{c['area_mm2']:.0f} mm² - {c['reason']}" for c in removed])
+                                        [f"{c['area_au2']:.0f} a.u.² - {c['reason']}" for c in removed])
                 else:
                     role = "skan referencyjny" if s["reference"] else f"nakładanie z ref.: {s['overlap_with_reference']:.2f}"
                     name = f"{s['label']}" + (" (ref.)" if s["reference"] else "")
@@ -494,7 +578,7 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
             lines.append(f"<span style='color:{SCAN_COLORS[s_i % len(SCAN_COLORS)]}'>■</span> {s['label']} ({tag})")
             for c in s["components"]:
                 if not c["kept"]:
-                    lines.append(f"   <span style='color:{NOISE_COLOR}'>■</span> usunięto {c['area_mm2']:.0f} mm²: {c['reason']}")
+                    lines.append(f"   <span style='color:{NOISE_COLOR}'>■</span> usunięto {c['area_au2']:.0f} a.u.²: {c['reason']}")
         notes.append("<br>".join(lines))
 
     if not traces:
@@ -531,9 +615,9 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
     fig.update_layout(
         paper_bgcolor=params.background, font=FONT, margin=dict(l=0, r=0, t=10, b=0), height=720,
         legend=dict(x=0.99, y=0.97, xanchor="right", bgcolor="rgba(255,255,255,0.85)", title="Skany"),
-        scene=dict(xaxis=dict(range=first["scene.xaxis.range"], title="x [mm]", backgroundcolor="#eef2f5"),
-                   yaxis=dict(range=first["scene.yaxis.range"], title="y [mm]", backgroundcolor="#eef2f5"),
-                   zaxis=dict(range=first["scene.zaxis.range"], title="z [mm]", backgroundcolor="#eef2f5"),
+        scene=dict(xaxis=dict(range=first["scene.xaxis.range"], title="x [a.u.]", backgroundcolor="#eef2f5"),
+                   yaxis=dict(range=first["scene.yaxis.range"], title="y [a.u.]", backgroundcolor="#eef2f5"),
+                   zaxis=dict(range=first["scene.zaxis.range"], title="z [a.u.]", backgroundcolor="#eef2f5"),
                    aspectmode="manual", aspectratio=first["scene.aspectratio"]),
         annotations=[dict(text=first["annotations[0].text"], x=0.01, y=0.97, xref="paper", yref="paper",
                           showarrow=False, align="left", xanchor="left", yanchor="top",
@@ -676,14 +760,14 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
         allp = np.vstack(pts)
         boxes.append((allp.min(axis=0), allp.max(axis=0)))
         notes.append("<br>".join([
-            f"<b>{n + 1}. miejsce</b>   wynik: <b>{r['score']:.0f}</b> mm²",
-            f"<span style='color:{MATCH_COLORS['surf_a']}'>■</span> A: {r['a_name']} ({r['a_area_mm2']:.0f} mm²"
+            f"<b>{n + 1}. miejsce</b>   wynik: <b>{r['score']:.0f}</b> a.u.²",
+            f"<span style='color:{MATCH_COLORS['surf_a']}'>■</span> A: {r['a_name']} ({r['a_area_au2']:.0f} a.u.²"
             f"{', ręczna' if r.get('a_manual', True) else ', z algorytmu'})",
-            f"<span style='color:{MATCH_COLORS['surf_b']}'>■</span> B: {r['b_name']} ({r['b_area_mm2']:.0f} mm²"
+            f"<span style='color:{MATCH_COLORS['surf_b']}'>■</span> B: {r['b_name']} ({r['b_area_au2']:.0f} a.u.²"
             f"{', ręczna' if r.get('b_manual', True) else ', z algorytmu'})",
-            f"styk: {r['contact_mm2']:.0f} mm²  (A pokryte w {r['cover_a']:.0%}, B w {r['cover_b']:.0%})",
-            f"RMSE w styku: {r['rmse_mm']:.2f} mm",
-            f"kolizja kości: {r['collision_mm2']:.0f} mm²",
+            f"styk: {r['contact_au2']:.0f} a.u.²  (A pokryte w {r['cover_a']:.0%}, B w {r['cover_b']:.0%})",
+            f"RMSE w styku: {r['rmse_au']:.2f} a.u." if r.get("rmse_au") is not None else "RMSE w styku: –",
+            f"kolizja kości: {r['collision_au2']:.0f} a.u.²",
             "", "<i>wynik = styk - kolizja</i>"]))
 
     def layout_for(k):
@@ -750,8 +834,8 @@ def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> 
     fig = go.Figure(go.Heatmap(
         z=m, x=labels, y=labels, text=text, texttemplate="%{text}", textfont=dict(size=9),
         colorscale=[[0, "#f4f6f8"], [0.5, "#8fb8de"], [1, "#1d4f91"]], zmin=0, zmax=max(top, 1.0),
-        colorbar=dict(title="wynik [mm²]"), xgap=1, ygap=1,
-        hovertemplate="%{y}<br>%{x}<br>wynik: %{z:.0f} mm²<extra></extra>"))
+        colorbar=dict(title="wynik [a.u.²]"), xgap=1, ygap=1,
+        hovertemplate="%{y}<br>%{x}<br>wynik: %{z:.0f} a.u.²<extra></extra>"))
     size = max(480, 22 * n + 260)
     fig.update_layout(paper_bgcolor=params.background, plot_bgcolor=params.background, font=FONT,
                       height=size, margin=dict(l=10, r=10, t=10, b=10),
@@ -779,6 +863,18 @@ section .note {{ font-size: 13px; color: #6b7b8c; padding: 8px 16px 0; margin: 0
 <header><h1>{title}</h1><p class="lead">{lead}</p></header>
 {sections}
 </body></html>"""
+
+
+def _ruler_head() -> str:
+    """Znacznik <script> z linijką (src/web/ruler.js) do <head> strony - definiuje attachRuler."""
+    return f"<script>{RULER_JS.read_text(encoding='utf-8')}</script>"
+
+
+def _ruler_post(fig: go.Figure) -> str | None:
+    """post_script dla fig.to_html: podpina linijkę, gdy figura jest 3D (None = figura 2D, bez linijki)."""
+    if any(t.type in ("mesh3d", "scatter3d") for t in fig.data):
+        return "attachRuler(document.getElementById('{plot_id}'));"
+    return None
 
 
 def _plotly_head(embed: bool) -> str:
@@ -816,9 +912,9 @@ def write_page(path: Path, title: str, lead: str, sections: list[tuple[str, str,
     config = dict(displaylogo=False, scrollZoom=True, toImageButtonOptions=dict(format="png", scale=2))
     body = []
     for heading, note, fig in sections:
-        div = fig.to_html(full_html=False, include_plotlyjs=False, config=config)
+        div = fig.to_html(full_html=False, include_plotlyjs=False, config=config, post_script=_ruler_post(fig))
         body.append(f"<section><h2>{heading}</h2>" + (f"<p class='note'>{note}</p>" if note else "") + f"{div}</section>")
-    html = PAGE.format(title=title, lead=lead, bg=params.background, head=_plotly_head(params.embed_plotly),
+    html = PAGE.format(title=title, lead=lead, bg=params.background, head=_plotly_head(params.embed_plotly) + _ruler_head(),
                        sections="\n".join(body))
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -847,11 +943,12 @@ def save_figure(fig: go.Figure, path: Path, params: View3DParams = View3DParams(
     div = fig.to_html(full_html=False, include_plotlyjs=True if params.embed_plotly else "cdn",
                       default_height="100vh", default_width="100%",
                       config=dict(displaylogo=False, scrollZoom=True, responsive=True,
-                                  toImageButtonOptions=dict(format="png", filename=path.stem, scale=2)))
+                                  toImageButtonOptions=dict(format="png", filename=path.stem, scale=2)),
+                      post_script=_ruler_post(fig))
     path.write_text(f"<!doctype html><html lang='pl'><head><meta charset='utf-8'><title>{title}</title>"
                     f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     f"<style>html,body{{margin:0;height:100%;overflow:hidden;background:{params.background}}}</style>"
-                    f"</head><body>{div}</body></html>", encoding="utf-8")
+                    f"{_ruler_head()}</head><body>{div}</body></html>", encoding="utf-8")
     if open_browser:
         webbrowser.open(path.resolve().as_uri())
     return path
@@ -867,4 +964,4 @@ def load_report(out_dir: Path) -> dict | None:
         Zawartość merging.json ({"params", "scans", "pairs", ...}) albo None, gdy pliku nie ma.
     """
     p = Path(out_dir) / "merging.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+    return read_json(p) if p.exists() else None

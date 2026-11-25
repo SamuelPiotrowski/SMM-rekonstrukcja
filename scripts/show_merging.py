@@ -11,7 +11,7 @@ Strona ma dwie części:
 Użycie (z głównego folderu projektu, po scripts/prepare_data.py):
     python scripts/show_merging.py
 
-Wynik: out/3d/merging.html (otwiera się sam).
+Wynik: out/3d/<zestaw>/merging.html (otwiera się sam).
 """
 
 import argparse
@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # polskie znaki także przy przekierowaniu do pliku
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # ... i w komunikatach błędów (SystemExit)
 
 import config  # noqa: E402
 from bones import load_bones  # noqa: E402
@@ -27,26 +28,28 @@ from visualization_3d import load_report, merging_figure, overlap_figure, write_
 
 
 def main() -> None:
-    """Wczytuje kości i merging.json, buduje obie figury i zapisuje out/3d/merging.html.
+    """Wczytuje kości i merging.json, buduje obie figury i zapisuje out/3d/<zestaw>/merging.html.
 
     Raises:
         SystemExit: brak przygotowanych kości albo merging.json (nie uruchomiono prepare_data.py).
     """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-open", action="store_true", help="nie otwieraj przeglądarki")
+    config.add_dataset_argument(parser)
     args = parser.parse_args()
+    config.use_dataset(args.dataset)
 
     bones = load_bones()
     report = load_report(config.DATA_OUT)
     if not bones or report is None:
-        raise SystemExit("Brak wyników - uruchom najpierw: python scripts/prepare_data.py")
+        raise SystemExit(config.no_bones_message())
     params = config.view3d_params()
     merged = sum(b.n_scans > 1 for b in bones)
-    noise = sum(b.meta.get("noise_removed_mm2", 0) for b in bones)
+    noise = sum(b.meta.get("noise_removed_au2", 0) for b in bones)
     thr = report["params"]["min_overlap"]
     lead = (f"{len(report['scans'])} skanów → <b>{len(bones)} kości</b>; {merged} z nich powstało z kilku skanów. "
-            f"Usunięty szum: {noise:.0f} mm². Dwa skany są uznawane za tę samą kość, gdy nakładanie ≥ {thr} "
-            f"(część mniejszego skanu leżąca na drugim, z tolerancją {report['params']['tolerance_mm']} mm).")
+            f"Usunięty szum: {noise:.0f} a.u.². Dwa skany są uznawane za tę samą kość, gdy nakładanie ≥ {thr} "
+            f"(część mniejszego skanu leżąca na drugim, z tolerancją {report['params']['tolerance_au']} a.u.).")
     sections = [
         ("Skany nałożone na siebie", "Każdy skan w innym kolorze, czerwony = usunięty szum. "
          "Kość wybierasz z listy w lewym dolnym rogu. Kliknięcie w legendzie ukrywa skan.",

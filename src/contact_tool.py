@@ -3,12 +3,12 @@ Narzędzie do ręcznego oznaczania powierzchni styku - lokalna strona w przeglą
 
 Uruchamia mały serwer HTTP (tylko na tym komputerze, 127.0.0.1) i otwiera stronę
 src/web/contact_tool.html. Strona pokazuje kość w 3D (three.js), a malowanie
-zapisuje się przez serwer do contacts/<id_kości>.json (contacts.py).
+zapisuje się przez serwer do contacts/<zestaw>/<id_kości>.json (contacts.py).
 
 Kość bez ręcznych oznaczeń otwiera się z USTAWIENIEM AUTOMATYCZNYM: wynikiem algorytmu
-(contacts.auto_contacts - z contacts/auto/, a gdy brak albo nieaktualny - liczony).
+(contacts.auto_contacts - z contacts/<zestaw>/auto/, a gdy brak albo nieaktualny - liczony).
 Strona pisze wtedy "ustawienie automatyczne"; dopiero zapis (Ctrl+S) robi z niego ręczne
-oznaczenie w contacts/<id>.json. Bez zapisu kość dalej nie ma ręcznych oznaczeń.
+oznaczenie w contacts/<zestaw>/<id>.json. Bez zapisu kość dalej nie ma ręcznych oznaczeń.
 
     from contact_tool import serve
     serve()                       # Ctrl+C w konsoli kończy
@@ -23,13 +23,14 @@ API (używa go strona):
 Oprócz tego serwer podaje pliki strony (STATIC) i three.js (VENDOR). Błędy wracają
 jako JSON {"error": "..."} i są pokazywane na stronie.
 
-three.js jest pobierany raz z CDN i zapisywany w DATA_OUT/.cache/web, potem działa bez internetu.
+three.js jest pobierany raz z CDN i zapisywany w out/3d/.cache/web (wspólny dla zestawów), potem działa bez internetu.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import socket
 import threading
 import urllib.request
 import webbrowser
@@ -43,6 +44,23 @@ import contacts as ct
 from bones import Bone, load_bones
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+
+
+class LocalServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer, który NIE dzieli portu z innym, już działającym serwerem.
+
+    Zwykły HTTPServer ustawia SO_REUSEADDR, a na Windows to pozwala drugiemu procesowi
+    zająć ten sam port bez błędu - przeglądarka trafia wtedy do STAREGO serwera (np. podgląd
+    innego zestawu, uruchomiony wcześniej w innym oknie). Tu port zajęty = OSError przy starcie.
+    """
+
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        """Na Windows rezerwuje port na wyłączność (SO_EXCLUSIVEADDRUSE), potem zwykłe bind."""
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 STATIC = {"/": ("contact_tool.html", "text/html; charset=utf-8"),
           "/contact_tool.js": ("contact_tool.js", "text/javascript; charset=utf-8"),
           "/contact_tool.css": ("contact_tool.css", "text/css; charset=utf-8")}
@@ -93,7 +111,7 @@ class ToolState:
 
     Metody odpowiadają zapytaniom API (opis w docstringu modułu). Serwer obsługuje
     zapytania w osobnych wątkach, dlatego zapis ręcznych oznaczeń jest chroniony blokadą
-    `lock`, a liczenie i zapis wyniku algorytmu (contacts/auto/) - blokadą `auto_lock`.
+    `lock`, a liczenie i zapis wyniku algorytmu (contacts/<zestaw>/auto/) - blokadą `auto_lock`.
     """
 
     def __init__(self, out_dir: Path | None, params: ct.ContactParams):
@@ -134,33 +152,33 @@ class ToolState:
         """GET /api/bones: lista kości do panelu bocznego + dane startowe strony.
 
         Returns:
-            {"bones": [{"nr", "id", "label", "scans", "area_mm2", "extent_mm", "vertices",
-                        "surfaces": [{"id", "name", "area_mm2"}] - ręczne oznaczenia,
+            {"bones": [{"nr", "id", "label", "scans", "area_au2", "extent_au", "vertices",
+                        "surfaces": [{"id", "name", "area_au2"}] - ręczne oznaczenia,
                         "updated": data zapisu albo None, "auto": czy jest wynik algorytmu}],
              "palette": kolory powierzchni, "detectors": nazwy algorytmów,
-             "params": {"brush_mm", "wand_angle_deg"} - startowe ustawienia pędzla i różdżki}.
+             "params": {"brush_au", "wand_angle_deg"} - startowe ustawienia pędzla i różdżki}.
         """
         items = []
         for nr, bid in enumerate(self.order, 1):
             b = self.bones[bid]
-            c = ct.load_contacts(bid, b.mesh)
+            c = ct.load_contacts(bid, b.mesh, frames=ct.scan_frames(b))
             stats = ct.surface_stats(b.mesh, c.labels) if c else []
             items.append({
                 "nr": nr, "id": bid, "label": b.label, "scans": b.n_scans,
-                "area_mm2": b.meta.get("stats", {}).get("area_mm2"),
-                "extent_mm": b.meta.get("stats", {}).get("extent_mm"),
+                "area_au2": b.meta.get("stats", {}).get("area_au2"),
+                "extent_au": b.meta.get("stats", {}).get("extent_au"),
                 "vertices": len(b.mesh.vertices),
-                "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_mm2": s["area_mm2"]} for s in stats],
+                "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_au2": s["area_au2"]} for s in stats],
                 "updated": c.updated if c else None,
                 "auto": ct.contacts_path(bid, "auto").exists(),
             })
         return {"bones": items, "palette": list(ct.PALETTE), "detectors": list(ct.DETECTORS),
-                "params": {"brush_mm": self.params.brush_mm, "wand_angle_deg": self.params.wand_angle_deg}}
+                "params": {"brush_au": self.params.brush_au, "wand_angle_deg": self.params.wand_angle_deg}}
 
     def start_contacts(self, b: Bone) -> tuple[ct.Contacts | None, str, str | None, bool]:
         """Etykiety, od których kość startuje w narzędziu: ręczne, a gdy ich nie ma - automatyczne.
 
-        Automatyczne = contacts.auto_contacts (wynik algorytmu params.method z contacts/auto/,
+        Automatyczne = contacts.auto_contacts (wynik algorytmu params.method z contacts/<zestaw>/auto/,
         liczony i zapisywany tam, gdy brak albo nieaktualny). Ręcznych plików nie zmienia.
         Ręczny plik, z którego po zmianie siatki nic nie dało się przenieść (load_contacts:
         remapped, same zera), traktowany jest jak brak ręcznych - tak jak w summary.
@@ -172,7 +190,7 @@ class ToolState:
             (etykiety albo None - algorytm się nie udał, "manual" albo "auto",
              komunikat błędu algorytmu albo None, True = ręczny plik jest, ale nie pasuje do siatki).
         """
-        c = ct.load_contacts(b.id, b.mesh)
+        c = ct.load_contacts(b.id, b.mesh, frames=ct.scan_frames(b))
         if c is not None and c.surface_ids:
             return c, "manual", None, False
         lost = c is not None
@@ -186,7 +204,7 @@ class ToolState:
     def bone_payload(self, bone_id: str) -> dict:
         """GET /api/bones/<id>: siatka kości i jej etykiety dla three.js.
 
-        Etykiety ręczne (contacts/<id>.json), a gdy ich nie ma - ustawienie automatyczne
+        Etykiety ręczne (contacts/<zestaw>/<id>.json), a gdy ich nie ma - ustawienie automatyczne
         (start_contacts); pole "origin" mówi, które.
 
         Args:
@@ -226,7 +244,7 @@ class ToolState:
         }
 
     def save(self, bone_id: str, body: dict) -> dict:
-        """PUT /api/bones/<id>/contacts: zapisuje ręczne etykiety do contacts/<id>.json.
+        """PUT /api/bones/<id>/contacts: zapisuje ręczne etykiety do contacts/<zestaw>/<id>.json.
 
         Args:
             bone_id: id kości.
@@ -235,7 +253,7 @@ class ToolState:
 
         Returns:
             {"saved": ścieżka pliku albo None (brak oznaczeń - plik usunięty),
-             "surfaces": [{"id", "name", "area_mm2", "max_diameter_mm"}]}.
+             "surfaces": [{"id", "name", "area_au2", "max_diameter_au"}]}.
 
         Raises:
             KeyError:   nie ma takiej kości.
@@ -246,11 +264,11 @@ class ToolState:
         names = {int(k): str(v)[:80] for k, v in body.get("names", {}).items()}
         c = ct.Contacts(bone_id=bone_id, labels=labels, names=names, source="manual")
         with self.lock:
-            path = ct.save_contacts(b.mesh, c)
+            path = ct.save_contacts(b.mesh, c, frames=ct.scan_frames(b))
         stats = ct.surface_stats(b.mesh, labels)
         return {"saved": str(path) if path else None,
-                "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_mm2": s["area_mm2"],
-                              "max_diameter_mm": s["max_diameter_mm"]} for s in stats]}
+                "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_au2": s["area_au2"],
+                              "max_diameter_au": s["max_diameter_au"]} for s in stats]}
 
     def detect(self, bone_id: str, method: str | None) -> dict:
         """POST /api/bones/<id>/detect: propozycja algorytmu - NIC nie zapisuje.
@@ -279,7 +297,7 @@ def fetch_vendor(path: str, cache_dir: Path) -> bytes:
 
     Args:
         path:      ścieżka URL z VENDOR, np. "/vendor/three.module.js".
-        cache_dir: folder cache (DATA_OUT/.cache/web).
+        cache_dir: folder cache (out/3d/.cache/web).
 
     Returns:
         Zawartość pliku.
@@ -452,16 +470,16 @@ def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | No
     port = port or config.CONTACT_TOOL_PORT
     state = ToolState(out_dir, params)
     if not state.bones:
-        raise SystemExit("Brak przygotowanych kości - uruchom najpierw: python scripts/prepare_data.py")
-    cache_dir = Path(out_dir or config.DATA_OUT) / ".cache" / "web"
+        raise SystemExit(config.no_bones_message())
+    cache_dir = config.OUT_ROOT / ".cache" / "web"      # wspólny dla wszystkich zestawów
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state, cache_dir))
+        server = LocalServer(("127.0.0.1", port), make_handler(state, cache_dir))
     except OSError:
         raise SystemExit(f"Port {port} jest zajęty - może narzędzie już działa w innym oknie? "
                          f"Inny port: python scripts/mark_contacts.py --port {port + 1}") from None
     url = f"http://127.0.0.1:{port}/"
     print(f"Narzędzie do oznaczania powierzchni styku: {url}")
-    print(f"Kości: {len(state.bones)}. Oznaczenia zapisują się do: {config.CONTACTS_DIR}")
+    print(f"Zestaw \"{config.DATASET}\", kości: {len(state.bones)}. Oznaczenia zapisują się do: {config.CONTACTS_DIR}")
     print("Zamknij to okno albo naciśnij Ctrl+C, żeby zakończyć.")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

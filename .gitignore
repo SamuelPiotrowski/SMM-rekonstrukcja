@@ -11,8 +11,7 @@ scanned_bones/
 bone_photos/
 out/
 
-# wyniki algorytmu wykrywania powierzchni styku (generowane); ręczne contacts/*.json SĄ w repo
-contacts/auto/
+# powierzchnie styku (ręczne i auto) - każdy trzyma lokalnie
 contacts/
 
 # sources

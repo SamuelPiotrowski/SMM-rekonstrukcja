@@ -8,12 +8,12 @@ Dla każdego wierzchołka siatki kości liczone są cechy (FEATURES):
     - szorstkość i rozrzut normalnych w kilku promieniach (kształt w małej skali),
     - wypukłość (znak: > 0 wypukła, < 0 wklęsła),
     - długość krawędzi siatki (skaner zagęszcza siatkę tam, gdzie widzi szczegóły),
-    - kolor ze skanera: jasność, nasycenie, plamistość (zmienność jasności w 1 mm),
+    - kolor ze skanera: jasność, nasycenie, plamistość (zmienność jasności w 1 a.u.),
     - ułożenie względem osi kości: kąt normalnej do osi i położenie wzdłuż osi.
 Potem dla każdej ręcznie oznaczonej powierzchni styku porównywane są rozkłady cechy
 na niej i na korze tej samej kości. Pomijane są:
-    - pas boundary_margin_mm przy otwartym brzegu skanu (postrzępiony, to nie przełom),
-    - pas label_band_mm po obu stronach granicy oznaczenia (ręczne oznaczenie nie jest
+    - pas boundary_margin_au przy otwartym brzegu skanu (postrzępiony, to nie przełom),
+    - pas label_band_au po obu stronach granicy oznaczenia (ręczne oznaczenie nie jest
       idealnie dokładne, a cechy liczone w promieniu "widzą" obie strony).
 
 Miara rozdzielności: AUC = prawdopodobieństwo, że losowy punkt przełomu ma WIĘKSZĄ
@@ -25,7 +25,7 @@ Na koniec regresja logistyczna na wszystkich cechach naraz, sprawdzana "zostaw j
 uczona na pozostałych kościach, oceniana na tej jednej - tyle mniej więcej dałby prosty
 algorytm łączący cechy na nowej kości.
 
-Użycie: scripts/compare_surfaces.py (strona out/3d/surface_features.html + CSV).
+Użycie: scripts/compare_surfaces.py (strona out/3d/<zestaw>/surface_features.html + CSV).
 """
 
 from __future__ import annotations
@@ -53,9 +53,9 @@ CORTEX_COLOR = "#8a9aab"   # kora
 class SurfaceFeatureParams:
     """Ustawienia porównania cech (settings.json, sekcja "surface_features")."""
 
-    radii_mm: tuple = (0.5, 1.0, 2.0)  # promienie sąsiedztwa szorstkości / rozrzutu normalnych [mm]
-    boundary_margin_mm: float = 1.0    # pomiń pas przy otwartym brzegu skanu [mm]
-    label_band_mm: float = 0.5         # pomiń pas po obu stronach granicy oznaczenia [mm]
+    radii_au: tuple = (0.5, 1.0, 2.0)  # promienie sąsiedztwa szorstkości / rozrzutu normalnych [a.u.]
+    boundary_margin_au: float = 1.0    # pomiń pas przy otwartym brzegu skanu [a.u.]
+    label_band_au: float = 0.5         # pomiń pas po obu stronach granicy oznaczenia [a.u.]
 
 
 # -----------------
@@ -74,21 +74,21 @@ def feature_info(params: SurfaceFeatureParams = SurfaceFeatureParams()) -> dict[
         (+1 większa, -1 mniejsza, 0 niespójny)}}.
     """
     info = {}
-    for r in params.radii_mm:
-        info[f"rough_{r:g}"] = dict(name=f"szorstkość {r:g} mm", log=True, sign=1,
-                                    desc=f"odchylenie powierzchni od płaszczyzny w promieniu {r:g} mm / promień")
-    for r in params.radii_mm:
-        info[f"spread_{r:g}"] = dict(name=f"rozrzut normalnych {r:g} mm", log=True, sign=1,
-                                     desc=f"1 - |średnia normalnych| w promieniu {r:g} mm (0 = płasko, rośnie na grudkach i krawędziach)")
-    rmax = max(params.radii_mm)
-    info["convexity"] = dict(name=f"wypukłość {rmax:g} mm", log=False, sign=1,
-                             desc=f"jak bardzo punkt wystaje ponad średnią okolicy {rmax:g} mm wzdłuż normalnej (> 0 wypukła, < 0 wklęsła)")
-    info["edge_mm"] = dict(name="krawędź siatki [mm]", log=True, sign=-1,
+    for r in params.radii_au:
+        info[f"rough_{r:g}"] = dict(name=f"szorstkość {r:g} a.u.", log=True, sign=1,
+                                    desc=f"odchylenie powierzchni od płaszczyzny w promieniu {r:g} a.u. / promień")
+    for r in params.radii_au:
+        info[f"spread_{r:g}"] = dict(name=f"rozrzut normalnych {r:g} a.u.", log=True, sign=1,
+                                     desc=f"1 - |średnia normalnych| w promieniu {r:g} a.u. (0 = płasko, rośnie na grudkach i krawędziach)")
+    rmax = max(params.radii_au)
+    info["convexity"] = dict(name=f"wypukłość {rmax:g} a.u.", log=False, sign=1,
+                             desc=f"jak bardzo punkt wystaje ponad średnią okolicy {rmax:g} a.u. wzdłuż normalnej (> 0 wypukła, < 0 wklęsła)")
+    info["edge_au"] = dict(name="krawędź siatki [a.u.]", log=True, sign=-1,
                            desc="średnia długość krawędzi trójkątów przy wierzchołku - skaner zagęszcza siatkę na szczegółach")
     info["brightness"] = dict(name="jasność koloru", log=False, sign=0, desc="średnia R, G, B ze skanera (0-1)")
     info["saturation"] = dict(name="nasycenie koloru", log=False, sign=0, desc="(max - min) / max z R, G, B (0 = szary)")
     info["color_texture"] = dict(name="plamistość koloru", log=True, sign=1,
-                                 desc="odchylenie standardowe jasności w promieniu 1 mm")
+                                 desc="odchylenie standardowe jasności w promieniu 1 a.u.")
     info["normal_axis"] = dict(name="normalna ∥ oś kości", log=False, sign=1,
                                desc="|cos| kąta normalnej do długiej osi kości: 0 = ściana boczna (kora trzonu), 1 = ściana poprzeczna")
     info["axial_pos"] = dict(name="położenie na osi", log=False, sign=0,
@@ -102,7 +102,7 @@ def _neighbours(points: np.ndarray, targets: np.ndarray, radius: float):
     Args:
         points:  (V, 3) punkty, dla których szukamy sąsiadów.
         targets: (P, 3) kandydaci na sąsiadów.
-        radius:  promień [mm].
+        radius:  promień [a.u.].
 
     Returns:
         (W - CSR float32, counts - (V,) liczba sąsiadów).
@@ -152,7 +152,7 @@ def vertex_features(mesh: o3d.geometry.TriangleMesh,
     t = np.asarray(mesh.triangles)
     out: dict[str, np.ndarray] = {}
     convexity = None
-    for r in sorted(params.radii_mm):
+    for r in sorted(params.radii_au):
         s = sample_surface(mesh, r / 3)
         p, n = s.points, s.normals
         W, counts = _neighbours(v, p, r)
@@ -165,7 +165,7 @@ def vertex_features(mesh: o3d.geometry.TriangleMesh,
         out[f"rough_{r:g}"] = np.where(few, 0, np.sqrt(smallest) / r)
         out[f"spread_{r:g}"] = np.where(few, 0, 1 - np.linalg.norm((W @ n) / cnt, axis=1))
         # wypukłość: wysokość wierzchołka nad średnią okolicy wzdłuż normalnej, względem r^2
-        # (dla sfery o promieniu R wychodzi ~ r^2 / (4R) / r^2 * 4 = 1/R, czyli krzywizna [1/mm])
+        # (dla sfery o promieniu R wychodzi ~ r^2 / (4R) / r^2 * 4 = 1/R, czyli krzywizna [1/a.u.])
         convexity = np.where(few, 0, 4 * np.einsum("ij,ij->i", v - mean, vn) / r**2)
     # rozrzut i szorstkość w kolejności promieni z ustawień
     out = {k: out[k] for k in feature_info(params) if k in out}
@@ -175,7 +175,7 @@ def vertex_features(mesh: o3d.geometry.TriangleMesh,
     length = np.linalg.norm(v[e[:, 0]] - v[e[:, 1]], axis=1)
     ends = np.concatenate([e[:, 0], e[:, 1]])        # każda krawędź liczy się dla obu końców
     sums = np.bincount(ends, weights=np.concatenate([length, length]), minlength=len(v))
-    out["edge_mm"] = sums / np.maximum(np.bincount(ends, minlength=len(v)), 1)
+    out["edge_au"] = sums / np.maximum(np.bincount(ends, minlength=len(v)), 1)
 
     if mesh.has_vertex_colors():
         c = np.asarray(mesh.vertex_colors)
@@ -256,9 +256,9 @@ class BoneComparison:
 
 
 def _distance_to(v: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Odległość [mm] każdego wierzchołka do najbliższego wierzchołka z maski (inf, gdy maska pusta).
+    """Odległość [a.u.] każdego wierzchołka do najbliższego wierzchołka z maski (inf, gdy maska pusta).
 
-    Liczona w przestrzeni, nie po siatce - pierścienie siatki dałyby różne mm tam, gdzie
+    Liczona w przestrzeni, nie po siatce - pierścienie siatki dałyby różne a.u. tam, gdzie
     skaner zagęścił siatkę (na przełomie trójkąty są ~2x mniejsze).
     """
     if not mask.any():
@@ -270,7 +270,7 @@ def split_marked(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray,
                  params: SurfaceFeatureParams = SurfaceFeatureParams()) -> tuple[np.ndarray, np.ndarray]:
     """Wierzchołki przełomu i kory do porównania / uczenia - bez pasów, którym nie można ufać.
 
-    Pomijane: pas boundary_margin_mm przy otwartym brzegu skanu i pas label_band_mm po obu
+    Pomijane: pas boundary_margin_au przy otwartym brzegu skanu i pas label_band_au po obu
     stronach granicy oznaczenia (przełom blisko kory i kora blisko przełomu).
 
     Args:
@@ -284,8 +284,8 @@ def split_marked(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray,
     va = ct.vertex_areas(mesh)
     lab = labels > 0
     v = np.asarray(mesh.vertices)
-    usable = (va > 0) & (_distance_to(v, ct.boundary_vertices(mesh)) > params.boundary_margin_mm)
-    usable &= np.where(lab, _distance_to(v, ~lab), _distance_to(v, lab)) > params.label_band_mm
+    usable = (va > 0) & (_distance_to(v, ct.boundary_vertices(mesh)) > params.boundary_margin_au)
+    usable &= np.where(lab, _distance_to(v, ~lab), _distance_to(v, lab)) > params.label_band_au
     return lab & usable, ~lab & usable
 
 
@@ -543,7 +543,7 @@ def write_csv(path: Path, comps: list[BoneComparison], params: SurfaceFeaturePar
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(["kosc", "powierzchnia", "cecha", "klucz", "AUC", "pole_przelomu_mm2", "pole_kory_mm2"]
+        w.writerow(["kosc", "powierzchnia", "cecha", "klucz", "AUC", "pole_przelomu_au2", "pole_kory_au2"]
                    + [f"przelom_{x}" for x in q] + [f"kora_{x}" for x in q])
         for c in comps:
             for s in c.stats:
@@ -632,7 +632,7 @@ def auc_heatmap_figure(comps: list[BoneComparison], model: dict, rows: list[dict
             st = {s["feature"]: s for s in c.stats if s["surface_id"] == sid}
             first = next(iter(st.values()))
             label = c.bone.label if sid == 0 else f"   └ {first['surface']}"
-            ylab.append(f"{label} ({first['area_marked']:.0f} mm²)")
+            ylab.append(f"{label} ({first['area_marked']:.0f} a.u.²)")
             extra = [model["auc"][c.bone.id]] if model and sid == 0 else ([np.nan] if model else [])
             z.append(extra + [st[k]["auc"] for k in keys])
     xlab = (["razem"] if model else []) + [info[k]["name"] for k in keys]
@@ -735,7 +735,7 @@ def _outline(mesh: o3d.geometry.TriangleMesh, tri_mask: np.ndarray, v: np.ndarra
     return out[0], out[1], out[2]
 
 
-FEATURES_3D = ("proba", "rough_1", "spread_2", "convexity", "edge_mm", "brightness", "color_texture", "normal_axis")
+FEATURES_3D = ("proba", "rough_1", "spread_2", "convexity", "edge_au", "brightness", "color_texture", "normal_axis")
 
 
 def features_3d_figure(comps: list[BoneComparison], model: dict,

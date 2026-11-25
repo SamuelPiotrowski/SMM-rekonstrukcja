@@ -1,14 +1,14 @@
 """
-Podgląd wyników dopasowania (out/3d/matching.json) - jak show_bones dla prepare_data.
+Podgląd wyników dopasowania (out/3d/<zestaw>/matching.json) - jak show_bones dla prepare_data.
 
 scripts/match_surfaces.py liczy i zapisuje matching.json, a ten moduł go pokazuje:
-    - write_html(): statyczna strona out/3d/matching.html (najlepsze pary w 3D + macierz
+    - write_html(): statyczna strona out/3d/<zestaw>/matching.html (najlepsze pary w 3D + macierz
       wyników wszystkich par) - jeden plik, można go komuś wysłać,
     - serve():      strona z suwakami ustawień (opis niżej).
 Oba sprawdzają, czy matching.json jest aktualny (MatchState.warnings).
 
 Strona z suwakami: uruchamia mały serwer HTTP (tylko na tym komputerze, 127.0.0.1) i otwiera stronę
-src/web/match_tool.html. Strona pokazuje pary z out/3d/matching.json (wynik
+src/web/match_tool.html. Strona pokazuje pary z out/3d/<zestaw>/matching.json (wynik
 scripts/match_surfaces.py) w 3D: kość A ustawiona na kości B. Suwaki zmieniają
 ustawienia dopasowania, a po każdej zmianie serwer przelicza TYLKO pokazaną parę:
     - ustawienia szukania (próbkowanie, FPFH, RANSAC, ICP) -> pełne dopasowanie od nowa
@@ -19,7 +19,7 @@ Nic nie jest zapisywane - matching.json zostaje bez zmian. Strona pokazuje zmien
 ustawienia gotowe do wklejenia w settings.json.
 
     from match_tool import serve, write_html
-    write_html()                  # out/3d/matching.html
+    write_html()                  # out/3d/<zestaw>/matching.html
     serve()                       # Ctrl+C w konsoli kończy
 
 API (używa go strona):
@@ -40,7 +40,7 @@ import time
 import webbrowser
 from dataclasses import asdict, fields, replace
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -48,15 +48,17 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 import matching_surfaces as ms
+from config import read_json
 from bones import Bone, load_bones
-from contact_tool import _b64
+from contact_tool import LocalServer, _b64
 from contacts import ContactParams, triangle_labels
 from visualization_3d import View3DParams, _surface_overlay, decimate, match_matrix_figure, matching_figure, write_page
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STATIC = {"/": ("match_tool.html", "text/html; charset=utf-8"),
           "/match_tool.js": ("match_tool.js", "text/javascript; charset=utf-8"),
-          "/match_tool.css": ("match_tool.css", "text/css; charset=utf-8")}
+          "/match_tool.css": ("match_tool.css", "text/css; charset=utf-8"),
+          "/ruler.js": ("ruler.js", "text/javascript; charset=utf-8")}
 PARAM_NAMES = {f.name for f in fields(ms.SurfaceMatchParams)}
 
 
@@ -64,7 +66,7 @@ class MatchState:
     """Stan serwera: wyniki z matching.json, kości (z chmurami) i powierzchnie styku.
 
     Kości są wczytywane raz przy starcie (tylko te z matching.json). Powierzchnie są
-    próbkowane przy pierwszym użyciu i pamiętane dla każdej wartości sample_mm.
+    próbkowane przy pierwszym użyciu i pamiętane dla każdej wartości sample_au.
     Obliczenia są chronione blokadą `lock` - open3d ma wspólne ziarno losowania,
     a serwer obsługuje zapytania w osobnych wątkach.
     """
@@ -81,10 +83,13 @@ class MatchState:
         Raises:
             SystemExit: brak matching.json albo kości z niego (komunikat mówi, co zrobić).
         """
+        import config
+
         path = Path(out_dir) / "matching.json"
+        run = f"python scripts/match_surfaces.py{config.dataset_flag()}"
         if not path.exists():
-            raise SystemExit("Brak out/3d/matching.json - uruchom najpierw: python scripts/match_surfaces.py")
-        self.report = json.loads(path.read_text(encoding="utf-8"))
+            raise SystemExit(f"Brak {path} - uruchom najpierw: {run}")
+        self.report = read_json(path)
         self.params = ms.SurfaceMatchParams(**{k: v for k, v in self.report["params"].items() if k in PARAM_NAMES})
         self.view = view
         self.lock = threading.Lock()
@@ -93,24 +98,24 @@ class MatchState:
         missing = needed - set(self.bones)
         if missing:
             raise SystemExit(f"Kości z matching.json nie ma w {out_dir}/bones: {sorted(missing)} - "
-                             "uruchom ponownie: python scripts/match_surfaces.py")
+                             f"uruchom ponownie: {run}")
         self.contacts, self.tri_labels, self.trees = {}, {}, {}
         for bid, b in self.bones.items():
             c, _ = ms.bone_contacts(b, self.params.source, contact_params, root)
             if c is None:
                 raise SystemExit(f"{b.label}: brak powierzchni styku (tryb {self.params.source!r}) - "
-                                 "uruchom ponownie: python scripts/match_surfaces.py")
+                                 f"uruchom ponownie: {run}")
             self.contacts[bid] = c
         self._surfaces: dict[tuple[str, float], ms.Surface] = {}
         self._geometry: dict[str, dict] = {}
         self._settings: ms.SurfaceMatchParams | None = None   # ustawia _load() - do warnings()
 
-    def surface(self, key: str, sample_mm: float) -> ms.Surface:
-        """Powierzchnia styku próbkowana co `sample_mm` (liczona raz dla każdej wartości).
+    def surface(self, key: str, sample_au: float) -> ms.Surface:
+        """Powierzchnia styku próbkowana co `sample_au` (liczona raz dla każdej wartości).
 
         Args:
             key:       klucz "<id kości>#<numer powierzchni>" (jak w matching.json).
-            sample_mm: odstęp punktów powierzchni [mm] (ustawienie "sample_mm").
+            sample_au: odstęp punktów powierzchni [a.u.] (ustawienie "sample_au").
 
         Returns:
             Powierzchnia z matching_surfaces.make_surface (z pamięci, jeśli już liczona).
@@ -121,16 +126,16 @@ class MatchState:
         bid, sid = key.rsplit("#", 1)
         if bid not in self.bones:
             raise KeyError(bid)
-        if (key, sample_mm) not in self._surfaces:
+        if (key, sample_au) not in self._surfaces:
             b, c = self.bones[bid], self.contacts[bid]
             if bid not in self.tri_labels:
                 self.tri_labels[bid] = triangle_labels(b.mesh, c.labels)
                 self.trees[bid] = cKDTree(np.asarray(b.cloud.points))
-            s = ms.make_surface(b, c, int(sid), sample_mm, self.tri_labels[bid], self.trees[bid])
+            s = ms.make_surface(b, c, int(sid), sample_au, self.tri_labels[bid], self.trees[bid])
             if s is None:
                 raise KeyError(f"{key} (powierzchni nie ma już w oznaczeniach)")
-            self._surfaces[(key, sample_mm)] = s
-        return self._surfaces[(key, sample_mm)]
+            self._surfaces[(key, sample_au)] = s
+        return self._surfaces[(key, sample_au)]
 
     def summary(self) -> dict:
         """GET /api/pairs: pary (od najlepszej), powierzchnie i ustawienia, z którymi je liczono.
@@ -209,9 +214,9 @@ class MatchState:
                    albo "score" (tylko ocena macierzy "T" 4x4)}.
 
         Returns:
-            Wynik jak w matching.json (score, contact_mm2, collision_mm2, cover_a, cover_b,
-            rmse_mm, T, seed) + "seconds" (czas liczenia) i "mode". Wartości nieskończone
-            (np. rmse_mm bez dopasowania) są zamieniane na None, bo JSON ich nie obsługuje.
+            Wynik jak w matching.json (score, contact_au2, collision_au2, cover_a, cover_b,
+            rmse_au, T, seed) + "seconds" (czas liczenia) i "mode". Wartości nieskończone
+            (np. rmse_au bez dopasowania) są zamieniane na None, bo JSON ich nie obsługuje.
 
         Raises:
             ValueError: nieznane ustawienie albo tryb.
@@ -226,7 +231,7 @@ class MatchState:
         mode = body.get("mode", "full")
         with self.lock:
             start = time.perf_counter()
-            a, b = self.surface(body["a"], p.sample_mm), self.surface(body["b"], p.sample_mm)
+            a, b = self.surface(body["a"], p.sample_au), self.surface(body["b"], p.sample_au)
             if mode == "full":
                 r = ms.match_pair(a, b, p)
             elif mode == "score":
@@ -279,10 +284,11 @@ def make_handler(state: MatchState):
             """Wysyła `data` jako JSON (UTF-8, polskie znaki bez escape).
 
             Args:
-                data:   obiekt do zapisania w JSON (słownik, lista, ...).
+                data:   obiekt do zapisania w JSON (słownik, lista, ...); NaN -> null (ms.json_safe).
                 status: kod HTTP (domyślnie 200).
             """
-            self._send(status, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json")
+            self._send(status, json.dumps(ms.json_safe(data), ensure_ascii=False, allow_nan=False).encode("utf-8"),
+                       "application/json")
 
         def _guard(self, fn):
             """Wywołuje fn() i zamienia wyjątki na odpowiedź JSON {"error": ...}.
@@ -363,7 +369,7 @@ def matching_page(state: MatchState, path: Path, open_browser: bool = False) -> 
 
     Args:
         state:        wczytany matching.json (MatchState).
-        path:         plik wynikowy, np. out/3d/matching.html.
+        path:         plik wynikowy, np. out/3d/<zestaw>/matching.html.
         open_browser: otwórz stronę po zapisie.
 
     Returns:
@@ -375,18 +381,18 @@ def matching_page(state: MatchState, path: Path, open_browser: bool = False) -> 
         path, "Dopasowanie powierzchni styku",
         f"Powierzchnie styku: {ms.SOURCE_NAMES.get(p.source, p.source)}{algo}. Każda dopasowana (RANSAC + ICP) "
         "do każdej powierzchni innej kości, twarzą w twarz. Wynik = pole styku (powierzchnie bliżej niż "
-        f"{p.tolerance_mm:g} mm, normalne przeciwne) minus pole, na którym kości wchodzą w siebie.",
+        f"{p.tolerance_au:g} a.u., normalne przeciwne) minus pole, na którym kości wchodzą w siebie.",
         [("Najlepsze pary", "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę. "
           "Suwaki ustawień z przeliczaniem jednej pary: python scripts/tune_matching.py",
           matching_figure(rep["pairs"], state.bones, state.contacts, state.view, p.max_shown)),
-         ("Wszystkie pary", "Wynik każdej pary powierzchni [mm²]; puste pola = ta sama kość, "
+         ("Wszystkie pary", "Wynik każdej pary powierzchni [a.u.²]; puste pola = ta sama kość, "
           "„(algorytm)” = powierzchnia z algorytmu wykrywania.",
           match_matrix_figure(rep, state.view))],
         state.view, open_browser=open_browser)
 
 
 def write_html(out_dir: Path | None = None, open_browser: bool = True) -> Path:
-    """tune_matching.py --html: wczytuje matching.json i zapisuje out/3d/matching.html (matching_page).
+    """tune_matching.py --html: wczytuje matching.json i zapisuje out/3d/<zestaw>/matching.html (matching_page).
 
     Args:
         out_dir:      folder wyników z matching.json i kośćmi (None = DATA_OUT); strona trafia tam.
@@ -423,7 +429,7 @@ def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | No
     port = port or config.MATCH_TOOL_PORT
     state = _load(out_dir)
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state))
+        server = LocalServer(("127.0.0.1", port), make_handler(state))
     except OSError:
         raise SystemExit(f"Port {port} jest zajęty - może podgląd już działa w innym oknie? "
                          f"Inny port: python scripts/tune_matching.py --port {port + 1}") from None
