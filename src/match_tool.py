@@ -48,6 +48,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 import matching_surfaces as ms
+from config import read_json
 from bones import Bone, load_bones
 from contact_tool import LocalServer, _b64
 from contacts import ContactParams, triangle_labels
@@ -65,7 +66,7 @@ class MatchState:
     """Stan serwera: wyniki z matching.json, kości (z chmurami) i powierzchnie styku.
 
     Kości są wczytywane raz przy starcie (tylko te z matching.json). Powierzchnie są
-    próbkowane przy pierwszym użyciu i pamiętane dla każdej wartości sample_mm.
+    próbkowane przy pierwszym użyciu i pamiętane dla każdej wartości sample_au.
     Obliczenia są chronione blokadą `lock` - open3d ma wspólne ziarno losowania,
     a serwer obsługuje zapytania w osobnych wątkach.
     """
@@ -88,7 +89,7 @@ class MatchState:
         run = f"python scripts/match_surfaces.py{config.dataset_flag()}"
         if not path.exists():
             raise SystemExit(f"Brak {path} - uruchom najpierw: {run}")
-        self.report = json.loads(path.read_text(encoding="utf-8"))
+        self.report = read_json(path)
         self.params = ms.SurfaceMatchParams(**{k: v for k, v in self.report["params"].items() if k in PARAM_NAMES})
         self.view = view
         self.lock = threading.Lock()
@@ -109,12 +110,12 @@ class MatchState:
         self._geometry: dict[str, dict] = {}
         self._settings: ms.SurfaceMatchParams | None = None   # ustawia _load() - do warnings()
 
-    def surface(self, key: str, sample_mm: float) -> ms.Surface:
-        """Powierzchnia styku próbkowana co `sample_mm` (liczona raz dla każdej wartości).
+    def surface(self, key: str, sample_au: float) -> ms.Surface:
+        """Powierzchnia styku próbkowana co `sample_au` (liczona raz dla każdej wartości).
 
         Args:
             key:       klucz "<id kości>#<numer powierzchni>" (jak w matching.json).
-            sample_mm: odstęp punktów powierzchni [mm] (ustawienie "sample_mm").
+            sample_au: odstęp punktów powierzchni [a.u.] (ustawienie "sample_au").
 
         Returns:
             Powierzchnia z matching_surfaces.make_surface (z pamięci, jeśli już liczona).
@@ -125,16 +126,16 @@ class MatchState:
         bid, sid = key.rsplit("#", 1)
         if bid not in self.bones:
             raise KeyError(bid)
-        if (key, sample_mm) not in self._surfaces:
+        if (key, sample_au) not in self._surfaces:
             b, c = self.bones[bid], self.contacts[bid]
             if bid not in self.tri_labels:
                 self.tri_labels[bid] = triangle_labels(b.mesh, c.labels)
                 self.trees[bid] = cKDTree(np.asarray(b.cloud.points))
-            s = ms.make_surface(b, c, int(sid), sample_mm, self.tri_labels[bid], self.trees[bid])
+            s = ms.make_surface(b, c, int(sid), sample_au, self.tri_labels[bid], self.trees[bid])
             if s is None:
                 raise KeyError(f"{key} (powierzchni nie ma już w oznaczeniach)")
-            self._surfaces[(key, sample_mm)] = s
-        return self._surfaces[(key, sample_mm)]
+            self._surfaces[(key, sample_au)] = s
+        return self._surfaces[(key, sample_au)]
 
     def summary(self) -> dict:
         """GET /api/pairs: pary (od najlepszej), powierzchnie i ustawienia, z którymi je liczono.
@@ -213,9 +214,9 @@ class MatchState:
                    albo "score" (tylko ocena macierzy "T" 4x4)}.
 
         Returns:
-            Wynik jak w matching.json (score, contact_mm2, collision_mm2, cover_a, cover_b,
-            rmse_mm, T, seed) + "seconds" (czas liczenia) i "mode". Wartości nieskończone
-            (np. rmse_mm bez dopasowania) są zamieniane na None, bo JSON ich nie obsługuje.
+            Wynik jak w matching.json (score, contact_au2, collision_au2, cover_a, cover_b,
+            rmse_au, T, seed) + "seconds" (czas liczenia) i "mode". Wartości nieskończone
+            (np. rmse_au bez dopasowania) są zamieniane na None, bo JSON ich nie obsługuje.
 
         Raises:
             ValueError: nieznane ustawienie albo tryb.
@@ -230,7 +231,7 @@ class MatchState:
         mode = body.get("mode", "full")
         with self.lock:
             start = time.perf_counter()
-            a, b = self.surface(body["a"], p.sample_mm), self.surface(body["b"], p.sample_mm)
+            a, b = self.surface(body["a"], p.sample_au), self.surface(body["b"], p.sample_au)
             if mode == "full":
                 r = ms.match_pair(a, b, p)
             elif mode == "score":
@@ -380,11 +381,11 @@ def matching_page(state: MatchState, path: Path, open_browser: bool = False) -> 
         path, "Dopasowanie powierzchni styku",
         f"Powierzchnie styku: {ms.SOURCE_NAMES.get(p.source, p.source)}{algo}. Każda dopasowana (RANSAC + ICP) "
         "do każdej powierzchni innej kości, twarzą w twarz. Wynik = pole styku (powierzchnie bliżej niż "
-        f"{p.tolerance_mm:g} mm, normalne przeciwne) minus pole, na którym kości wchodzą w siebie.",
+        f"{p.tolerance_au:g} a.u., normalne przeciwne) minus pole, na którym kości wchodzą w siebie.",
         [("Najlepsze pary", "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę. "
           "Suwaki ustawień z przeliczaniem jednej pary: python scripts/tune_matching.py",
           matching_figure(rep["pairs"], state.bones, state.contacts, state.view, p.max_shown)),
-         ("Wszystkie pary", "Wynik każdej pary powierzchni [mm²]; puste pola = ta sama kość, "
+         ("Wszystkie pary", "Wynik każdej pary powierzchni [a.u.²]; puste pola = ta sama kość, "
           "„(algorytm)” = powierzchnia z algorytmu wykrywania.",
           match_matrix_figure(rep, state.view))],
         state.view, open_browser=open_browser)

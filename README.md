@@ -115,19 +115,19 @@ Wizualizacje (krok 2, 4 i 6 z `--html`) to pojedyncze pliki HTML - otwierają si
 
 1. **Szuka skanów** w `scanned_bones/<zestaw>/` i podfolderach (patrz wyżej).
 2. **Wczytuje i naprawia siatki**: scala zduplikowane wierzchołki, usuwa zdegenerowane i zduplikowane trójkąty oraz krawędzie nierozmaitościowe. Siatka **nie jest wygładzana** - szczegóły przełomu są potrzebne do dopasowania.
-3. **Porównuje każdą parę skanów**: ustawia je na sobie (zgrubnie deskryptorami FPFH + RANSAC, dokładnie ICP) i mierzy **nakładanie** = jaka część mniejszego skanu leży na drugim (bliżej niż 0.15 mm, normalne w tę samą stronę). Na naszych skanach: różne fragmenty 0.05–0.20, ten sam fragment 0.49–0.73.
+3. **Porównuje każdą parę skanów**: ustawia je na sobie (zgrubnie deskryptorami FPFH + RANSAC, dokładnie ICP) i mierzy **nakładanie** = jaka część mniejszego skanu leży na drugim (bliżej niż 0.15 a.u., normalne w tę samą stronę). Na naszych skanach: różne fragmenty 0.05–0.20, ten sam fragment 0.49–0.73.
    Pierwsze uruchomienie trwa kilka minut (15 skanów = 105 par ≈ 2.5 min), wyniki par są w cache (`out/3d/<zestaw>/cache/`), więc kolejne trwają ~20 s. Nowe skany liczą tylko nowe pary.
 4. **Grupuje skany w kości**: nakładanie ≥ `min_overlap` (0.3) = ta sama kość. Działa też „przez pośrednika”: dwa skany różnych końców kości łączą się przez trzeci, który obejmuje oba.
-5. **Usuwa szum**: oderwany kawałek skanu zostaje tylko, jeśli jest głównym kawałkiem, albo potwierdzają go inne skany tej kości, albo jest duży (≥ 5% głównego) i leży blisko (≤ 3 mm). Np. w `whole_scan/upperjaw` dwa kawałki leżące 120 mm od kości (połowicznie zeskanowany inny fragment) znikają.
+5. **Usuwa szum**: oderwany kawałek skanu zostaje tylko, jeśli jest głównym kawałkiem, albo potwierdzają go inne skany tej kości, albo jest duży (≥ 5% głównego) i leży blisko (≤ 3 a.u.). Np. w `whole_scan/upperjaw` dwa kawałki leżące 120 a.u. od kości (połowicznie zeskanowany inny fragment) znikają.
 6. **Skleja powierzchnię**: cały skan referencyjny (największy) + z pozostałych tylko to, czego w nim brakuje (oryginalna geometria i kolory, bez wygładzania). Alternatywa: `"fuse_method": "poisson"` - jedna gładka powierzchnia.
 7. **Liczy chmurę punktów i FPFH** (do dopasowania fragmentów) i zapisuje wszystko do `out/3d/<zestaw>/bones/<id kości>/`.
 
 Konsola pokazuje, co się stało, np.:
 
 ```
-  13. whole_scan / lowerjaw: 3 skan(y) [whole_scan / lowerjaw (ref.), whole_lower_rescan_1, whole_lower_rescan_2] -> 3019 mm2
-  14. whole_scan / upperjaw: 2 skan(y) [...] -> 2380 mm2, usunięty szum: 274 mm2
-      whole_scan / upperjaw: usunięto kawałek 157 mm2 - SZUM: 120 mm od głównego, brak potwierdzenia
+  13. whole_scan / lowerjaw: 3 skan(y) [whole_scan / lowerjaw (ref.), whole_lower_rescan_1, whole_lower_rescan_2] -> 3019 a.u.²
+  14. whole_scan / upperjaw: 2 skan(y) [...] -> 2380 a.u.², usunięty szum: 274 a.u.²
+      whole_scan / upperjaw: usunięto kawałek 157 a.u.² - SZUM: 120 a.u. od głównego, brak potwierdzenia
 ```
 
 ### 2. Sprawdzenie łączenia: `scripts/show_merging.py`
@@ -164,7 +164,7 @@ Za pierwszym razem narzędzie potrzebuje internetu (pobiera bibliotekę three.js
 
 Wszystkie kości ułożone płasko „na stole”, ponumerowane, z oznaczonymi powierzchniami styku. Lista „Wszystkie kości” przybliża wybraną kość, przyciski: widok 3D / z góry / z boku, powierzchnie styku pokaż / ukryj, legenda ukrywa kości, najechanie myszą pokazuje szczegóły (skany, pole, wymiary, pola i średnice powierzchni styku).
 
-**Linijka** (przycisk „📏 Linijka” na dole albo klawisz `L`): dwa kliknięcia w kość = odległość w mm (odcinek z podpisem na scenie i lista pomiarów). Obracanie myszą nie stawia punktu, `Esc` anuluje zaczęty odcinek, „Cofnij” / „Wyczyść” usuwa pomiary. Punkt przyciąga się do najbliższego wierzchołka pokazanej (uproszczonej) siatki - dla dokładniejszego pomiaru pokaż mniej kości (`show_bones.py 3`) albo zwiększ `triangles_total`. Linijka jest też w `merging.html`, `matching.html` i na stronie z suwakami (`tune_matching.py`).
+**Linijka** (przycisk „📏 Linijka” na dole albo klawisz `L`): dwa kliknięcia w kość = odległość w a.u. (odcinek z podpisem na scenie i lista pomiarów). Obracanie myszą nie stawia punktu, `Esc` anuluje zaczęty odcinek, „Cofnij” / „Wyczyść” usuwa pomiary. Punkt przyciąga się do najbliższego wierzchołka pokazanej (uproszczonej) siatki - dla dokładniejszego pomiaru pokaż mniej kości (`show_bones.py 3`) albo zwiększ `triangles_total`. Linijka jest też w `merging.html`, `matching.html` i na stronie z suwakami (`tune_matching.py`).
 
 ```powershell
 python scripts/show_bones.py                    # kolory skanera
@@ -188,7 +188,7 @@ Wszystko jest przygotowane pod algorytm, który zastąpi ręczne oznaczanie:
 
 Algorytmy:
 - `roughness` - bazowy: przełom = szorstka powierzchnia, kora = gładka. Punkt wyjścia, nie rozwiązanie.
-- `features` - **szorstkość + rozrzut normalnych + gęstość siatki naraz, bez żadnych oznaczeń**. Każda cecha jest porównywana z typową wartością na tej samej kości (mediana = kora, bo kory jest najwięcej): przełom jest bardziej szorstki, ma większy rozrzut normalnych i gęstszą siatkę. Wynik = średnia tych odchyleń, potem wygładzenie, próg i podział na obszary. Nie zależy od skali skanera. Na naszych 6 ręcznie oznaczonych kościach IoU 0.47 (`roughness` 0.43); opis cech: [raporty/przelom_vs_kora.md](raporty/przelom_vs_kora.md). Ustawienia: `feature_keys`, `feature_threshold`, `feature_smooth_mm`, `feature_open_mm` w sekcji `contacts`.
+- `features` - **szorstkość + rozrzut normalnych + gęstość siatki naraz, bez żadnych oznaczeń**. Każda cecha jest porównywana z typową wartością na tej samej kości (mediana = kora, bo kory jest najwięcej): przełom jest bardziej szorstki, ma większy rozrzut normalnych i gęstszą siatkę. Wynik = średnia tych odchyleń, potem wygładzenie, próg i podział na obszary. Nie zależy od skali skanera. Na naszych 6 ręcznie oznaczonych kościach IoU 0.47 (`roughness` 0.43); opis cech: [raporty/przelom_vs_kora.md](raporty/przelom_vs_kora.md). Ustawienia: `feature_keys`, `feature_threshold`, `feature_smooth_au`, `feature_open_au` w sekcji `contacts`.
 
 ```python
 # src/contacts.py
@@ -220,7 +220,7 @@ Algorytm bazowy `roughness` jest słaby: na jego powierzchniach para kości strz
 Jak działa:
 1. Normalne powierzchni A są **odwracane**: dwa przełomy stykają się twarzą w twarz (wypukłość na A = wklęsłość na B), więc po odwróceniu A „wygląda jak” B i działa ta sama rejestracja co przy łączeniu skanów.
 2. **RANSAC** na deskryptorach FPFH (zgrubnie) + **ICP** (dokładnie) → przekształcenie A → B. RANSAC w open3d jest losowy (wielowątkowy), dlatego zawsze przechodzi wszystkie 1 mln iteracji - przy 50 tys. dobre ustawienie wychodziło tylko w ~40% prób. Większość złych opcji jest odrzucana od razu, bo są sprawdzane proste warunki. 
-3. Ocena: **styk** = pole, na którym powierzchnie leżą bliżej niż `tolerance_mm` (0.5 mm) z przeciwnymi normalnymi; **kolizja** = pole, na którym całe kości wchodzą w siebie głębiej niż `collision_mm` (1 mm). **Wynik = styk − kolizja** [mm²].
+3. Ocena: **styk** = pole, na którym powierzchnie leżą bliżej niż `tolerance_au` (0.5 a.u.) z przeciwnymi normalnymi; **kolizja** = pole, na którym całe kości wchodzą w siebie głębiej niż `collision_au` (1 a.u.). **Wynik = styk − kolizja** [a.u.²].
 
 Wszystkie ustawienia z opisami: `settings.json`, sekcja `matching`.
 
@@ -251,7 +251,7 @@ W widoku 3D jest **linijka** (prawy dolny róg albo klawisz `L`, jak w `show_bon
 
 Lista par pokazuje stary → nowy wynik, „Przelicz od nowa” powtarza losowy RANSAC, „Przywróć ustawienia” wraca do `matching.json`. Nic nie jest zapisywane - zmienione ustawienia strona wypisuje gotowe do wklejenia w `settings.json`; potem `match_surfaces.py` przelicza wszystkie pary. Port: `settings.json` → `matching` → `port` (8766).
 
-Na naszych danych (24.11.2026, ręczne oznaczenia 4 kości): `bone_01` ↔ `bone_03` 179 mm² i oba fragmenty kości strzałkowej (`whole_scan` lowerjaw pow. 2 ↔ upperjaw pow. 2) 118 mm², obie pary bez kolizji, RMSE ~0.17 mm, fragmenty układają się w jednej osi; najlepsza przypadkowa para ma 55. Im więcej kości ma ręczne oznaczenia, tym więcej par da się sprawdzić.
+Na naszych danych (24.11.2026, ręczne oznaczenia 4 kości): `bone_01` ↔ `bone_03` 179 a.u.² i oba fragmenty kości strzałkowej (`whole_scan` lowerjaw pow. 2 ↔ upperjaw pow. 2) 118 a.u.², obie pary bez kolizji, RMSE ~0.17 a.u., fragmenty układają się w jednej osi; najlepsza przypadkowa para ma 55. Im więcej kości ma ręczne oznaczenia, tym więcej par da się sprawdzić.
 
 ## Ustawienia
 
@@ -263,11 +263,11 @@ Składnia JSON: `true` / `false` / `null` małymi literami, tekst w `"..."`, lic
 |---|---|---|
 | `dataset` | (pojedyncza wartość) | domyślny zestaw danych (podfolder w każdym z folderów `paths`) |
 | `paths` | `data_in`, `data_out`, `contacts` | foldery główne: skany, wyniki (`out/3d`), powierzchnie styku |
-| `scans` | `exclude`, `min_component_area_ratio`, `max_component_gap_mm` | które skany pominąć; kiedy oderwany kawałek to szum |
-| `merging` | `min_overlap`, `tolerance_mm`, `min_support`, `fuse_method`, `groups` | kiedy skany to ta sama kość; jak skleić; ręczne grupy |
+| `scans` | `exclude`, `min_component_area_ratio`, `max_component_gap_au` | które skany pominąć; kiedy oderwany kawałek to szum |
+| `merging` | `min_overlap`, `tolerance_au`, `min_support`, `fuse_method`, `groups` | kiedy skany to ta sama kość; jak skleić; ręczne grupy |
 | `features` | `voxel_size`, `fpfh_radius_factor` | chmura punktów i FPFH do dopasowania |
-| `contacts` | `method`, `rough_threshold`, `port`, `brush_mm`, ... | algorytm wykrywania i narzędzie do oznaczania |
-| `matching` | `source`, `tolerance_mm`, `collision_mm`, `ransac_iterations`, ... | dopasowanie po powierzchniach styku |
+| `contacts` | `method`, `rough_threshold`, `port`, `brush_au`, ... | algorytm wykrywania i narzędzie do oznaczania |
+| `matching` | `source`, `tolerance_au`, `collision_au`, `ransac_iterations`, ... | dopasowanie po powierzchniach styku |
 | `visualization_3d` | `triangles_total`, `embed_plotly`, `open_browser` | wizualizacje HTML |
 
 ## Wyniki: `out/3d/<zestaw>/` (generowane, można usunąć i policzyć od nowa)
@@ -277,7 +277,7 @@ out/3d/<zestaw>/
     bones/<id kości>/
         mesh.ply            siatka kości (wyśrodkowana), z kolorami skanera
         source.npy          z którego skanu pochodzi każdy trójkąt
-        cloud.npz           chmura punktów (points, normals, colors), co ~0.5 mm
+        cloud.npz           chmura punktów (points, normals, colors), co ~0.5 a.u.
         fpfh.npy            deskryptory FPFH chmury, (N, 33)
         meta.json           skany (z sumą kontrolną pliku), ich przekształcenia, usunięty szum, statystyki
         scans/*.ply         każdy skan w układzie kości (*_noise.ply = usunięty szum)
@@ -350,7 +350,7 @@ Skany, które wykonywaliśmy skanerem miały błędy. Nie dało się dobrze zesk
 Na razie skany są zapisane surowo i nie da się do końca wywnisokować, które to są kości. W przyszłości przy wielu skanach tego samego fragmentu trzeba podać w nazwie taki sam fragment (nazwa lub kod fragmentu). Przy podejściu ze skalowaniem jedynie końcówek fragmentów, (z powodu niedokładnego skanowania płaskich boków kości przez skaner) należy 
 
 ### Co wiemy o naszych skanach (23.11.2026)
-- Każdy skan to **otwarta, częściowa** powierzchnia fragmentu (skaner łapie tylko część), krawędzie trójkątów ~0.22 mm.
+- Każdy skan to **otwarta, częściowa** powierzchnia fragmentu (skaner łapie tylko część), krawędzie trójkątów ~0.22 a.u.
 - 15 skanów (+ 1 occlusion) to **12 różnych kości**: `whole_scan-lowerjaw` = `whole_lower_rescan_1` + `whole_lower_rescan_2`, `whole_scan-upperjaw` = `whole_upper_rescan` (dawniej `first_test` i sesje `modelowanie matematyczne_(5)`, `_(6)`). Pozostałe skany nie pokrywają się z niczym (nakładanie ≤ 0.20).
 - Sloty Medita (upperjaw / lowerjaw) **nie oznaczają** konkretnej kości.
 - `whole_scan/...occlusionfirst` to **oba fragmenty złożone razem**, czyli gotowa kość do sprawdzania algorytmu dopasowania.
@@ -373,9 +373,9 @@ Liczenie trzech rodzajów chmur dla punktów o różnej precyzji
 
 | indeks | co                                | do czego              |
 |:------:|-----------------------------------|-----------------------|
-| `[0]`  | gęsta chmura (punkty co `sample_mm`) | ostatni etap ICP      |
-| `[1]`  | średnia (co 2 × `sample_mm`)      | pierwsze etapy ICP    |
-| `[2]`  | zgrubna (co `coarse_voxel_mm`)    | RANSAC                |
+| `[0]`  | gęsta chmura (punkty co `sample_au`) | ostatni etap ICP      |
+| `[1]`  | średnia (co 2 × `sample_au`)      | pierwsze etapy ICP    |
+| `[2]`  | zgrubna (co `coarse_voxel_au`)    | RANSAC                |
 | `[3]`  | FPFH zgrubnej                     | RANSAC                |
 
 Dodatkowo dla powierzchni A robimy odwrócenie normalnych, aby zgadzały się z parowanym kawałkiem B. (FPFH użyte w algo zależy od normalnych).

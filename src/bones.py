@@ -30,6 +30,7 @@ import open3d as o3d
 import trimesh
 
 from data_parsing import compute_fpfh, mesh_stats, sample_surface, to_cloud
+from config import read_json
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ class FeatureParams:
     """Ustawienia chmury punktów i deskryptorów FPFH kości (settings.json, sekcja "features")."""
 
     center: bool = True               # przesuń kość tak, żeby jej środek był w (0, 0, 0)
-    voxel_size: float = 0.5           # odstęp punktów chmury [mm]
+    voxel_size: float = 0.5           # odstęp punktów chmury [a.u.]
     sampling_density: float = 4.0     # punkty losowane na voxel^2 przed przerzedzeniem
     fpfh_radius_factor: float = 5.0   # promień FPFH = ta liczba x voxel_size
 
@@ -56,7 +57,7 @@ class Bone:
         meta:   słownik z meta.json.
         folder: DATA_OUT/bones/<id>/ albo None, jeśli kości jeszcze nie zapisano.
 
-    Wszystkie współrzędne są w układzie kości (jak w mesh.ply), w mm.
+    Wszystkie współrzędne są w układzie kości (jak w mesh.ply), w a.u.
     """
 
     id: str
@@ -245,7 +246,7 @@ def load_bone(folder: Path, features: bool = False) -> Bone:
         Kość; id = nazwa folderu.
     """
     d = Path(folder)
-    meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+    meta = read_json(d / "meta.json")
     mesh = read_mesh(d / "mesh.ply")
     source = np.load(d / "source.npy") if (d / "source.npy").exists() else np.zeros(len(mesh.triangles), int)
     bone = Bone(id=d.name, label=meta.get("label", d.name), mesh=mesh, source=source, meta=meta, folder=d)
@@ -303,14 +304,14 @@ def write_summary(bones: list[Bone], out_dir: Path) -> Path:
         Ścieżka do summary.csv.
     """
     path = out_dir / "summary.csv"
-    cols = ["nr", "id", "nazwa", "skany", "skan_referencyjny", "polaczenie", "trojkaty", "pole_mm2",
-            "wymiar_x_mm", "wymiar_y_mm", "wymiar_z_mm", "usuniety_szum_mm2", "punkty_chmury"]
+    cols = ["nr", "id", "nazwa", "skany", "skan_referencyjny", "polaczenie", "trojkaty", "pole_au2",
+            "wymiar_x_au", "wymiar_y_au", "wymiar_z_au", "usuniety_szum_au2", "punkty_chmury"]
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(cols)
         for i, b in enumerate(bones, 1):
             m, st = b.meta, b.meta["stats"]
             w.writerow([i, b.id, b.label, ", ".join(s["id"] for s in m["scans"]), m["reference_scan"],
-                        m["fuse_method"], st["triangles"], st["area_mm2"], *st["extent_mm"],
-                        m["noise_removed_mm2"], m["cloud_points"]])
+                        m["fuse_method"], st["triangles"], st["area_au2"], *st["extent_au"],
+                        m["noise_removed_au2"], m["cloud_points"]])
     return path

@@ -24,7 +24,7 @@ Zawartość:
     kawałki skanu   - components, component_gaps, submesh, mesh_stats,
     próbkowanie     - sample_surface -> SurfaceSample, voxel_keep, to_cloud,
     deskryptory     - compute_fpfh.
-Wszystkie długości są w mm (tak zapisuje skaner), pola w mm².
+Wszystkie długości są w a.u. (tak zapisuje skaner), pola w a.u.².
 
 Uwaga: open3d na Windowsie nie otwiera ścieżek z polskimi znakami, dlatego
 wczytujemy przez trimesh, a nazwy wyjściowe są zamieniane na ASCII (slug).
@@ -55,14 +55,14 @@ class ScanParams:
 
     Oderwany kawałek skanu zostaje bez dodatkowego sprawdzania, jeśli jest duży
     (>= min_component_area_ratio x pole największego) i leży blisko głównego
-    (<= max_component_gap_mm). Pozostałe kawałki zostają tylko wtedy, gdy potwierdzą
+    (<= max_component_gap_au). Pozostałe kawałki zostają tylko wtedy, gdy potwierdzą
     je inne skany tej samej kości (merging.decide_components) - inaczej to szum.
     """
 
     preferred_formats: tuple = ("ply", "obj", "stl")  # kolejność wyboru formatu tego samego skanu
     exclude: tuple = ("occlusion",)       # pomiń skany, których ścieżka zawiera któryś z tych tekstów
     min_component_area_ratio: float = 0.05  # kawałek mniejszy niż ten ułamek największego = podejrzany o szum
-    max_component_gap_mm: float = 3.0     # kawałek dalej od głównego niż to = podejrzany o szum (inny obiekt)
+    max_component_gap_au: float = 3.0     # kawałek dalej od głównego niż to = podejrzany o szum (inny obiekt)
 
 
 @dataclass(frozen=True)
@@ -216,7 +216,7 @@ def load_mesh(path: Path) -> o3d.geometry.TriangleMesh:
         path: plik .ply / .obj / .stl.
 
     Returns:
-        Siatka open3d z wierzchołkami w mm i kolorami wierzchołków w [0, 1] (jeśli są),
+        Siatka open3d z wierzchołkami w a.u. i kolorami wierzchołków w [0, 1] (jeśli są),
         jeszcze bez normalnych.
 
     Raises:
@@ -269,7 +269,7 @@ def components(mesh: o3d.geometry.TriangleMesh) -> tuple[np.ndarray, np.ndarray]
         mesh: siatka (najlepiej po repair_mesh, inaczej STL rozpada się na pojedyncze trójkąty).
 
     Returns:
-        (numer kawałka dla każdego trójkąta (T,), pola kawałków [mm^2] (K,)).
+        (numer kawałka dla każdego trójkąta (T,), pola kawałków [a.u.^2] (K,)).
         Kawałki są ponumerowane od największego (0 = największy).
     """
     clusters, _, areas = mesh.cluster_connected_triangles()
@@ -281,7 +281,7 @@ def components(mesh: o3d.geometry.TriangleMesh) -> tuple[np.ndarray, np.ndarray]
 
 
 def component_gaps(mesh: o3d.geometry.TriangleMesh, tri_comp: np.ndarray) -> np.ndarray:
-    """Odległość [mm] każdego kawałka od największego (kawałka 0).
+    """Odległość [a.u.] każdego kawałka od największego (kawałka 0).
 
     Odległość = najmniejsza odległość wierzchołka danego kawałka od wierzchołków kawałka 0.
 
@@ -290,7 +290,7 @@ def component_gaps(mesh: o3d.geometry.TriangleMesh, tri_comp: np.ndarray) -> np.
         tri_comp: (T,) numer kawałka każdego trójkąta - z components().
 
     Returns:
-        (K,) odległości w mm; kawałek 0 ma 0.
+        (K,) odległości w a.u.; kawałek 0 ma 0.
     """
     from scipy.spatial import cKDTree
 
@@ -329,15 +329,15 @@ def mesh_stats(mesh: o3d.geometry.TriangleMesh) -> dict:
         mesh: siatka (może być pusta - wymiary są wtedy zerami).
 
     Returns:
-        {"vertices", "triangles", "area_mm2", "extent_mm": [x, y, z]} - wymiary pudełka
-        równoległego do osi układu [mm], zaokrąglone do 0.01.
+        {"vertices", "triangles", "area_au2", "extent_au": [x, y, z]} - wymiary pudełka
+        równoległego do osi układu [a.u.], zaokrąglone do 0.01.
     """
     extent = mesh.get_axis_aligned_bounding_box().get_extent() if len(mesh.vertices) else np.zeros(3)
     return {
         "vertices": len(mesh.vertices),
         "triangles": len(mesh.triangles),
-        "area_mm2": round(float(mesh.get_surface_area()), 2),
-        "extent_mm": [round(float(e), 2) for e in extent],
+        "area_au2": round(float(mesh.get_surface_area()), 2),
+        "extent_au": [round(float(e), 2) for e in extent],
     }
 
 
@@ -361,13 +361,13 @@ class SurfaceSample:
 def voxel_keep(points: np.ndarray, voxel: float) -> np.ndarray:
     """Przerzedzenie chmury: indeksy punktów, po jednym na każdy zajęty woksel.
 
-    Przestrzeń jest dzielona na sześciany o boku `voxel` [mm]; z każdego zostaje pierwszy
+    Przestrzeń jest dzielona na sześciany o boku `voxel` [a.u.]; z każdego zostaje pierwszy
     punkt (wg kolejności w `points`). Zwracane są indeksy, a nie punkty, żeby tak samo
     przerzedzić normalne, kolory itp.
 
     Args:
         points: (N, 3) punkty.
-        voxel:  bok woksela [mm] ~ odstęp punktów po przerzedzeniu.
+        voxel:  bok woksela [a.u.] ~ odstęp punktów po przerzedzeniu.
 
     Returns:
         Indeksy zostawionych punktów, rosnąco.
@@ -389,7 +389,7 @@ def sample_surface(mesh: o3d.geometry.TriangleMesh, spacing: float, density: flo
 
     Args:
         mesh:    siatka z co najmniej jednym trójkątem o niezerowym polu.
-        spacing: rozmiar woksela [mm] ~ odstęp między punktami.
+        spacing: rozmiar woksela [a.u.] ~ odstęp między punktami.
         density: ile punktów losować na spacing^2 powierzchni przed przerzedzeniem
                  (losowanych jest zawsze co najmniej 1000).
         seed:    ziarno losowania (stałe = powtarzalne wyniki).
@@ -448,7 +448,7 @@ def compute_fpfh(cloud: o3d.geometry.PointCloud, radius: float) -> o3d.pipelines
 
     Args:
         cloud:  chmura punktów z normalnymi.
-        radius: promień sąsiedztwa [mm] (brane jest najwyżej 100 najbliższych sąsiadów).
+        radius: promień sąsiedztwa [a.u.] (brane jest najwyżej 100 najbliższych sąsiadów).
 
     Returns:
         Obiekt open3d Feature; `.data` ma kształt (33, N), więc tablica (N, 33) to `.data.T`.

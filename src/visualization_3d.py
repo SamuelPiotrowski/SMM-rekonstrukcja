@@ -27,7 +27,7 @@ Trzy wizualizacje:
 Zapis: save_figure (jedna figura na całe okno) albo write_page (kilka figur w sekcjach
 z nagłówkami). Przy embed_plotly = True plik HTML działa bez internetu i można go
 po prostu komuś wysłać. Każdy widok 3D ma linijkę (src/web/ruler.js): przycisk "📏 Linijka"
-na dole albo klawisz L, potem dwa kliknięcia w kość = odległość w mm.
+na dole albo klawisz L, potem dwa kliknięcia w kość = odległość w a.u.
 
 Wizualizacja nie zmienia wyników - czyta tylko out/3d/<zestaw>/ i contacts/.
 """
@@ -46,6 +46,7 @@ import plotly.graph_objects as go
 from scipy.spatial import cKDTree
 
 from bones import Bone, read_mesh
+from config import read_json
 from contacts import Contacts, surface_color, surface_stats
 
 COLORS = ("#477eae", "#299784", "#ce8b3e", "#8b6ab3", "#c4566a", "#5b8f3a", "#3f6fb5", "#a7743a")
@@ -54,7 +55,7 @@ NOISE_COLOR = "#d64545"
 COLOR_MODES = ("scan", "fragment", "fpfh")
 FONT = dict(family="Segoe UI, Arial, sans-serif", color="#1f2a36")
 LIGHTING = dict(ambient=0.55, diffuse=0.75, specular=0.12, roughness=0.65, fresnel=0.05)
-RULER_JS = Path(__file__).resolve().parent / "web" / "ruler.js"     # linijka w widokach 3D (pomiar w mm)
+RULER_JS = Path(__file__).resolve().parent / "web" / "ruler.js"     # linijka w widokach 3D (pomiar w a.u.)
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,7 @@ class View3DParams:
     embed_plotly: bool = True          # True = działa bez internetu (plik ~4.5 MB większy)
     background: str = "#f4f6f8"        # kolor tła strony
     bone_color: str = "#e3d9c6"        # kolor kości, gdy skan nie ma kolorów
-    gap_mm: float = 10.0               # odstęp między kośćmi na stole
+    gap_au: float = 10.0               # odstęp między kośćmi na stole
     source: str = "manual"             # powierzchnie styku w show_bones.py: "manual" / "auto" / "manual-auto"
 
 
@@ -198,8 +199,8 @@ def shelf_layout(sizes: list[np.ndarray], gap: float, aspect: float = 1.8) -> li
     idą w dół (malejące y).
 
     Args:
-        sizes:  (szerokość, wysokość) każdego prostokąta [mm].
-        gap:    odstęp między prostokątami [mm].
+        sizes:  (szerokość, wysokość) każdego prostokąta [a.u.].
+        gap:    odstęp między prostokątami [a.u.].
         aspect: proporcje szerokość : wysokość całości.
 
     Returns:
@@ -234,18 +235,18 @@ def _bone_hover(nr: int, bone: Bone, stats: list[dict], contacts: Contacts | Non
     """
     m = bone.meta
     st = m.get("stats", {})
-    ext = " × ".join(f"{e:.1f}" for e in sorted(st.get("extent_mm", [0, 0, 0]), reverse=True))
+    ext = " × ".join(f"{e:.1f}" for e in sorted(st.get("extent_au", [0, 0, 0]), reverse=True))
     lines = [f"<b>{nr}. {bone.label}</b>",
              f"skany: {len(m.get('scans', []))} ({', '.join(s['label'] for s in m.get('scans', []))})",
-             f"pole: {st.get('area_mm2', 0):.0f} mm²   wymiary: {ext} mm"]
-    if m.get("noise_removed_mm2"):
-        lines.append(f"usunięty szum: {m['noise_removed_mm2']:.0f} mm²")
+             f"pole: {st.get('area_au2', 0):.0f} a.u.²   wymiary: {ext} a.u."]
+    if m.get("noise_removed_au2"):
+        lines.append(f"usunięty szum: {m['noise_removed_au2']:.0f} a.u.²")
     if stats:
         lines.append("<b>powierzchnie styku:</b>")
         for s in stats:
             name = contacts.name(s["id"]) if contacts else f"Powierzchnia {s['id']}"
-            lines.append(f"<span style='color:{surface_color(s['id'])}'>■</span> {name}: {s['area_mm2']:.0f} mm², "
-                         f"średnica {s['max_diameter_mm']:.1f} mm")
+            lines.append(f"<span style='color:{surface_color(s['id'])}'>■</span> {name}: {s['area_au2']:.0f} a.u.², "
+                         f"średnica {s['max_diameter_au']:.1f} a.u.")
     else:
         lines.append("<i>powierzchnie styku: nie oznaczone</i>")
     return "<br>".join(lines) + "<extra></extra>"
@@ -262,14 +263,14 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
 
     Każda kość jest uproszczona do ~params.triangles_total / liczba kości trójkątów
     (co najmniej 5000), położona płasko (lying_rotation) i ustawiona na stole
-    (shelf_layout). Powierzchnie styku to osobne nakładki uniesione 0.04 mm nad kością -
-    dzięki temu da się je ukryć przyciskiem. Na stole jest podziałka 10 albo 50 mm.
+    (shelf_layout). Powierzchnie styku to osobne nakładki uniesione 0.04 a.u. nad kością -
+    dzięki temu da się je ukryć przyciskiem. Na stole jest podziałka 10 albo 50 a.u.
 
     Args:
         bones:      kości (dla color_mode="fpfh" wczytane z features=True).
         contacts:   {id kości: Contacts albo None}; brak klucza = kość bez oznaczeń.
         color_mode: "scan" / "fragment" / "fpfh".
-        params:     wygląd (triangles_total, bone_color, gap_mm, background).
+        params:     wygląd (triangles_total, bone_color, gap_au, background).
         numbers:    numery kości do wyświetlenia (domyślnie 1..N) - żeby przy wybranych
                     kościach zgadzały się z numerami z pełnej listy.
 
@@ -297,7 +298,7 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
         v = (np.asarray(d.vertices) - center) @ R.T
         shown.append((d, R, center, v))
         sizes.append(np.ptp(v, axis=0))
-    slots = shelf_layout([s[:2] for s in sizes], params.gap_mm)
+    slots = shelf_layout([s[:2] for s in sizes], params.gap_au)
     traces, groups, focus = [], [], []
     for k, (b, (d, R, center, v), fp) in enumerate(zip(bones, shown, fp_rgb)):
         nr = numbers[k]
@@ -335,8 +336,8 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
                 traces.append(go.Mesh3d(
                     x=_f32(q[:, 0]), y=_f32(q[:, 1]), z=_f32(q[:, 2]), **_ijk(tri, len(q)),
                     color=surface_color(s["id"]), opacity=1.0, legendgroup=b.id, showlegend=False,
-                    hovertemplate=(f"<b>{c.name(s['id'])}</b> ({nr}. {b.label})<br>pole: {s['area_mm2']:.1f} mm²"
-                                   f"<br>największa średnica: {s['max_diameter_mm']:.1f} mm<extra></extra>"),
+                    hovertemplate=(f"<b>{c.name(s['id'])}</b> ({nr}. {b.label})<br>pole: {s['area_au2']:.1f} a.u.²"
+                                   f"<br>największa średnica: {s['max_diameter_au']:.1f} a.u.<extra></extra>"),
                     lighting=LIGHTING, lightposition=dict(x=-1e4, y=-2e4, z=3e4)))
         top = p.max(axis=0)
         mid = (p.min(axis=0) + p.max(axis=0)) / 2
@@ -360,7 +361,7 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
                       i=[0, 0], j=[1, 2], k=[2, 3], color="#dde3e9", hoverinfo="skip", showlegend=False,
                       lighting=dict(ambient=1.0, diffuse=0.0, specular=0.0))
     scale = go.Scatter3d(x=[lo[0] + margin, lo[0] + margin + bar], y=[lo[1] + 3.0] * 2, z=[0.3, 0.3],
-                         mode="lines+text", text=["", f"<b>{bar:g} mm</b>"], textposition="top center",
+                         mode="lines+text", text=["", f"<b>{bar:g} a.u.</b>"], textposition="top center",
                          line=dict(color="#1f2a36", width=6), hoverinfo="skip", showlegend=False)
     traces = [table, scale] + traces
     groups = [[i + 2 for i in g] for g in groups]
@@ -372,10 +373,10 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
     mid_scene = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (z_lo + z_hi) / 2])
 
     def camera(box_lo, box_hi, direction, up=(0, 0, 1), zoom=0.8):
-        """Kamera plotly patrząca na pudełko box_lo..box_hi [mm] z kierunku `direction`.
+        """Kamera plotly patrząca na pudełko box_lo..box_hi [a.u.] z kierunku `direction`.
 
         Args:
-            box_lo, box_hi: rogi pudełka (x, y, z) w mm, w układzie sceny.
+            box_lo, box_hi: rogi pudełka (x, y, z) w a.u., w układzie sceny.
             direction:      kierunek od środka pudełka do kamery (nie musi być jednostkowy).
             up:             kierunek "do góry" na ekranie.
             zoom:           odległość kamery względem rozmiaru pudełka (większa = dalej).
@@ -408,7 +409,7 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
             "",
             "<i>lewy przycisk: obrót · kółko: zoom · prawy: przesuwanie</i>",
             "<i>najedź na kość: szczegóły · legenda: ukryj / pokaż</i>",
-            "<i>📏 Linijka (na dole, klawisz L): 2 kliknięcia = odległość w mm</i>"]
+            "<i>📏 Linijka (na dole, klawisz L): 2 kliknięcia = odległość w a.u.</i>"]
     fig = go.Figure(data=traces)
     fig.update_layout(
         title=dict(text="Fragmenty kości", x=0.5, font=dict(size=20)),
@@ -458,8 +459,8 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
         Figura; gdy żadna kość nie pasuje - figura z samym komunikatem.
     """
     numbers = numbers or list(range(1, len(bones) + 1))
-    chosen = [(n, b) for n, b in zip(numbers, bones) if b.n_scans > 1 or b.meta.get("noise_removed_mm2")]
-    chosen.sort(key=lambda nb: (-nb[1].n_scans, -nb[1].meta.get("noise_removed_mm2", 0)))   # ciekawsze najpierw
+    chosen = [(n, b) for n, b in zip(numbers, bones) if b.n_scans > 1 or b.meta.get("noise_removed_au2")]
+    chosen.sort(key=lambda nb: (-nb[1].n_scans, -nb[1].meta.get("noise_removed_au2", 0)))   # ciekawsze najpierw
     traces, groups, boxes, notes = [], [], [], []
     per_scan = max(5000, params.triangles_total // max(1, sum(b.n_scans for _, b in chosen)))
     for n, b in chosen:
@@ -477,7 +478,7 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
                 if noise:
                     name = f"szum: {s['label']}"
                     hover = "<br>".join([f"<b>USUNIĘTY SZUM</b> ze skanu {s['label']}"] +
-                                        [f"{c['area_mm2']:.0f} mm² - {c['reason']}" for c in removed])
+                                        [f"{c['area_au2']:.0f} a.u.² - {c['reason']}" for c in removed])
                 else:
                     role = "skan referencyjny" if s["reference"] else f"nakładanie z ref.: {s['overlap_with_reference']:.2f}"
                     name = f"{s['label']}" + (" (ref.)" if s["reference"] else "")
@@ -497,7 +498,7 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
             lines.append(f"<span style='color:{SCAN_COLORS[s_i % len(SCAN_COLORS)]}'>■</span> {s['label']} ({tag})")
             for c in s["components"]:
                 if not c["kept"]:
-                    lines.append(f"   <span style='color:{NOISE_COLOR}'>■</span> usunięto {c['area_mm2']:.0f} mm²: {c['reason']}")
+                    lines.append(f"   <span style='color:{NOISE_COLOR}'>■</span> usunięto {c['area_au2']:.0f} a.u.²: {c['reason']}")
         notes.append("<br>".join(lines))
 
     if not traces:
@@ -534,9 +535,9 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
     fig.update_layout(
         paper_bgcolor=params.background, font=FONT, margin=dict(l=0, r=0, t=10, b=0), height=720,
         legend=dict(x=0.99, y=0.97, xanchor="right", bgcolor="rgba(255,255,255,0.85)", title="Skany"),
-        scene=dict(xaxis=dict(range=first["scene.xaxis.range"], title="x [mm]", backgroundcolor="#eef2f5"),
-                   yaxis=dict(range=first["scene.yaxis.range"], title="y [mm]", backgroundcolor="#eef2f5"),
-                   zaxis=dict(range=first["scene.zaxis.range"], title="z [mm]", backgroundcolor="#eef2f5"),
+        scene=dict(xaxis=dict(range=first["scene.xaxis.range"], title="x [a.u.]", backgroundcolor="#eef2f5"),
+                   yaxis=dict(range=first["scene.yaxis.range"], title="y [a.u.]", backgroundcolor="#eef2f5"),
+                   zaxis=dict(range=first["scene.zaxis.range"], title="z [a.u.]", backgroundcolor="#eef2f5"),
                    aspectmode="manual", aspectratio=first["scene.aspectratio"]),
         annotations=[dict(text=first["annotations[0].text"], x=0.01, y=0.97, xref="paper", yref="paper",
                           showarrow=False, align="left", xanchor="left", yanchor="top",
@@ -679,14 +680,14 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
         allp = np.vstack(pts)
         boxes.append((allp.min(axis=0), allp.max(axis=0)))
         notes.append("<br>".join([
-            f"<b>{n + 1}. miejsce</b>   wynik: <b>{r['score']:.0f}</b> mm²",
-            f"<span style='color:{MATCH_COLORS['surf_a']}'>■</span> A: {r['a_name']} ({r['a_area_mm2']:.0f} mm²"
+            f"<b>{n + 1}. miejsce</b>   wynik: <b>{r['score']:.0f}</b> a.u.²",
+            f"<span style='color:{MATCH_COLORS['surf_a']}'>■</span> A: {r['a_name']} ({r['a_area_au2']:.0f} a.u.²"
             f"{', ręczna' if r.get('a_manual', True) else ', z algorytmu'})",
-            f"<span style='color:{MATCH_COLORS['surf_b']}'>■</span> B: {r['b_name']} ({r['b_area_mm2']:.0f} mm²"
+            f"<span style='color:{MATCH_COLORS['surf_b']}'>■</span> B: {r['b_name']} ({r['b_area_au2']:.0f} a.u.²"
             f"{', ręczna' if r.get('b_manual', True) else ', z algorytmu'})",
-            f"styk: {r['contact_mm2']:.0f} mm²  (A pokryte w {r['cover_a']:.0%}, B w {r['cover_b']:.0%})",
-            f"RMSE w styku: {r['rmse_mm']:.2f} mm" if r.get("rmse_mm") is not None else "RMSE w styku: –",
-            f"kolizja kości: {r['collision_mm2']:.0f} mm²",
+            f"styk: {r['contact_au2']:.0f} a.u.²  (A pokryte w {r['cover_a']:.0%}, B w {r['cover_b']:.0%})",
+            f"RMSE w styku: {r['rmse_au']:.2f} a.u." if r.get("rmse_au") is not None else "RMSE w styku: –",
+            f"kolizja kości: {r['collision_au2']:.0f} a.u.²",
             "", "<i>wynik = styk - kolizja</i>"]))
 
     def layout_for(k):
@@ -753,8 +754,8 @@ def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> 
     fig = go.Figure(go.Heatmap(
         z=m, x=labels, y=labels, text=text, texttemplate="%{text}", textfont=dict(size=9),
         colorscale=[[0, "#f4f6f8"], [0.5, "#8fb8de"], [1, "#1d4f91"]], zmin=0, zmax=max(top, 1.0),
-        colorbar=dict(title="wynik [mm²]"), xgap=1, ygap=1,
-        hovertemplate="%{y}<br>%{x}<br>wynik: %{z:.0f} mm²<extra></extra>"))
+        colorbar=dict(title="wynik [a.u.²]"), xgap=1, ygap=1,
+        hovertemplate="%{y}<br>%{x}<br>wynik: %{z:.0f} a.u.²<extra></extra>"))
     size = max(480, 22 * n + 260)
     fig.update_layout(paper_bgcolor=params.background, plot_bgcolor=params.background, font=FONT,
                       height=size, margin=dict(l=10, r=10, t=10, b=10),
@@ -883,4 +884,4 @@ def load_report(out_dir: Path) -> dict | None:
         Zawartość merging.json ({"params", "scans", "pairs", ...}) albo None, gdy pliku nie ma.
     """
     p = Path(out_dir) / "merging.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+    return read_json(p) if p.exists() else None

@@ -5,7 +5,7 @@
 // i etykiety (GET /api/bones/<id>; kość bez ręcznych oznaczeń dostaje "ustawienie
 // automatyczne" = wynik algorytmu, origin 'auto') -> malowanie zmienia S.cur.labels w pamięci ->
 // save() wysyła etykiety na serwer (PUT /api/bones/<id>/contacts).
-// Współrzędne P / N są w układzie kości (mm); obrót do widoku robi tylko mesh.matrix.
+// Współrzędne P / N są w układzie kości (a.u.); obrót do widoku robi tylko mesh.matrix.
 import * as THREE from 'three';
 import { OrbitControls } from '/vendor/OrbitControls.js';
 
@@ -19,11 +19,11 @@ const MIX = 0.78;                      // jak mocno kolor powierzchni przykrywa 
  * - bones, palette, detectors: z GET /api/bones (ToolState.summary),
  * - cur: wczytana kość (loadBone) - {id, label, nV: liczba wierzchołków, P: pozycje (3*nV),
  *   N: normalne, Ns: wygładzone normalne (do różdżki), I: trójkąty (3*T), C: kolory skanera
- *   uint8, adj: sąsiedztwo (buildAdjacency), area: pole na wierzchołek [mm²],
+ *   uint8, adj: sąsiedztwo (buildAdjacency), area: pole na wierzchołek [a.u.²],
  *   labels: Uint8Array etykiet, names: {k: nazwa}, origin: 'manual' (z contacts/<zestaw>/<id>.json)
  *   albo 'auto' (ustawienie automatyczne - wynik algorytmu, jeszcze niezapisany jako ręczny),
  *   method: algorytm ustawienia automatycznego, autoError: błąd algorytmu albo null},
- * - tool / brush [mm] / wand [stopnie] / active (malowana powierzchnia) / scanColors,
+ * - tool / brush [a.u.] / wand [stopnie] / active (malowana powierzchnia) / scanColors,
  * - dirty: są niezapisane zmiany, undo / redo: stos snapshot(), painting / lastHit: trwa
  *   pociągnięcie pędzla, busy: trwa wczytywanie albo algorytm.
  */
@@ -156,7 +156,7 @@ function smoothNormals(N, adj, iters) {
   return cur;
 }
 
-/** Pole na wierzchołek = 1/3 pól sąsiednich trójkątów [mm²] - jak contacts.vertex_areas. */
+/** Pole na wierzchołek = 1/3 pól sąsiednich trójkątów [a.u.²] - jak contacts.vertex_areas. */
 function vertexAreas(P, idx, nV) {
   const A = new Float32Array(nV);
   for (let t = 0; t < idx.length; t += 3) {
@@ -215,7 +215,7 @@ async function loadBone(id) {
     resetView();
     recolor(); renderSurfaces(); renderBoneList(); updateStats();
     const b = S.bones.find((x) => x.id === id);
-    $('boneTitle').innerHTML = `<b>${b.nr}. ${escapeHtml(d.label)}</b> &nbsp;·&nbsp; ${b.scans} skan(y) · ${fmt(b.area_mm2)} mm²`;
+    $('boneTitle').innerHTML = `<b>${b.nr}. ${escapeHtml(d.label)}</b> &nbsp;·&nbsp; ${b.scans} skan(y) · ${fmt(b.area_au2)} a.u.²`;
     history.replaceState(null, '', `#${encodeURIComponent(id)}`);
     if (d.remapped) toast('Siatka kości zmieniła się od zapisu - oznaczenia przeniesiono po położeniu. Sprawdź je i zapisz.', 'error');
     if (d.auto_error) toast(`Ustawienie automatyczne: algorytm nie zadziałał (${d.auto_error})`, 'error');
@@ -286,7 +286,7 @@ function surfaceIds(includeNamed = true) {
   return [...seen].sort((a, b) => a - b);
 }
 
-/** Pole każdej powierzchni {k: mm²} (tylko niepuste). */
+/** Pole każdej powierzchni {k: a.u.²} (tylko niepuste). */
 function surfaceAreas() {
   const c = S.cur; const out = {};
   for (let i = 0; i < c.nV; i++) { const k = c.labels[i]; if (k) out[k] = (out[k] || 0) + c.area[i]; }
@@ -298,7 +298,7 @@ function updateStats() {
   const c = S.cur; if (!c) return;
   const areas = surfaceAreas(); const marked = Object.values(areas).reduce((a, b) => a + b, 0);
   const total = c.area.reduce((a, b) => a + b, 0);
-  $('stats').textContent = `${fmt(c.nV)} wierzchołków · pole ${fmt(total)} mm² · oznaczono ${fmt(marked)} mm² (${fmt(100 * marked / total)}%)`;
+  $('stats').textContent = `${fmt(c.nV)} wierzchołków · pole ${fmt(total)} a.u.² · oznaczono ${fmt(marked)} a.u.² (${fmt(100 * marked / total)}%)`;
 }
 
 // ---------------------------------------------------------------- listy
@@ -339,7 +339,7 @@ function renderSurfaces() {
     const name = c.names[k] || `Powierzchnia ${k}`;
     li.innerHTML = `<span class="chip" style="background:${surfColor(k)}"></span>
       <span class="label" title="Kliknij dwa razy, żeby zmienić nazwę">${escapeHtml(name)}</span>
-      <span class="area">${areas[k] ? `${fmt(areas[k], 1)} mm²` : 'pusta'}</span>
+      <span class="area">${areas[k] ? `${fmt(areas[k], 1)} a.u.²` : 'pusta'}</span>
       <button class="del" title="Usuń tę powierzchnię">✕</button>`;
     li.onclick = (e) => { if (e.target.closest('.del') || e.target.tagName === 'INPUT') return; S.active = k; renderSurfaces(); updateCursorColor(); };
     li.querySelector('.label').ondblclick = () => renameSurface(li, k);
@@ -378,7 +378,7 @@ function newSurface() {
 function deleteSurface(k) {
   const c = S.cur;
   const area = surfaceAreas()[k] || 0;
-  if (area > 0 && !confirm(`Usunąć „${c.names[k] || `Powierzchnia ${k}`}” (${fmt(area, 1)} mm²)?`)) return;
+  if (area > 0 && !confirm(`Usunąć „${c.names[k] || `Powierzchnia ${k}`}” (${fmt(area, 1)} a.u.²)?`)) return;
   pushUndo();
   for (let i = 0; i < c.nV; i++) if (c.labels[i] === k) c.labels[i] = 0;
   delete c.names[k];
@@ -573,8 +573,8 @@ function setTool(t) {
   $('toolTip').textContent = TIPS[t]; $('hint').innerHTML = HINTS[t];
   updateCursorColor();
 }
-/** Promień pędzla / gumki [mm], 0.2-10. */
-function setBrush(v) { S.brush = Math.min(10, Math.max(0.2, v)); $('brushSize').value = S.brush; $('brushVal').textContent = `${fmt(S.brush, 1)} mm`; }
+/** Promień pędzla / gumki [a.u.], 0.2-10. */
+function setBrush(v) { S.brush = Math.min(10, Math.max(0.2, v)); $('brushSize').value = S.brush; $('brushVal').textContent = `${fmt(S.brush, 1)} a.u.`; }
 /** Tolerancja kąta różdżki [stopnie], 5-70. */
 function setWand(v) { S.wand = Math.min(70, Math.max(5, Math.round(v))); $('wandAngle').value = S.wand; $('wandVal').textContent = `${S.wand}°`; }
 
@@ -613,8 +613,8 @@ async function save(silent) {
     b.surfaces = r.surfaces;
     c.origin = 'manual';            // zapisane ustawienie automatyczne = ręczne oznaczenie
     setDirty(false); renderBoneList();
-    const total = r.surfaces.reduce((a, s) => a + s.area_mm2, 0);
-    toast(r.saved ? `Zapisano ✓  ${r.surfaces.length} pow. styku, ${fmt(total, 1)} mm²` : 'Zapisano ✓  (brak oznaczeń - plik usunięty)', 'ok');
+    const total = r.surfaces.reduce((a, s) => a + s.area_au2, 0);
+    toast(r.saved ? `Zapisano ✓  ${r.surfaces.length} pow. styku, ${fmt(total, 1)} a.u.²` : 'Zapisano ✓  (brak oznaczeń - plik usunięty)', 'ok');
   } catch (e) {
     toast(`Błąd zapisu: ${e.message}`, 'error');
     if (silent) throw e;
@@ -680,7 +680,7 @@ window.addEventListener('beforeunload', (e) => { if (S.dirty) { e.preventDefault
   try {
     const d = await api('/api/bones');
     S.bones = d.bones; S.palette = d.palette; S.detectors = d.detectors;
-    setBrush(d.params.brush_mm); setWand(d.params.wand_angle_deg); setTool('brush');
+    setBrush(d.params.brush_au); setWand(d.params.wand_angle_deg); setTool('brush');
     $('detectBtn').hidden = !S.detectors.length;
     renderBoneList(); updateButtons();
     const fromHash = decodeURIComponent(location.hash.slice(1));

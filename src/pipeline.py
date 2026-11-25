@@ -92,7 +92,7 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
         s = prepared[-1]
         extra = f", {len(s.comp_areas)} kawałki" if len(s.comp_areas) > 1 else ""
         log(f"  wczytano {f.label}: {len(s.mesh.triangles)} trójkątów, "
-            f"{s.comp_areas.sum():.0f} mm2{extra}")
+            f"{s.comp_areas.sum():.0f} a.u.²{extra}")
 
     if merge.enabled or merge.groups:
         pairs = merging.pairwise(prepared, merge, out_dir / "cache" / "pairs.json", progress=log)
@@ -113,13 +113,13 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
         m = bone.meta
         names = ", ".join(s["label"] + (" (ref.)" if s["reference"] and len(m["scans"]) > 1 else "")
                           for s in m["scans"])
-        noise = f", usunięty szum: {m['noise_removed_mm2']:.0f} mm2" if m["noise_removed_mm2"] else ""
+        noise = f", usunięty szum: {m['noise_removed_au2']:.0f} a.u.²" if m["noise_removed_au2"] else ""
         log(f"  {nr:2d}. {bone.label}: {len(m['scans'])} skan(y) [{names}] -> "
-            f"{m['stats']['area_mm2']:.0f} mm2{noise}")
+            f"{m['stats']['area_au2']:.0f} a.u.²{noise}")
         for s in m["scans"]:
             for c in s["components"]:
                 if not c["kept"]:
-                    log(f"      {s['label']}: usunięto kawałek {c['area_mm2']:.0f} mm2 - {c['reason']}")
+                    log(f"      {s['label']}: usunięto kawałek {c['area_au2']:.0f} a.u.² - {c['reason']}")
         weak = [s for s in m["scans"] if not s["reference"] and s["best_overlap_in_group"] < merge.min_overlap]
         for s in weak:
             log(f"      UWAGA: {s['label']} słabo pasuje do reszty grupy (nakładanie "
@@ -171,7 +171,7 @@ def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path) 
     """Zapisuje out_dir/merging.json - dane do wizualizacji łączenia (scripts/show_merging.py).
 
     Zawartość:
-        "params": {"min_overlap", "tolerance_mm"},
+        "params": {"min_overlap", "tolerance_au"},
         "scans":  [{"id", "label", "path", "bone": id kości, do której trafił skan}],
         "pairs":  [{"a", "b": id skanów, "overlap": nakładanie}],
         "bones":  [{"id", "label", "scans": [id skanów]}].
@@ -192,7 +192,7 @@ def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path) 
         for i in g["members"]:
             scan_bone[prepared[i].file.id] = b.id
     report = {
-        "params": {"min_overlap": merge.min_overlap, "tolerance_mm": merge.tolerance_mm},
+        "params": {"min_overlap": merge.min_overlap, "tolerance_au": merge.tolerance_au},
         "scans": [{"id": s.file.id, "label": s.file.label, "path": str(s.file.path),
                    "bone": scan_bone.get(s.file.id)} for s in prepared],
         "pairs": [{"a": prepared[i].file.id, "b": prepared[j].file.id, "overlap": round(r["overlap"], 4)}

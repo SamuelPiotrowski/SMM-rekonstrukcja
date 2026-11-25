@@ -8,7 +8,7 @@ względem siebie. Do testowania wykrywania przełomów i dopasowania bez ręczny
     write_dataset(synth, config.SCANS_ROOT / "synthetic", config.CONTACTS_ROOT / "synthetic")
 (najprościej: python scripts/make_synthetic.py)
 
-Jak powstaje kość (wszystko w mm, oś kości = Z, kość od z = 0 do z = długość):
+Jak powstaje kość (wszystko w a.u., oś kości = Z, kość od z = 0 do z = długość):
     - kora: "rurka" o promieniu r(kąt, z) - trzon + poszerzone nasady na końcach, lekko
       eliptyczna, wygięta oś, drobne nierówności (szum Fouriera = suma kilku sinusów),
     - końce kości: zaokrąglone kopułki (to też kora, nie przełom),
@@ -16,7 +16,7 @@ Jak powstaje kość (wszystko w mm, oś kości = Z, kość od z = 0 do z = dług
       nierówności (relief) + drobna szorstkość. Oba sąsiednie fragmenty dostają DOKŁADNIE
       tę samą powierzchnię przełomu (z przeciwnych stron), ale każdy z inną siatką
       (inny obrót siatki), tak jak dwa niezależne skany.
-    - płaski odłamek (cięcie "chip"): dwa przełomy w odległości chip_mm - górny to dolny
+    - płaski odłamek (cięcie "chip"): dwa przełomy w odległości chip_au - górny to dolny
       przesunięty w górę z własnymi, małymi nierównościami - między nimi cienka "płytka".
 Fragment = część kości między dwiema powierzchniami (przełom albo koniec kości) - zamknięta,
 szczelna siatka: kora z boku + dwie "zatyczki" na dole i na górze.
@@ -41,14 +41,14 @@ Co zapisuje write_dataset:
 ground_truth.json:
     {
       "format": "bones-smm-synthetic/1", "params": {...},
-      "bones": [{"id": "kosc_A", "length_mm", "radius_mm", "cuts": ["fracture", "chip", ...],
+      "bones": [{"id": "kosc_A", "length_au", "radius_au", "cuts": ["fracture", "chip", ...],
                  "fragments": [id od dołu do góry]}],
       "fragments": {
         "frag_03": {"bone": "kosc_A", "index": 0 (od dołu), "file": "frag_03/frag_03.ply",
                     "pose_to_bone": T 4x4 (układ skanu -> układ złożonej kości),
                     "surfaces": {"1": {"partner": "frag_07", "partner_surface": 1,
-                                       "fracture": "kosc_A/1", "area_mm2": ...}}}},
-      "pairs": [{"a", "b", "surface_a", "surface_b", "fracture", "area_mm2",
+                                       "fracture": "kosc_A/1", "area_au2": ...}}}},
+      "pairs": [{"a", "b", "surface_a", "surface_b", "fracture", "area_au2",
                  "transform_b_to_a": T 4x4 (skan b -> skan a)}]
     }
 Numery powierzchni ("surfaces") = numery w oznaczeniach styku (contacts/<zestaw>/frag_XX.json).
@@ -65,37 +65,39 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+from config import read_json
+
 FORMAT = "bones-smm-synthetic/1"
 GROUND_TRUTH = "ground_truth.json"
 DATASET_SETTINGS = "settings.json"
-MIN_FRAGMENT_MM = 6.0       # najkrótszy kawałek kory między dwoma przełomami (wzdłuż osi)
-PREVIEW_EDGE_MM = 0.8       # krawędź siatek podglądu (preview_figure) - małe pliki HTML
+MIN_FRAGMENT_AU = 6.0       # najkrótszy kawałek kory między dwoma przełomami (wzdłuż osi)
+PREVIEW_EDGE_AU = 0.8       # krawędź siatek podglądu (preview_figure) - małe pliki HTML
 
 
 @dataclass(frozen=True)
 class SyntheticParams:
-    """Ustawienia generatora (settings.json, sekcja "synthetic"). Długości w mm.
+    """Ustawienia generatora (settings.json, sekcja "synthetic"). Długości w a.u.
 
     Pary (od, do) = wartość losowana z tego przedziału osobno dla każdej kości.
     """
 
     n_bones: int = 6                    # ile kości w zestawie
     fragments: tuple = (2, 4)           # ile fragmentów na kość (od, do)
-    length_mm: tuple = (50.0, 90.0)     # długość kości (od, do)
-    radius_mm: tuple = (4.0, 7.0)       # promień trzonu (od, do)
+    length_au: tuple = (50.0, 90.0)     # długość kości (od, do)
+    radius_au: tuple = (4.0, 7.0)       # promień trzonu (od, do)
     flare: float = 0.35                 # poszerzenie nasad na końcach (0.35 = o 35% szersze niż trzon)
     ellipticity: float = 0.15           # spłaszczenie przekroju (0 = okrągły)
-    bend_mm: float = 2.0                # wygięcie osi kości (w środku długości)
-    bump_mm: float = 0.25               # nierówności kory (RMS)
+    bend_au: float = 2.0                # wygięcie osi kości (w środku długości)
+    bump_au: float = 0.25               # nierówności kory (RMS)
     tilt_deg: float = 35.0              # największe pochylenie przełomu względem przekroju poprzecznego
-    relief_mm: float = 1.2              # duże nierówności przełomu (RMS, fale 3-10 mm)
-    rough_mm: float = 0.12              # drobna szorstkość przełomu (RMS, fale 0.8-2 mm)
-    edge_mm: float = 0.3                # długość krawędzi siatki (gęstość "skanu")
-    scan_noise_mm: float = 0.02         # szum skanera wzdłuż normalnej (odchylenie standardowe)
+    relief_au: float = 1.2              # duże nierówności przełomu (RMS, fale 3-10 a.u.)
+    rough_au: float = 0.12              # drobna szorstkość przełomu (RMS, fale 0.8-2 a.u.)
+    edge_au: float = 0.3                # długość krawędzi siatki (gęstość "skanu")
+    scan_noise_au: float = 0.02         # szum skanera wzdłuż normalnej (odchylenie standardowe)
     holes: int = 0                      # dziury w korze na fragment (miejsca niewidoczne dla skanera)
-    hole_mm: tuple = (1.5, 3.0)         # promień dziury (od, do)
+    hole_au: tuple = (1.5, 3.0)         # promień dziury (od, do)
     colors: bool = True                 # kolory wierzchołków (kora jasna, przełom ciemniejszy)
-    chip_mm: tuple = (2.0, 4.0)         # grubość płaskiego odłamka (cięcie "chip") (od, do)
+    chip_au: tuple = (2.0, 4.0)         # grubość płaskiego odłamka (cięcie "chip") (od, do)
     # Ręczny układ cięć: jedna lista na kość, cięcia od dołu do góry: "fracture" = zwykły przełom,
     # "chip" = płaski odłamek (dwa bliskie, prawie równoległe przełomy). () = losowo wg n_bones
     # i fragments; podany układ wyznacza liczbę kości i fragmentów.
@@ -107,7 +109,7 @@ CUT_KINDS = ("fracture", "chip")
 # Gotowe zestawy (make_synthetic.py --preset <nazwa>): zmiany względem ustawień z settings.json.
 PRESETS = {
     # 1 kość, 4 części: koniec | zwykły przełom | środek | płaski odłamek między dwoma przełomami | koniec
-    "chip": {"n_bones": 1, "layout": (("fracture", "chip"),), "length_mm": (80.0, 80.0)},
+    "chip": {"n_bones": 1, "layout": (("fracture", "chip"),), "length_au": (80.0, 80.0)},
 }
 
 
@@ -127,8 +129,8 @@ class FourierNoise:
         Args:
             rng:         generator liczb losowych.
             dim:         wymiar punktów (2 = (x, y), 3 = (x, y, z)).
-            amp:         RMS szumu [mm].
-            wavelengths: (najkrótsza, najdłuższa) długość fali [mm] - losowane logarytmicznie.
+            amp:         RMS szumu [a.u.].
+            wavelengths: (najkrótsza, najdłuższa) długość fali [a.u.] - losowane logarytmicznie.
             n:           liczba sinusów (więcej = mniej regularny wzór).
         """
         k = rng.normal(size=(n, dim))
@@ -193,9 +195,9 @@ class CutSurface:
     rough: FourierNoise | None = None
     dome: float = 0.0                     # koniec: wysokość kopułki (+ w górę, - w dół)
     dome_radius: float = 1.0              # koniec: promień kopułki
-    extent: float = 0.0                   # przełom: o ile najwyżej odchodzi od z_ref [mm]
+    extent: float = 0.0                   # przełom: o ile najwyżej odchodzi od z_ref [a.u.]
     parent: CutSurface | None = None      # górna ściana odłamka: = parent + offset + własne nierówności
-    offset: float = 0.0                   # górna ściana odłamka: grubość odłamka [mm]
+    offset: float = 0.0                   # górna ściana odłamka: grubość odłamka [a.u.]
 
     def height(self, xy: np.ndarray) -> np.ndarray:
         """Wysokość z powierzchni nad punktami (..., 2)."""
@@ -224,12 +226,12 @@ def _uniform(rng: np.random.Generator, span) -> float:
 def random_shape(rng: np.random.Generator, params: SyntheticParams) -> BoneShape:
     """Losuje kształt kory jednej kości."""
     angle = rng.uniform(0, 2 * np.pi)
-    return BoneShape(length=_uniform(rng, params.length_mm), radius=_uniform(rng, params.radius_mm),
+    return BoneShape(length=_uniform(rng, params.length_au), radius=_uniform(rng, params.radius_au),
                      flare=params.flare * rng.uniform(0.7, 1.3),
                      ellipticity=params.ellipticity * rng.uniform(0.5, 1.5),
                      ellipse_phase=rng.uniform(0, np.pi),
-                     bend=params.bend_mm * rng.uniform(0.3, 1.0) * np.array([np.cos(angle), np.sin(angle)]),
-                     bumps=FourierNoise(rng, 3, params.bump_mm, (4.0, 15.0)))
+                     bend=params.bend_au * rng.uniform(0.3, 1.0) * np.array([np.cos(angle), np.sin(angle)]),
+                     bumps=FourierNoise(rng, 3, params.bump_au, (4.0, 15.0)))
 
 
 def random_fracture(rng: np.random.Generator, shape: BoneShape, z: float, params: SyntheticParams,
@@ -237,12 +239,12 @@ def random_fracture(rng: np.random.Generator, shape: BoneShape, z: float, params
     """Losuje powierzchnię przełomu na wysokości `z` (pochylenie do tilt_deg x tilt_scale)."""
     tilt = np.radians(rng.uniform(0, params.tilt_deg * tilt_scale))
     phi = rng.uniform(0, 2 * np.pi)
-    relief_amp = params.relief_mm * rng.uniform(0.6, 1.2)
-    extent = np.tan(tilt) * shape.max_radius + 3 * (relief_amp + params.rough_mm)
+    relief_amp = params.relief_au * rng.uniform(0.6, 1.2)
+    extent = np.tan(tilt) * shape.max_radius + 3 * (relief_amp + params.rough_au)
     return CutSurface(kind="fracture", z_ref=z, center=shape.axis(np.array(z)),
                       gradient=np.tan(tilt) * np.array([np.cos(phi), np.sin(phi)]),
                       relief=FourierNoise(rng, 2, relief_amp, (3.0, 10.0)),
-                      rough=FourierNoise(rng, 2, params.rough_mm, (0.8, 2.0), n=24), extent=extent)
+                      rough=FourierNoise(rng, 2, params.rough_au, (0.8, 2.0), n=24), extent=extent)
 
 
 def chip_face(rng: np.random.Generator, lower: CutSurface, thickness: float,
@@ -252,8 +254,8 @@ def chip_face(rng: np.random.Generator, lower: CutSurface, thickness: float,
     relief_amp = 0.12 * thickness
     return CutSurface(kind="fracture", z_ref=lower.z_ref + thickness, center=lower.center, parent=lower,
                       offset=thickness, relief=FourierNoise(rng, 2, relief_amp, (8.0, 20.0)),
-                      rough=FourierNoise(rng, 2, params.rough_mm, (0.8, 2.0), n=24),
-                      extent=lower.extent + 3 * (relief_amp + params.rough_mm))
+                      rough=FourierNoise(rng, 2, params.rough_au, (0.8, 2.0), n=24),
+                      extent=lower.extent + 3 * (relief_amp + params.rough_au))
 
 
 def cut_surfaces(rng: np.random.Generator, shape: BoneShape, kinds: list[str],
@@ -261,8 +263,8 @@ def cut_surfaces(rng: np.random.Generator, shape: BoneShape, kinds: list[str],
     """Powierzchnie dzielące kość: [koniec dolny, przełom 1, ..., koniec górny].
 
     Cięcia `kinds` (od dołu) są rozłożone mniej więcej równo wzdłuż kości, tak żeby się nie
-    przecinały i między nimi zostało co najmniej MIN_FRAGMENT_MM kory. "fracture" = jeden
-    przełom, "chip" = płaski odłamek: dwa przełomy w odległości chip_mm (chip_face). Gdy kość
+    przecinały i między nimi zostało co najmniej MIN_FRAGMENT_AU kory. "fracture" = jeden
+    przełom, "chip" = płaski odłamek: dwa przełomy w odległości chip_au (chip_face). Gdy kość
     jest za krótka, przełomy są mniej pochylone, a w ostateczności (strict=False) ostatnie
     cięcia są pomijane.
 
@@ -287,7 +289,7 @@ def cut_surfaces(rng: np.random.Generator, shape: BoneShape, kinds: list[str],
             surfaces, lo, hi = [], [0.0], []
             for z, kind in zip(zs, kinds):
                 if kind == "chip":
-                    t = _uniform(rng, params.chip_mm)
+                    t = _uniform(rng, params.chip_au)
                     f = random_fracture(rng, shape, float(z) - t / 2, params, scale)
                     top = chip_face(rng, f, t, params)
                     surfaces += [f, top]
@@ -299,11 +301,11 @@ def cut_surfaces(rng: np.random.Generator, shape: BoneShape, kinds: list[str],
                     hi.append(f.z_ref - f.extent)
                     lo.append(f.z_ref + f.extent)
             hi.append(L)
-            if all(h - l >= MIN_FRAGMENT_MM for l, h in zip(lo, hi)):
+            if all(h - l >= MIN_FRAGMENT_AU for l, h in zip(lo, hi)):
                 return [ends[0], *surfaces, ends[1]]
         if strict:
-            raise ValueError(f"Cięcia {kinds} nie mieszczą się na kości długości {L:.0f} mm - "
-                             "wydłuż kość (length_mm) albo zmniejsz tilt_deg / relief_mm")
+            raise ValueError(f"Cięcia {kinds} nie mieszczą się na kości długości {L:.0f} a.u. - "
+                             "wydłuż kość (length_au) albo zmniejsz tilt_deg / relief_au")
         kinds = kinds[:-1]
     return ends                                         # kość w jednym kawałku
 
@@ -358,7 +360,7 @@ def build_fragment(shape: BoneShape, lower: CutSurface, upper: CutSurface, edge:
     Args:
         shape:    kształt kory.
         lower, upper: powierzchnie ograniczające fragment z dołu i z góry.
-        edge:     docelowa długość krawędzi [mm].
+        edge:     docelowa długość krawędzi [a.u.].
         theta0:   obrót siatki wokół osi - różny dla sąsiednich fragmentów, żeby ten sam przełom
                   miał na nich różne siatki (jak dwa niezależne skany).
         lower_id, upper_id: numer powierzchni styku dla wierzchołków zatyczki (0 = kora,
@@ -431,7 +433,7 @@ class SyntheticFragment:
     labels: np.ndarray                    # (V,) uint8: 0 = kora, k = powierzchnia styku k
     colors: np.ndarray | None             # (V, 3) w [0, 1] albo None
     pose_to_bone: np.ndarray              # 4x4: układ skanu -> układ złożonej kości
-    surfaces: dict = field(default_factory=dict)   # {k: {"partner", "partner_surface", "fracture", "area_mm2"}}
+    surfaces: dict = field(default_factory=dict)   # {k: {"partner", "partner_surface", "fracture", "area_au2"}}
     preview: tuple = ()                   # (wierzchołki, trójkąty, etykiety) - rzadsza siatka w układzie kości
 
 
@@ -441,7 +443,7 @@ class SyntheticSet:
 
     params: SyntheticParams
     fragments: list[SyntheticFragment]
-    bones: list[dict]                      # [{"id", "length_mm", "radius_mm", "fragments": [...]}]
+    bones: list[dict]                      # [{"id", "length_au", "radius_au", "fragments": [...]}]
 
     def ground_truth(self) -> dict:
         """Zawartość ground_truth.json (format: docstring modułu)."""
@@ -454,7 +456,7 @@ class SyntheticSet:
                     T = np.linalg.inv(f.pose_to_bone) @ other.pose_to_bone
                     pairs.append({"a": f.id, "b": other.id, "surface_a": k, "surface_b": s["partner_surface"],
                                   "fracture": s["fracture"],
-                                  "area_mm2": round((s["area_mm2"] + other.surfaces[s["partner_surface"]]["area_mm2"]) / 2, 2),
+                                  "area_au2": round((s["area_au2"] + other.surfaces[s["partner_surface"]]["area_au2"]) / 2, 2),
                                   "transform_b_to_a": np.round(T, 6).tolist()})
         pairs.sort(key=lambda p: (p["a"], p["b"]))
         return {"format": FORMAT, "params": asdict(self.params), "bones": self.bones,
@@ -466,7 +468,7 @@ class SyntheticSet:
 
 
 def _random_pose(rng: np.random.Generator) -> np.ndarray:
-    """Losowe przekształcenie sztywne 4x4 (dowolny obrót, przesunięcie do 40 mm)."""
+    """Losowe przekształcenie sztywne 4x4 (dowolny obrót, przesunięcie do 40 a.u.)."""
     from scipy.spatial.transform import Rotation
 
     T = np.eye(4)
@@ -483,23 +485,23 @@ def _triangle_labels(faces: np.ndarray, labels: np.ndarray) -> np.ndarray:
 
 
 def _areas(v: np.ndarray, f: np.ndarray) -> np.ndarray:
-    """Pola trójkątów [mm²]."""
+    """Pola trójkątów [a.u.²]."""
     return 0.5 * np.linalg.norm(np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]]), axis=1)
 
 
 def _scan(rng: np.random.Generator, v: np.ndarray, f: np.ndarray, labels: np.ndarray,
           params: SyntheticParams) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """"Skanowanie": szum wzdłuż normalnych i dziury w korze. Zwraca (v, f, labels)."""
-    if params.scan_noise_mm > 0:
+    if params.scan_noise_au > 0:
         normals = trimesh.Trimesh(v, f, process=False).vertex_normals
-        v = v + normals * rng.normal(0, params.scan_noise_mm, len(v))[:, None]
+        v = v + normals * rng.normal(0, params.scan_noise_au, len(v))[:, None]
     if params.holes > 0:
         cortex = np.flatnonzero(labels == 0)
         drop = np.zeros(len(f), dtype=bool)
         only_cortex = (labels[f] == 0).all(axis=1)
         centroids = v[f].mean(axis=1)
         for c in rng.choice(cortex, size=min(params.holes, len(cortex)), replace=False):
-            r = _uniform(rng, params.hole_mm)
+            r = _uniform(rng, params.hole_au)
             drop |= only_cortex & (np.linalg.norm(centroids - v[c], axis=1) < r)
         f = f[~drop]
         used = np.unique(f)
@@ -550,14 +552,14 @@ def generate(params: SyntheticParams = SyntheticParams()) -> SyntheticSet:
             kinds = ["fracture"] * (int(rng.integers(lo, hi + 1)) - 1)
             cuts = cut_surfaces(rng, shape, kinds, params)
             kinds = kinds[:len(cuts) - 2]
-        bones.append({"id": bone_id, "length_mm": round(shape.length, 2), "radius_mm": round(shape.radius, 2),
+        bones.append({"id": bone_id, "length_au": round(shape.length, 2), "radius_au": round(shape.radius, 2),
                       "cuts": kinds, "fragments": []})
         for k in range(len(cuts) - 1):
             lower_id = 1 if cuts[k].kind == "fracture" else 0
             upper_id = (lower_id + 1) if cuts[k + 1].kind == "fracture" else 0
             theta0 = rng.uniform(0, 2 * np.pi)
-            mesh = build_fragment(shape, cuts[k], cuts[k + 1], params.edge_mm, theta0, lower_id, upper_id)
-            preview = build_fragment(shape, cuts[k], cuts[k + 1], max(PREVIEW_EDGE_MM, params.edge_mm),
+            mesh = build_fragment(shape, cuts[k], cuts[k + 1], params.edge_au, theta0, lower_id, upper_id)
+            preview = build_fragment(shape, cuts[k], cuts[k + 1], max(PREVIEW_EDGE_AU, params.edge_au),
                                      theta0, lower_id, upper_id)
             raw.append((bone_id, k, lower_id, upper_id, mesh, preview))
 
@@ -575,7 +577,7 @@ def generate(params: SyntheticParams = SyntheticParams()) -> SyntheticSet:
         for sid, nb in ((lower_id, i - 1), (upper_id, i + 1)):
             if sid:
                 surfaces[sid] = {"partner": frag_ids[nb], "fracture": f"{bone_id}/{k + (sid == upper_id)}",
-                                 "area_mm2": round(float(fa[tl == sid].sum()), 2)}
+                                 "area_au2": round(float(fa[tl == sid].sum()), 2)}
         fragments.append(SyntheticFragment(id=frag_ids[i], bone=bone_id, index=k, vertices=vs, faces=f, labels=lab,
                                            colors=colors, pose_to_bone=np.linalg.inv(pose), surfaces=surfaces,
                                            preview=preview))
@@ -664,7 +666,7 @@ def load_ground_truth(data_in: Path | None = None) -> dict | None:
     if data_in is None:
         from config import DATA_IN as data_in
     path = Path(data_in) / GROUND_TRUTH
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    return read_json(path) if path.exists() else None
 
 
 def true_transform(gt: dict, a, b) -> np.ndarray:
@@ -694,7 +696,7 @@ def true_transform(gt: dict, a, b) -> np.ndarray:
 # PODGLĄD
 # -----------------
 
-def preview_figure(synth: SyntheticSet, explode_mm: float = 4.0):
+def preview_figure(synth: SyntheticSet, explode_au: float = 4.0):
     """Figura plotly: kości złożone z fragmentów (lekko rozsuniętych), przełomy w kolorach par.
 
     Każda kość leży wzdłuż osi X, kolejne kości jedna za drugą. Ten sam kolor przełomu na dwóch
@@ -702,7 +704,7 @@ def preview_figure(synth: SyntheticSet, explode_mm: float = 4.0):
 
     Args:
         synth:      wynik generate().
-        explode_mm: odstęp między sąsiednimi fragmentami kości [mm].
+        explode_au: odstęp między sąsiednimi fragmentami kości [a.u.].
 
     Returns:
         plotly.graph_objects.Figure.
@@ -721,14 +723,14 @@ def preview_figure(synth: SyntheticSet, explode_mm: float = 4.0):
         for k, fr in enumerate(frags):
             v, f, lab = fr.preview
             width = max(width, np.ptp(v[:, :2], axis=0).max())
-            p = np.column_stack([v[:, 2] + k * explode_mm, v[:, 1], -v[:, 0]])     # oś kości -> X
+            p = np.column_stack([v[:, 2] + k * explode_au, v[:, 1], -v[:, 0]])     # oś kości -> X
             tl = _triangle_labels(f, lab)
             base = COLORS[nb % len(COLORS)] if k % 2 == 0 else "#d9c7a7"
             fc = np.array([base] * len(f), dtype=object)
             for sid, s in fr.surfaces.items():
                 n = fracture_nr.setdefault(s["fracture"], len(fracture_nr) + 1)
                 fc[tl == sid] = surface_color(n)
-            partners = ", ".join(f"{s['partner']} ({s['area_mm2']:.0f} mm²)" for s in fr.surfaces.values())
+            partners = ", ".join(f"{s['partner']} ({s['area_au2']:.0f} a.u.²)" for s in fr.surfaces.values())
             fig.add_trace(go.Mesh3d(x=p[:, 0], y=p[:, 1] + y, z=p[:, 2], i=f[:, 0], j=f[:, 1], k=f[:, 2],
                                     facecolor=fc, flatshading=False, lighting=LIGHTING, name=fr.id,
                                     hovertext=f"<b>{fr.id}</b> ({bone['id']}, {k + 1}. od lewej)<br>"

@@ -6,7 +6,7 @@ bywa skanowany kilka razy (w różnych sesjach / slotach upperjaw, lowerjaw).
 Ten moduł:
 
 1. REJESTRUJE każdą parę skanów (zgrubnie: deskryptory FPFH + RANSAC, dokładnie: ICP)
-   i mierzy NAKŁADANIE: jaka część mniejszego skanu leży bliżej niż `tolerance_mm`
+   i mierzy NAKŁADANIE: jaka część mniejszego skanu leży bliżej niż `tolerance_au`
    od drugiego skanu, z normalnymi skierowanymi w tę samą stronę. Gładkie trzony kości
    różnych fragmentów "pasują" do siebie przypadkowo na ~5-15%, ten sam fragment
    na 35-60%. Wyniki par są zapisywane w cache, więc kolejne uruchomienia są szybkie.
@@ -43,6 +43,7 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
+from config import read_json
 from data_parsing import (
     ScanFile,
     ScanParams,
@@ -69,9 +70,9 @@ class MergeParams:
     """Ustawienia łączenia skanów (settings.json, sekcja "merging")."""
 
     enabled: bool = True              # false = każdy skan to osobna kość (bez łączenia)
-    sample_mm: float = 0.25           # odstęp punktów używanych do porównywania skanów [mm]
-    coarse_voxel_mm: float = 1.0      # rozdzielczość zgrubnej rejestracji (FPFH + RANSAC) [mm]
-    tolerance_mm: float = 0.15        # bliżej niż to (i zgodne normalne) = ta sama powierzchnia
+    sample_au: float = 0.25           # odstęp punktów używanych do porównywania skanów [a.u.]
+    coarse_voxel_au: float = 1.0      # rozdzielczość zgrubnej rejestracji (FPFH + RANSAC) [a.u.]
+    tolerance_au: float = 0.15        # bliżej niż to (i zgodne normalne) = ta sama powierzchnia
     min_overlap: float = 0.3          # nakładanie, od którego dwa skany = ta sama kość
     min_support: float = 0.25         # kawałek potwierdzony w mniejszej części = szum
     ransac_seeds: int = 3             # ile prób zgrubnej rejestracji na parę
@@ -88,10 +89,10 @@ class MergeParams:
         więc ich zmiana nie wymaga ponownej rejestracji.
 
         Returns:
-            Np. "s0.25-c1.0-t0.15-r3x50000" (sample_mm, coarse_voxel_mm, tolerance_mm,
+            Np. "s0.25-c1.0-t0.15-r3x50000" (sample_au, coarse_voxel_au, tolerance_au,
             ransac_seeds x ransac_iterations).
         """
-        return (f"s{self.sample_mm}-c{self.coarse_voxel_mm}-t{self.tolerance_mm}"
+        return (f"s{self.sample_au}-c{self.coarse_voxel_au}-t{self.tolerance_au}"
                 f"-r{self.ransac_seeds}x{self.ransac_iterations}")
 
 
@@ -109,8 +110,8 @@ class PreparedScan:
     file: ScanFile
     mesh: o3d.geometry.TriangleMesh       # wszystkie kawałki (szum usuwany dopiero przy łączeniu)
     tri_comp: np.ndarray                  # (T,) numer kawałka trójkąta, 0 = największy
-    comp_areas: np.ndarray                # (K,) pola kawałków [mm^2]
-    comp_gaps: np.ndarray                 # (K,) odległość od największego kawałka [mm]
+    comp_areas: np.ndarray                # (K,) pola kawałków [a.u.^2]
+    comp_gaps: np.ndarray                 # (K,) odległość od największego kawałka [a.u.]
     base_keep: np.ndarray                 # (K,) kawałek zostaje bez potwierdzenia (duży i blisko)
     sample: SurfaceSample                 # punkty na całej powierzchni (wszystkie kawałki)
     point_comp: np.ndarray                # (N,) numer kawałka każdego punktu
@@ -131,7 +132,7 @@ class PreparedScan:
         """Chmury punktów main_points do rejestracji - liczone raz dla danego `coarse_voxel`.
 
         Args:
-            coarse_voxel: odstęp punktów chmury zgrubnej [mm] (MergeParams.coarse_voxel_mm).
+            coarse_voxel: odstęp punktów chmury zgrubnej [a.u.] (MergeParams.coarse_voxel_au).
 
         Returns:
             (gęsta - wszystkie punkty, średnia - co coarse_voxel / 2, zgrubna - co coarse_voxel,
@@ -187,8 +188,8 @@ def prepare_scan(file: ScanFile, scan: ScanParams, merge: MergeParams) -> Prepar
 
     Args:
         file:  skan z data_parsing.find_scans.
-        scan:  progi kawałków (min_component_area_ratio, max_component_gap_mm) -> base_keep.
-        merge: odstęp punktów sample (sample_mm).
+        scan:  progi kawałków (min_component_area_ratio, max_component_gap_au) -> base_keep.
+        merge: odstęp punktów sample (sample_au).
 
     Returns:
         PreparedScan w oryginalnym układzie skanu.
@@ -198,9 +199,9 @@ def prepare_scan(file: ScanFile, scan: ScanParams, merge: MergeParams) -> Prepar
     repair_mesh(mesh)
     tri_comp, areas = components(mesh)
     gaps = component_gaps(mesh, tri_comp)
-    base_keep = (areas >= scan.min_component_area_ratio * areas[0]) & (gaps <= scan.max_component_gap_mm)
+    base_keep = (areas >= scan.min_component_area_ratio * areas[0]) & (gaps <= scan.max_component_gap_au)
     base_keep[0] = True
-    sample = sample_surface(mesh, merge.sample_mm)
+    sample = sample_surface(mesh, merge.sample_au)
     return PreparedScan(file=file, mesh=mesh, tri_comp=tri_comp, comp_areas=areas, comp_gaps=gaps,
                         base_keep=base_keep, sample=sample, point_comp=tri_comp[sample.triangle],
                         checksum=file_checksum(file.path), raw_stats=raw)
@@ -237,7 +238,7 @@ def covered(points: np.ndarray, normals: np.ndarray, tree: cKDTree, target_norma
         normals:        (N, 3) ich jednostkowe normalne.
         tree:           KD-drzewo punktów drugiej powierzchni.
         target_normals: (M, 3) normalne drugiej powierzchni, w kolejności punktów `tree`.
-        tol:            maks. odległość [mm].
+        tol:            maks. odległość [a.u.].
         min_dot:        min. iloczyn skalarny normalnych = cos kąta (0.7 ~ 45 stopni).
 
     Returns:
@@ -258,7 +259,7 @@ def overlap(a: PreparedScan, b: PreparedScan, T: np.ndarray, tol: float) -> tupl
     Args:
         a, b: skany.
         T:    przekształcenie 4x4 z układu a do układu b.
-        tol:  maks. odległość punktów na tej samej powierzchni [mm].
+        tol:  maks. odległość punktów na tej samej powierzchni [a.u.].
 
     Returns:
         (ułamek punktów a pokrytych przez b, ułamek punktów b pokrytych przez a), w [0, 1].
@@ -273,23 +274,23 @@ def overlap(a: PreparedScan, b: PreparedScan, T: np.ndarray, tol: float) -> tupl
     return float(fa), float(fb)
 
 
-def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, sample_mm: float) -> np.ndarray:
+def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, sample_au: float) -> np.ndarray:
     """Dokładne ustawienie ICP point-to-plane, od luźnego do ścisłego progu.
 
-    Kolejno: pary punktów do 1.5 mm i do 0.6 mm na rzadszych chmurach, na koniec do
-    max(sample_mm, 0.2) mm na gęstych. Każdy etap - najwyżej 40 iteracji.
+    Kolejno: pary punktów do 1.5 a.u. i do 0.6 a.u. na rzadszych chmurach, na koniec do
+    max(sample_au, 0.2) a.u. na gęstych. Każdy etap - najwyżej 40 iteracji.
 
     Args:
         src_clouds: chmury źródła z PreparedScan.clouds (używane [0] gęsta i [1] średnia).
         tgt_clouds: chmury celu w tej samej kolejności (wystarczą dwie: gęsta, średnia).
         T:          przekształcenie startowe źródło -> cel (np. z RANSAC).
-        sample_mm:  odstęp punktów gęstych chmur [mm].
+        sample_au:  odstęp punktów gęstych chmur [a.u.].
 
     Returns:
         Poprawione przekształcenie 4x4 źródło -> cel.
     """
     crit = reg.ICPConvergenceCriteria(max_iteration=40)
-    for dist, k in ((1.5, 1), (0.6, 1), (max(sample_mm, 0.2), 0)):
+    for dist, k in ((1.5, 1), (0.6, 1), (max(sample_au, 0.2), 0)):
         T = reg.registration_icp(src_clouds[k], tgt_clouds[k], dist, T,
                                  reg.TransformationEstimationPointToPlane(), crit).transformation
     return T
@@ -298,7 +299,7 @@ def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, sample_mm: float) -> np.nd
 def register_pair(a: PreparedScan, b: PreparedScan, p: MergeParams) -> dict:
     """Szuka przekształcenia sztywnego a -> b, które najlepiej nakłada skany.
 
-    Do p.ransac_seeds prób: zgrubnie RANSAC na FPFH (chmury co coarse_voxel_mm), potem
+    Do p.ransac_seeds prób: zgrubnie RANSAC na FPFH (chmury co coarse_voxel_au), potem
     refine_icp. Wygrywa próba z największym nakładaniem. Kończy wcześniej, gdy wynik
     jest pewny (nakładanie >= max(0.5, 1.5 x min_overlap)).
 
@@ -310,8 +311,8 @@ def register_pair(a: PreparedScan, b: PreparedScan, p: MergeParams) -> dict:
         {"overlap": max z obu kierunków, "overlap_a", "overlap_b" (jak w overlap()),
          "T": macierz 4x4 (lista list) z układu a do układu b}.
     """
-    ca, cb = a.clouds(p.coarse_voxel_mm), b.clouds(p.coarse_voxel_mm)
-    vox = p.coarse_voxel_mm
+    ca, cb = a.clouds(p.coarse_voxel_au), b.clouds(p.coarse_voxel_au)
+    vox = p.coarse_voxel_au
     best = None
     for seed in range(p.ransac_seeds):
         o3d.utility.random.seed(seed)
@@ -321,8 +322,8 @@ def register_pair(a: PreparedScan, b: PreparedScan, p: MergeParams) -> dict:
             [reg.CorrespondenceCheckerBasedOnEdgeLength(0.9),
              reg.CorrespondenceCheckerBasedOnDistance(1.5 * vox)],
             reg.RANSACConvergenceCriteria(p.ransac_iterations, 0.999))
-        T = refine_icp(ca, cb, coarse.transformation, p.sample_mm)
-        fa, fb = overlap(a, b, T, p.tolerance_mm)
+        T = refine_icp(ca, cb, coarse.transformation, p.sample_au)
+        fa, fb = overlap(a, b, T, p.tolerance_au)
         if best is None or max(fa, fb) > best["overlap"]:
             best = {"overlap": max(fa, fb), "overlap_a": fa, "overlap_b": fb, "T": T.tolist()}
         if best["overlap"] >= max(0.5, 1.5 * p.min_overlap):    # pewne - nie trzeba więcej prób
@@ -351,7 +352,7 @@ def pairwise(scans: list[PreparedScan], p: MergeParams, cache_file: Path | None 
     cache = {}
     if cache_file and cache_file.exists():
         try:
-            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+            cache = read_json(cache_file)
         except (OSError, json.JSONDecodeError):
             cache = {}
     key = p.registration_key()
@@ -536,9 +537,9 @@ def align_group(scans: list[PreparedScan], members: list[int], pairs: dict, p: M
         pts = np.vstack([transform_points(T[i], scans[i].sample.points[scans[i].main_points]) for i in placed])
         nrm = np.vstack([scans[i].sample.normals[scans[i].main_points] @ T[i][:3, :3].T for i in placed])
         target = to_cloud(pts, nrm)
-        target_mid = target.voxel_down_sample(2 * p.sample_mm)
-        src = scans[j].clouds(p.coarse_voxel_mm)
-        T[j] = refine_icp(src, (target, target_mid), T[j], p.sample_mm)
+        target_mid = target.voxel_down_sample(2 * p.sample_au)
+        src = scans[j].clouds(p.coarse_voxel_au)
+        T[j] = refine_icp(src, (target, target_mid), T[j], p.sample_au)
     return T
 
 
@@ -546,7 +547,7 @@ def component_support(scans: list[PreparedScan], members: list[int], T: dict, p:
     """Dla każdego skanu: jaka część punktów każdego kawałka leży na innym skanie grupy.
 
     Liczone na WSZYSTKICH kawałkach (także podejrzanych o szum), z luźniejszą tolerancją
-    niż przy grupowaniu: 2 x tolerance_mm i normalne do ~60 stopni - skany są już ustawione.
+    niż przy grupowaniu: 2 x tolerance_au i normalne do ~60 stopni - skany są już ustawione.
 
     Args:
         scans:   wszystkie skany.
@@ -558,7 +559,7 @@ def component_support(scans: list[PreparedScan], members: list[int], T: dict, p:
         {indeks_skanu: tablica (K,) ułamków w [0, 1]}; dla grupy z jednym skanem - zera.
     """
     support = {}
-    tol = 2 * p.tolerance_mm          # luźniej niż przy grupowaniu - to już ustawione skany
+    tol = 2 * p.tolerance_au          # luźniej niż przy grupowaniu - to już ustawione skany
     for j in members:
         s = scans[j]
         ncomp = len(s.comp_areas)
@@ -602,7 +603,7 @@ def decide_components(scan: PreparedScan, support: np.ndarray, p: MergeParams) -
         elif scan.base_keep[c]:
             reasons.append("duży i blisko głównego")
         elif scan.comp_gaps[c] > 0 and scan.comp_areas[c] >= 0.05 * scan.comp_areas[0]:
-            reasons.append(f"SZUM: {scan.comp_gaps[c]:.0f} mm od głównego, brak potwierdzenia")
+            reasons.append(f"SZUM: {scan.comp_gaps[c]:.0f} a.u. od głównego, brak potwierdzenia")
         else:
             reasons.append("SZUM: mały, brak potwierdzenia")
     return keep, reasons
@@ -613,18 +614,18 @@ def decide_components(scan: PreparedScan, support: np.ndarray, p: MergeParams) -
 # -----------------
 
 def fuse_union(meshes: list[o3d.geometry.TriangleMesh], spacing: float,
-               cover_mm: float) -> tuple[o3d.geometry.TriangleMesh, np.ndarray]:
+               cover_au: float) -> tuple[o3d.geometry.TriangleMesh, np.ndarray]:
     """Suma skanów bez nakładania: pierwszy w całości, z kolejnych tylko nowe miejsca.
 
-    Trójkąt kolejnego skanu jest dodawany, jeśli jego środek jest dalej niż `cover_mm`
-    od powierzchni już dodanej. Bardzo małe dodane skrawki (< 2 mm², wzdłuż szwów)
+    Trójkąt kolejnego skanu jest dodawany, jeśli jego środek jest dalej niż `cover_au`
+    od powierzchni już dodanej. Bardzo małe dodane skrawki (< 2 a.u.², wzdłuż szwów)
     są pomijane. Geometria i kolory zostają oryginalne, ale w miejscach styku skanów
     są szwy (siatka nie jest zszywana).
 
     Args:
         meshes:   siatki skanów w jednym układzie, najważniejszy (referencyjny) pierwszy.
-        spacing:  odstęp punktów, którymi opisywana jest już dodana powierzchnia [mm].
-        cover_mm: odległość, od której miejsce uznaje się za jeszcze niepokryte [mm].
+        spacing:  odstęp punktów, którymi opisywana jest już dodana powierzchnia [a.u.].
+        cover_au: odległość, od której miejsce uznaje się za jeszcze niepokryte [a.u.].
 
     Returns:
         (siatka, numer skanu źródłowego dla każdego trójkąta (T,) - indeks w `meshes`).
@@ -637,11 +638,11 @@ def fuse_union(meshes: list[o3d.geometry.TriangleMesh], spacing: float,
         if len(t) == 0:
             continue
         d, _ = cKDTree(covered_pts).query(v[t].mean(axis=1))
-        new = submesh(m, d > cover_mm)
+        new = submesh(m, d > cover_au)
         if len(new.triangles) == 0:
             continue
         comp, areas = components(new)
-        new = submesh(new, np.isin(comp, np.flatnonzero(areas >= 2.0)))    # skrawki < 2 mm^2
+        new = submesh(new, np.isin(comp, np.flatnonzero(areas >= 2.0)))    # skrawki < 2 a.u.^2
         if len(new.triangles) == 0:
             continue
         out += new
@@ -651,7 +652,7 @@ def fuse_union(meshes: list[o3d.geometry.TriangleMesh], spacing: float,
 
 
 def fuse_poisson(meshes: list[o3d.geometry.TriangleMesh], spacing: float, depth: int,
-                 cover_mm: float) -> tuple[o3d.geometry.TriangleMesh, np.ndarray]:
+                 cover_au: float) -> tuple[o3d.geometry.TriangleMesh, np.ndarray]:
     """Jedna powierzchnia z rekonstrukcji Poissona (punkty bez nakładania, jak w fuse_union).
 
     Powierzchnia Poissona dalej niż 2 x `spacing` od punktów skanów (domknięcia
@@ -659,9 +660,9 @@ def fuse_poisson(meshes: list[o3d.geometry.TriangleMesh], spacing: float, depth:
 
     Args:
         meshes:   siatki skanów w jednym układzie, najważniejszy pierwszy.
-        spacing:  odstęp punktów [mm].
+        spacing:  odstęp punktów [a.u.].
         depth:    głębokość drzewa Poissona (większa = więcej szczegółów, wolniej).
-        cover_mm: punkty kolejnego skanu bliżej niż to od wcześniejszych są pomijane [mm].
+        cover_au: punkty kolejnego skanu bliżej niż to od wcześniejszych są pomijane [a.u.].
 
     Returns:
         (siatka, zera (T,) - powierzchnia jest wspólna, nie pochodzi z jednego skanu).
@@ -671,7 +672,7 @@ def fuse_poisson(meshes: list[o3d.geometry.TriangleMesh], spacing: float, depth:
         s = sample_surface(m, spacing)
         if pts:
             d, _ = cKDTree(np.vstack(pts)).query(s.points)
-            s = SurfaceSample(*(a[d > cover_mm] for a in (s.points, s.normals, s.colors, s.triangle)))
+            s = SurfaceSample(*(a[d > cover_au] for a in (s.points, s.normals, s.colors, s.triangle)))
         pts.append(s.points), nrm.append(s.normals), col.append(s.colors)
     P = np.vstack(pts)
     mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
@@ -742,7 +743,7 @@ def merge_group(scans: list[PreparedScan], group: dict, pairs: dict, p: MergePar
             "best_overlap_in_group": round(max((pair_overlap(pairs, j, i) for i in others), default=0.0), 3),
             "transform_to_bone": np.round(T[j], 6).tolist(),
             "raw": s.raw_stats,
-            "components": [{"area_mm2": round(float(a), 2), "gap_mm": round(float(g), 2),
+            "components": [{"area_au2": round(float(a), 2), "gap_au": round(float(g), 2),
                             "support": round(float(sp), 3), "kept": bool(k), "reason": r}
                            for a, g, sp, k, r in zip(s.comp_areas, s.comp_gaps, support[j], keep, reasons)],
         })
@@ -751,10 +752,10 @@ def merge_group(scans: list[PreparedScan], group: dict, pairs: dict, p: MergePar
         mesh, source = kept_meshes[0], np.zeros(len(kept_meshes[0].triangles), dtype=np.int32)
         method = "single"
     elif p.fuse_method == "poisson":
-        mesh, source = fuse_poisson(kept_meshes, p.sample_mm, p.poisson_depth, 2 * p.tolerance_mm)
+        mesh, source = fuse_poisson(kept_meshes, p.sample_au, p.poisson_depth, 2 * p.tolerance_au)
         method = "poisson"
     elif p.fuse_method == "union":
-        mesh, source = fuse_union(kept_meshes, p.sample_mm, 2 * p.tolerance_mm)
+        mesh, source = fuse_union(kept_meshes, p.sample_au, 2 * p.tolerance_au)
         method = "union"
     else:
         raise ValueError(f"merging.fuse_method = {p.fuse_method!r}, dostępne: {FUSE_METHODS}")
@@ -768,7 +769,7 @@ def merge_group(scans: list[PreparedScan], group: dict, pairs: dict, p: MergePar
     meta = {
         "id": bone_id, "label": label, "manual_group": group["name"] is not None,
         "reference_scan": ref_file.id, "fuse_method": method, "scans": scan_meta,
-        "noise_removed_mm2": round(sum(c["area_mm2"] for s in scan_meta for c in s["components"]
+        "noise_removed_au2": round(sum(c["area_au2"] for s in scan_meta for c in s["components"]
                                        if not c["kept"]), 2),
         "merge_params": {k: v for k, v in asdict(p).items() if k != "groups"},
     }

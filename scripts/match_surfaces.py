@@ -14,7 +14,7 @@ SKĄD DANE - trzy tryby:
                         liczone i zapisywane tam od razu. Uwaga: bazowy "roughness" jest słaby
                         i jego powierzchnie dają głównie przypadkowe pary.
     manual-auto       - ręczne, a dla kości bez ręcznych - z algorytmu (jak w "auto").
-    Powierzchnie mniejsze niż min_area_mm2 (20 mm²) są pomijane. Potrzebne są co najmniej
+    Powierzchnie mniejsze niż min_area_au2 (20 a.u.²) są pomijane. Potrzebne są co najmniej
     2 kości z powierzchniami. Konsola wypisuje, skąd wzięto powierzchnie każdej kości.
 
     Jak zmienić tryb:
@@ -24,26 +24,26 @@ SKĄD DANE - trzy tryby:
 CO ROBI
     Każda powierzchnia styku (osobno, nawet kilka na jednej kości) jest dopasowywana do
     każdej powierzchni INNEJ kości:
-      1. punkty powierzchni co sample_mm z normalnymi (kierunek "na zewnątrz kości"),
+      1. punkty powierzchni co sample_au z normalnymi (kierunek "na zewnątrz kości"),
       2. normalne powierzchni A są ODWRACANE - dwa przełomy stykają się twarzą w twarz
          (wypukłość na A = wklęsłość na B), więc po odwróceniu A "wygląda jak" B,
       3. RANSAC na deskryptorach kształtu FPFH (zgrubnie) + ICP (dokładnie) -> przekształcenie
          sztywne A -> B (obrót + przesunięcie); ransac_seeds prób, wygrywa najlepsza,
       4. ocena ustawienia:
-           styk     - pole, na którym powierzchnie leżą bliżej niż tolerance_mm z przeciwnymi
-                      normalnymi (mniejsze z pól obu stron) [mm²],
-           kolizja  - pole, na którym CAŁE kości wchodzą w siebie głębiej niż collision_mm [mm²],
-           RMSE     - średnia kwadratowa odległość punktów w styku [mm],
+           styk     - pole, na którym powierzchnie leżą bliżej niż tolerance_au z przeciwnymi
+                      normalnymi (mniejsze z pól obu stron) [a.u.²],
+           kolizja  - pole, na którym CAŁE kości wchodzą w siebie głębiej niż collision_au [a.u.²],
+           RMSE     - średnia kwadratowa odległość punktów w styku [a.u.],
            WYNIK    = styk - kolizja; im więcej, tym lepiej.
     Wszystkie ustawienia (z opisami): settings.json, sekcja "matching"; algorytm wykrywania: "contacts".
     Liczba par rośnie kwadratowo: N powierzchni -> ~N²/2 par, każda ~1-3 s.
 
 JAK CZYTAĆ WYNIK
-    - Dobra para: duży styk (dziesiątki-setki mm²), kolizja ~0, RMSE ~0.2 mm, a w 3D
+    - Dobra para: duży styk (dziesiątki-setki a.u.²), kolizja ~0, RMSE ~0.2 a.u., a w 3D
       fragmenty układają się w jedną kość (osie mniej więcej w jednej linii).
     - Przypadkowe pary też mają trochę styku (gładkie fragmenty "pasują" lokalnie),
       liczy się wyraźna przewaga nad resztą. Na naszych danych (ręczne oznaczenia):
-      pary prawdziwe 118-179 mm², najlepsza przypadkowa ~55 mm².
+      pary prawdziwe 118-179 a.u.², najlepsza przypadkowa ~55 a.u.².
 
 Użycie (z głównego folderu projektu, po scripts/prepare_data.py i mark_contacts.py):
     python scripts/match_surfaces.py                      # wszystkie kości, tryb z settings.json
@@ -107,8 +107,8 @@ def main() -> None:
     surfaces, info = ms.extract_surfaces(bones, params, contact_params)
     for b in bones:
         mine = [s for s in surfaces if s.bone.id == b.id]
-        areas = ", ".join(f"{s.area_mm2:.0f}" for s in mine)
-        what = f"{len(mine)} pow. [{areas}] mm²" if mine else "POMINIĘTA"
+        areas = ", ".join(f"{s.area_au2:.0f}" for s in mine)
+        what = f"{len(mine)} pow. [{areas}] a.u.²" if mine else "POMINIĘTA"
         print(f"  {all_bones.index(b) + 1:2d}. {b.label}: {what} - {info[b.id]}")
     if len({s.bone.id for s in surfaces}) < 2:
         hint = {"manual": "oznacz je: python scripts/mark_contacts.py",
@@ -117,10 +117,10 @@ def main() -> None:
         raise SystemExit(f"Za mało kości z powierzchniami styku (potrzebne co najmniej 2) - {hint}")
 
     results = ms.match_all(surfaces, params)
-    print(f"Gotowe w {time.perf_counter() - start:.0f} s. Najlepsze pary (wynik = styk - kolizja, mm²):")
+    print(f"Gotowe w {time.perf_counter() - start:.0f} s. Najlepsze pary (wynik = styk - kolizja, a.u.²):")
     for k, r in enumerate(results[:10], 1):
         print(f"  {k:2d}. {r['score']:6.0f}  {r['a_name']}  <->  {r['b_name']}   "
-              f"styk {r['contact_mm2']:.0f}, kolizja {r['collision_mm2']:.0f}, RMSE {r['rmse_mm']:.2f} mm")
+              f"styk {r['contact_au2']:.0f}, kolizja {r['collision_au2']:.0f}, RMSE {r['rmse_au']:.2f} a.u.")
 
     path = config.DATA_OUT / "matching.json"
     rep = ms.report(surfaces, results, params, contact_params)

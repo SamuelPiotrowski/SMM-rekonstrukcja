@@ -62,8 +62,8 @@ def main() -> None:
         comp = sf.compare_bone(b, c, params)
         comps.append(comp)
         va = comp.areas
-        print(f"  {all_bones.index(b) + 1:2d}. {b.label}: przełom {va[comp.marked].sum():.0f} mm², "
-              f"kora {va[comp.cortex].sum():.0f} mm² ({time.perf_counter() - start:.1f} s)")
+        print(f"  {all_bones.index(b) + 1:2d}. {b.label}: przełom {va[comp.marked].sum():.0f} a.u.², "
+              f"kora {va[comp.cortex].sum():.0f} a.u.² ({time.perf_counter() - start:.1f} s)")
     if not comps:
         raise SystemExit("Żadna z wybranych kości nie ma ręcznych oznaczeń - python scripts/mark_contacts.py")
 
@@ -87,7 +87,7 @@ def main() -> None:
             f"<b>{len(comps)}</b> kościach. Dla każdej cechy <b>AUC</b> = szansa, że losowy punkt przełomu ma "
             f"większą wartość niż losowy punkt kory: 0.5 = cecha nic nie mówi, 1 albo 0 = idealnie rozdziela. "
             f"Najlepsza pojedyncza cecha: <b>{best['name']}</b> (AUC {best['auc_mean']:.2f}). "
-            f"Pominięte: pas {params.boundary_margin_mm:g} mm przy brzegu skanu i {params.label_band_mm:g} mm "
+            f"Pominięte: pas {params.boundary_margin_au:g} a.u. przy brzegu skanu i {params.label_band_au:g} a.u. "
             f"po obu stronach granicy oznaczenia.")
     if model:
         a = list(model["auc"].values())

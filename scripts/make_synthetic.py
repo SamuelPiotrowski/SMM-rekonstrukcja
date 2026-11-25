@@ -101,11 +101,11 @@ def main() -> None:
     for b in synth.bones:
         chips = sum(c == "chip" for c in b["cuts"])
         extra = f", płaskie odłamki: {chips}" if chips else ""
-        print(f"  {b['id']}: {b['length_mm']:.0f} mm, promień {b['radius_mm']:.1f} mm{extra} -> "
+        print(f"  {b['id']}: {b['length_au']:.0f} a.u., promień {b['radius_au']:.1f} a.u.{extra} -> "
               f"{' | '.join(b['fragments'])}")
-    areas = sorted(p["area_mm2"] for p in gt["pairs"])
+    areas = sorted(p["area_au2"] for p in gt["pairs"])
     if areas:
-        print(f"  pola przełomów: {areas[0]:.0f}-{areas[-1]:.0f} mm² (mediana {areas[len(areas) // 2]:.0f})")
+        print(f"  pola przełomów: {areas[0]:.0f}-{areas[-1]:.0f} a.u.² (mediana {areas[len(areas) // 2]:.0f})")
     print(f"Skany: {config._rel(data_in)}/, prawda: {config._rel(data_in / sb.GROUND_TRUTH)}")
     if not args.no_contacts:
         print(f"Prawdziwe przełomy (jako ręczne oznaczenia): {config._rel(contacts)}/")

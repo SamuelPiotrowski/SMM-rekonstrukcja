@@ -2,10 +2,10 @@
 Test całego przygotowania danych na SZTUCZNYCH skanach (nie potrzebuje prawdziwych skanów).
 
 Tworzy w folderze tymczasowym:
-    - fragment A (kula ~25 mm z losowymi wybrzuszeniami) zeskanowany 3 razy, za każdym
+    - fragment A (kula ~25 a.u. z losowymi wybrzuszeniami) zeskanowany 3 razy, za każdym
       razem częściowo, z innej strony i w innym układzie współrzędnych (obrót + przesunięcie),
       w podfolderach o TYCH SAMYCH nazwach plików (jak kolejne sesje Medita), jeden głębiej,
-    - do jednego skanu A dołożony szum: oderwany kawałek 60 mm od fragmentu,
+    - do jednego skanu A dołożony szum: oderwany kawałek 60 a.u. od fragmentu,
     - fragment B (inny kształt) zeskanowany raz,
     - skan "occlusion" (A i B razem) - ma być pominięty,
     - kopię skanu A1 jako .stl - ma być wybrany .ply.
@@ -51,7 +51,7 @@ def bumpy_sphere(seed: int, radius: float = 12.0) -> trimesh.Trimesh:
 
     Args:
         seed:   ziarno - inne ziarno = inny kształt (inny "fragment kości").
-        radius: promień kuli przed wybrzuszeniami [mm] (30 wybrzuszeń i wgłębień, każde do ±2 mm).
+        radius: promień kuli przed wybrzuszeniami [a.u.] (30 wybrzuszeń i wgłębień, każde do ±2 a.u.).
 
     Returns:
         Zamknięta siatka trimesh (icosphere, ~82 tys. trójkątów), środek w (0, 0, 0).
@@ -73,7 +73,7 @@ def partial_scan(mesh: trimesh.Trimesh, view: np.ndarray, seed: int) -> trimesh.
 
     Zostają trójkąty po stronie `view` (trochę ponad połowę kuli), więc dwa skany z różnych
     stron częściowo się pokrywają - jak prawdziwe skany tego samego fragmentu.
-    Potem losowy obrót i przesunięcie do ±30 mm (ziarno `seed`).
+    Potem losowy obrót i przesunięcie do ±30 a.u. (ziarno `seed`).
 
     Args:
         mesh: cały fragment (np. z bumpy_sphere), środek w (0, 0, 0).
@@ -167,12 +167,12 @@ def main() -> None:
         a = max(bones, key=lambda x: x.n_scans)
         b = min(bones, key=lambda x: x.n_scans)
         check(a.n_scans == 3 and b.n_scans == 1, f"skany w kościach: A={a.n_scans}, B={b.n_scans}")
-        check(a.meta["noise_removed_mm2"] > 100, f"usunięty szum (kawałek 60 mm dalej): {a.meta['noise_removed_mm2']:.0f} mm2")
+        check(a.meta["noise_removed_au2"] > 100, f"usunięty szum (kawałek 60 a.u. dalej): {a.meta['noise_removed_au2']:.0f} a.u.²")
         single = max(s["raw"]["triangles"] for s in a.meta["scans"])
-        check(a.meta["stats"]["area_mm2"] > 1.3 * min(
-            sum(c["area_mm2"] for c in s["components"] if c["kept"]) for s in a.meta["scans"]),
+        check(a.meta["stats"]["area_au2"] > 1.3 * min(
+            sum(c["area_au2"] for c in s["components"] if c["kept"]) for s in a.meta["scans"]),
             "połączona kość ma większe pole niż pojedynczy skan")
-        check(np.ptp(np.asarray(a.mesh.vertices), axis=0).max() < 35, "kość A bez oddalonego szumu (wymiar < 35 mm)")
+        check(np.ptp(np.asarray(a.mesh.vertices), axis=0).max() < 35, "kość A bez oddalonego szumu (wymiar < 35 a.u.)")
         check(single > 0, "statystyki surowych skanów w meta")
 
         print("Ponowne uruchomienie (cache par)")
@@ -206,7 +206,7 @@ def main() -> None:
         check(moved.remapped and (moved.labels == truth).mean() > 0.95,
               f"przeniesienie na zmienioną siatkę: zgodność {(moved.labels == truth).mean():.3f}")
         stats = ct.surface_stats(bone.mesh, labels)
-        check(len(stats) == 2 and all(s["area_mm2"] > 0 and s["max_diameter_mm"] > 0 for s in stats),
+        check(len(stats) == 2 and all(s["area_au2"] > 0 and s["max_diameter_au"] > 0 for s in stats),
               "statystyki powierzchni (pole, średnica)")
         r = ct.compare(bone.mesh, labels, labels)
         check(abs(r["iou"] - 1) < 1e-9, "ocena: te same etykiety -> IoU = 1")
@@ -216,9 +216,9 @@ def main() -> None:
             found = ct.detect_contacts(bone, name, ct.ContactParams())
             check(len(found.labels) == len(v), f"algorytm \"{name}\" działa ({len(found.surface_ids)} pow.)")
         n = 1000
-        fake = {"spread_2": np.r_[np.full(800, 0.02), np.full(200, 0.3)], "edge_mm": np.r_[np.full(800, 0.3), np.full(200, 0.15)]}
+        fake = {"spread_2": np.r_[np.full(800, 0.02), np.full(200, 0.3)], "edge_au": np.r_[np.full(800, 0.3), np.full(200, 0.15)]}
         fake = {k: x * np.random.default_rng(0).uniform(0.9, 1.1, n) for k, x in fake.items()}
-        sc = ct.bone_scores(fake, np.ones(n), ("spread_2", "edge_mm"))
+        sc = ct.bone_scores(fake, np.ones(n), ("spread_2", "edge_au"))
         check(abs(np.median(sc[:800])) < 0.5 and sc[800:].min() > 3,
               "features: wynik ~0 na typowej (korze), wysoki tam, gdzie większy rozrzut i gęstsza siatka")
         try:
@@ -256,13 +256,13 @@ def main() -> None:
         R[:3, 3] = [40.0, -15.0, 8.0]
         keep = rng.random(len(a_s.points)) < 0.8
         b_pts = a_s.points[keep]
-        b_s = ms.Surface(bone=a_s.bone, contacts=a_s.contacts, sid=99, area_mm2=0.8 * a_s.area_mm2,
+        b_s = ms.Surface(bone=a_s.bone, contacts=a_s.contacts, sid=99, area_au2=0.8 * a_s.area_au2,
                          points=b_pts @ R[:3, :3].T + R[:3, 3] + rng.normal(0, 0.05, b_pts.shape),
                          normals=-(a_s.normals[keep] @ R[:3, :3].T), bone_tree=a_s.bone_tree)
-        r = ms.match_pair(a_s, b_s, replace(mp, collision_mm=1e6))   # kolizja bez sensu: B to ta sama kość
+        r = ms.match_pair(a_s, b_s, replace(mp, collision_au=1e6))   # kolizja bez sensu: B to ta sama kość
         err = np.linalg.norm(a_s.points @ np.asarray(r["T"])[:3, :3].T + np.asarray(r["T"])[:3, 3]
                              - (a_s.points @ R[:3, :3].T + R[:3, 3]), axis=1).mean()
-        check(err < 0.3, f"odnalezione przekształcenie drugiej strony przełomu: błąd {err:.3f} mm")
+        check(err < 0.3, f"odnalezione przekształcenie drugiej strony przełomu: błąd {err:.3f} a.u.")
 
         print("Wizualizacje")
         fig = bones_figure(loaded, {bone.id: back}, "fpfh", View3DParams())
@@ -301,15 +301,15 @@ def main() -> None:
         top = rep["pairs"][0]
         same = tool.match({"a": top["a"], "b": top["b"], "params": {}, "mode": "score", "T": top["T"]})
         check(abs(same["score"] - top["score"]) < 1e-3, "ta sama para i ustawienia -> ten sam wynik oceny")
-        looser = tool.match({"a": top["a"], "b": top["b"], "params": {"tolerance_mm": 2.0}, "mode": "score",
+        looser = tool.match({"a": top["a"], "b": top["b"], "params": {"tolerance_au": 2.0}, "mode": "score",
                              "T": top["T"]})
-        check(looser["contact_mm2"] >= same["contact_mm2"], "większa tolerancja styku -> styk nie mniejszy")
-        full = tool.match({"a": top["a"], "b": top["b"], "params": {"sample_mm": 0.5, "ransac_iterations": 20000},
+        check(looser["contact_au2"] >= same["contact_au2"], "większa tolerancja styku -> styk nie mniejszy")
+        full = tool.match({"a": top["a"], "b": top["b"], "params": {"sample_au": 0.5, "ransac_iterations": 20000},
                            "mode": "full"})
         check(len(full["T"]) == 4 and full["mode"] == "full", f"dopasowanie pary od nowa ({full['seconds']} s)")
         g = tool.geometry(top["a"])
         check(len(g["positions"]) > 0 and len(g["surf_indices"]) > 0, "geometria do strony (siatka + powierzchnia)")
-        check(tool.warnings(tool.params) == [] and len(tool.warnings(replace(tool.params, tolerance_mm=9.0))) == 1,
+        check(tool.warnings(tool.params) == [] and len(tool.warnings(replace(tool.params, tolerance_au=9.0))) == 1,
               "ostrzeżenie, gdy settings.json różni się od matching.json")
         page = matching_page(tool, out_dir / "matching.html")
         check(page.stat().st_size > 1000, "strona HTML z zapisanego matching.json (tune_matching.py --html)")
@@ -345,7 +345,7 @@ def main() -> None:
         na = max(renamed, key=lambda x: x.n_scans)
         got = ct.load_contacts(na.id, na.mesh, root=root, frames=ct.scan_frames(na))
         area = ct.vertex_areas(na.mesh)[got.labels > 0].sum()
-        check(0.8 < area / area_a < 1.3, f"połączona kość: oznaczenia po zmianie nazwy ({area:.0f} / {area_a:.0f} mm²)")
+        check(0.8 < area / area_a < 1.3, f"połączona kość: oznaczenia po zmianie nazwy ({area:.0f} / {area_a:.0f} a.u.²)")
 
         split = prepare_all(scans_dir, out_dir, contacts_dir=root, scan=ScanParams(),
                             merge=MergeParams(enabled=False), features=FeatureParams(), verbose=False)
@@ -353,12 +353,12 @@ def main() -> None:
         got = ct.load_contacts(ref.id, ref.mesh, root=root, frames=ct.scan_frames(ref))
         area = ct.vertex_areas(ref.mesh)[got.labels > 0].sum()
         check(len(split) == 4 and area > 0.2 * area_a,
-              f"łączenie wyłączone (inny środek kości): oznaczenia przeniesione przez wspólny skan ({area:.0f} mm²)")
+              f"łączenie wyłączone (inny środek kości): oznaczenia przeniesione przez wspólny skan ({area:.0f} a.u.²)")
 
         print("Syntetyczne kości (make_synthetic.py)")
         import synthetic_bones as sb
         from scipy.spatial import cKDTree
-        synth =sb.generate(sb.SyntheticParams(n_bones=2, fragments=(3, 3), edge_mm=0.5, seed=1))
+        synth =sb.generate(sb.SyntheticParams(n_bones=2, fragments=(3, 3), edge_au=0.5, seed=1))
         meshes = [trimesh.Trimesh(f.vertices, f.faces, process=False) for f in synth.fragments]
         check(len(synth.fragments) == 6 and all(m.is_watertight and m.is_winding_consistent and m.volume > 0
                                                 for m in meshes), "6 fragmentów, siatki szczelne, normalne na zewnątrz")
@@ -380,12 +380,12 @@ def main() -> None:
         pb = np.asarray(b.mesh.vertices)[lb == p["surface_b"]] @ T[:3, :3].T + T[:3, 3]
         d = cKDTree(np.asarray(a.mesh.vertices)[la == p["surface_a"]]).query(pb)[0]
         check(np.median(d) < 0.3, f"prawdziwe przełomy na przygotowanych kościach nakładają się "
-                                  f"(true_transform, mediana {np.median(d):.2f} mm)")
-        chip = sb.generate(replace(sb.SyntheticParams(edge_mm=0.5), **sb.PRESETS["chip"]))
+                                  f"(true_transform, mediana {np.median(d):.2f} a.u.)")
+        chip = sb.generate(replace(sb.SyntheticParams(edge_au=0.5), **sb.PRESETS["chip"]))
         thin = [f for f in chip.fragments if f.index == 2][0]
         tm = trimesh.Trimesh(thin.vertices, thin.faces, process=False)
         check(len(chip.fragments) == 4 and len(thin.surfaces) == 2 and tm.is_watertight and tm.volume > 0,
-              f"preset chip: 4 części, płaski odłamek szczelny, 2 przełomy ({tm.volume:.0f} mm³)")
+              f"preset chip: 4 części, płaski odłamek szczelny, 2 przełomy ({tm.volume:.0f} a.u.³)")
     print(f"Wszystkie testy OK ({time.perf_counter() - start:.0f} s)")
 
 

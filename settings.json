@@ -35,9 +35,9 @@
     "exclude": ["occlusion"],
 
     // Oderwany kawałek skanu jest szumem, jeśli jest mniejszy niż ten ułamek największego
-    // albo dalej od niego niż max_component_gap_mm - chyba że potwierdzają go inne skany tej kości.
+    // albo dalej od niego niż max_component_gap_au - chyba że potwierdzają go inne skany tej kości.
     "min_component_area_ratio": 0.05,
-    "max_component_gap_mm": 10
+    "max_component_gap_au": 10
   },
 
   // -----------------
@@ -48,11 +48,11 @@
     "enabled": true,            // false = każdy skan to osobna kość
 
     // Dwa skany = ta sama kość, gdy co najmniej taka część mniejszego leży na drugim
-    // (bliżej niż tolerance_mm, normalne w tę samą stronę). Różne fragmenty: ~0.05-0.16,
+    // (bliżej niż tolerance_au, normalne w tę samą stronę). Różne fragmenty: ~0.05-0.16,
     // ten sam fragment: ~0.35-0.6.
     // należy to zmienić jeśli zestaw kości ma inne przełomy (inną skalę)
     "min_overlap": 0.25,
-    "tolerance_mm": 0.15,
+    "tolerance_au": 0.15,
 
     // Kawałek skanu potwierdzony przez inne skany kości w mniejszej części niż to = szum.
     "min_support": 0.25,
@@ -62,8 +62,8 @@
     "fuse_method": "union",
     "poisson_depth": 9,
 
-    "sample_mm": 0.25,         // odstęp punktów do porównywania skanów (dokładność chmury) [mm]
-    "coarse_voxel_mm": 1.0,    // rozdzielczość zgrubnej rejestracji (FPFH + RANSAC) [mm]
+    "sample_au": 0.25,         // odstęp punktów do porównywania skanów (dokładność chmury) [a.u.]
+    "coarse_voxel_au": 1.0,    // rozdzielczość zgrubnej rejestracji (FPFH + RANSAC) [a.u.]
     "ransac_seeds": 3,         // prób zgrubnej rejestracji na parę (więcej = pewniej, wolniej)
     "ransac_iterations": 50000,
 
@@ -79,9 +79,9 @@
   // -----------------
   "features": {
     "center": true,             // przesuń kość tak, żeby jej środek był w (0, 0, 0)
-    "voxel_size": 0.5,          // odstęp punktów chmury [mm]
+    "voxel_size": 0.5,          // odstęp punktów chmury [a.u.]
     "sampling_density": 4,      // punktów losowanych na voxel^2 przed przerzedzeniem
-    "fpfh_radius_factor": 5.0   // promień FPFH = ta liczba x voxel_size (2.5 mm)
+    "fpfh_radius_factor": 5.0   // promień FPFH = ta liczba x voxel_size (2.5 a.u.)
   },
 
   // -----------------
@@ -92,7 +92,7 @@
   "contacts": {
     // Narzędzie do ręcznego oznaczania
     "port": 8765,               // port lokalnego serwera narzędzia
-    "brush_mm": 2.0,            // startowy promień pędzla [mm]
+    "brush_au": 2.0,            // startowy promień pędzla [a.u.]
     "wand_angle_deg": 25,       // startowa tolerancja kąta "różdżki" (zaznacza obszar do ostrej krawędzi)
 
     // Algorytm wykrywania - używany przez detect_contacts.py, narzędzie (kość bez ręcznych oznaczeń
@@ -100,25 +100,25 @@
     // i dopasowanie w trybie "auto" / "manual-auto". Po zmianie któregokolwiek
     // ustawienia poniżej dopasowanie samo policzy wyniki algorytmu od nowa.
     "method": "features",      // nazwa algorytmu (@detector w src/contacts.py): "roughness" albo "features"
-    "min_surface_mm2": 15.0,    // oba algorytmy: mniejsze wykryte obszary są pomijane [mm²]
+    "min_surface_au2": 15.0,    // oba algorytmy: mniejsze wykryte obszary są pomijane [a.u.²]
 
     // "roughness" = algorytm bazowy: przełom to szorstka powierzchnia, kora kości gładka (słaby!)
-    "roughness_radius_mm": 1.0, // promień sąsiedztwa do liczenia szorstkości [mm]
+    "roughness_radius_au": 1.0, // promień sąsiedztwa do liczenia szorstkości [a.u.]
     "rough_threshold": 0.09,    // od tej szorstkości powierzchnia = przełom (kora ~0.04, gąbczasty przełom ~0.15)
 
     // "features" = kilka cech naraz, BEZ oznaczeń: przełom jest bardziej szorstki, ma większy rozrzut
     // normalnych i gęstszą siatkę niż reszta TEJ SAMEJ kości (mediana kości = kora).
     // Cechy i ich promienie: sekcja "surface_features"; opis cech: raporty/przelom_vs_kora.md.
-    "feature_keys": ["spread_2", "rough_1", "edge_mm"],  // rozrzut normalnych 2 mm, szorstkość 1 mm, krawędź siatki
+    "feature_keys": ["spread_2", "rough_1", "edge_au"],  // rozrzut normalnych 2 a.u., szorstkość 1 a.u., krawędź siatki
     "feature_threshold": 0.15,  // o ile ponad typową wartość tej kości (w odchyleniach) = przełom (wyżej = mniej, ale pewniej)
-    "feature_smooth_mm": 1.0,   // uśrednianie wyniku w tym promieniu przed progiem [mm] (0 = bez)
-    "feature_open_mm": 1.0      // otwarcie morfologiczne [mm]: rozcina wąskie mostki między obszarami (więcej = więcej kawałków)
+    "feature_smooth_au": 1.0,   // uśrednianie wyniku w tym promieniu przed progiem [a.u.] (0 = bez)
+    "feature_open_au": 1.0      // otwarcie morfologiczne [a.u.]: rozcina wąskie mostki między obszarami (więcej = więcej kawałków)
   },
 
   // -----------------
   // Dopasowanie fragmentów po powierzchniach styku - scripts/match_surfaces.py, src/matching_surfaces.py
   // Każda powierzchnia styku jest ustawiana (RANSAC + ICP) na każdej powierzchni innej kości,
-  // twarzą w twarz; wynik pary = pole styku - pole kolizji [mm²].
+  // twarzą w twarz; wynik pary = pole styku - pole kolizji [a.u.²].
   // -----------------
   "matching": {
     // Skąd powierzchnie styku:
@@ -128,27 +128,27 @@
     //   "manual-auto" = ręczne, a dla kości bez ręcznych - z algorytmu.
     // Jednorazowo: python scripts/match_surfaces.py --source auto
     "source": "manual-auto",
-    "min_area_mm2": 20.0,       // mniejsze powierzchnie styku są pomijane [mm²]
+    "min_area_au2": 20.0,       // mniejsze powierzchnie styku są pomijane [a.u.²]
 
     // Punkty i deskryptory
-    "sample_mm": 0.3,           // odstęp punktów powierzchni (do ICP) [mm]; mniej = dokładniej, wolniej
-    "coarse_voxel_mm": 1.0,     // odstęp punktów do zgrubnego ustawienia (RANSAC) [mm]
-    "fpfh_radius_mm": 4.0,      // promień deskryptora kształtu FPFH [mm]; ~ wielkość charakterystycznych nierówności przełomu
+    "sample_au": 0.3,           // odstęp punktów powierzchni (do ICP) [a.u.]; mniej = dokładniej, wolniej
+    "coarse_voxel_au": 1.0,     // odstęp punktów do zgrubnego ustawienia (RANSAC) [a.u.]
+    "fpfh_radius_au": 4.0,      // promień deskryptora kształtu FPFH [a.u.]; ~ wielkość charakterystycznych nierówności przełomu
 
     // Zgrubne ustawienie: RANSAC losuje trójki podobnych punktów (wg FPFH) i sprawdza, ile pasuje
     "ransac_iterations": 1000000, // zawsze wszystkie (bez wczesnego końca): 50 tys. trafia dobre ustawienie ~40% prób, 1 mln ~100%
     "ransac_seeds": 2,          // ile niezależnych prób RANSAC na parę (wygrywa najlepsza); czas rośnie liniowo
     "ransac_normal_angle_deg": 35.0, // RANSAC odrzuca ustawienia, w których normalne par punktów różnią się bardziej
 
-    // Dokładne ustawienie: ICP dociska powierzchnie, szukając par punktów najpierw do icp_start_mm,
-    // potem do połowy tej odległości, na koniec do 2 x sample_mm
-    "icp_start_mm": 2.0,
+    // Dokładne ustawienie: ICP dociska powierzchnie, szukając par punktów najpierw do icp_start_au,
+    // potem do połowy tej odległości, na koniec do 2 x sample_au
+    "icp_start_au": 2.0,
 
     // Ocena ustawienia
-    "tolerance_mm": 0.5,        // STYK: punkty bliżej niż to ...
+    "tolerance_au": 0.5,        // STYK: punkty bliżej niż to ...
     "normal_angle_deg": 45.0,   // ... i z normalnymi przeciwnymi z dokładnością do tego kąta [stopnie]
-    "collision_mm": 1.0,        // KOLIZJA: punkt jednej kości głębiej niż to pod powierzchnią drugiej [mm]
-    "collision_search_mm": 4.0, // ... szukane tylko w tej odległości od powierzchni drugiej kości [mm]
+    "collision_au": 1.0,        // KOLIZJA: punkt jednej kości głębiej niż to pod powierzchnią drugiej [a.u.]
+    "collision_search_au": 4.0, // ... szukane tylko w tej odległości od powierzchni drugiej kości [a.u.]
 
     "max_shown": 15,            // ile najlepszych par pokazać w 3D (tune_matching.py --html -> matching.html)
 
@@ -161,34 +161,34 @@
   // Ręcznie oznaczone powierzchnie styku vs reszta kości (kora): szorstkość, kształt, kolor, ...
   // -----------------
   "surface_features": {
-    "radii_mm": [0.5, 1.0, 2.0],  // promienie liczenia szorstkości i rozrzutu normalnych [mm]
-    "boundary_margin_mm": 1.0,    // pomiń pas przy otwartym brzegu skanu (postrzępiony, to nie przełom) [mm]
-    "label_band_mm": 0.5          // pomiń pas po obu stronach granicy oznaczenia (niedokładność ręcznego) [mm]
+    "radii_au": [0.5, 1.0, 2.0],  // promienie liczenia szorstkości i rozrzutu normalnych [a.u.]
+    "boundary_margin_au": 1.0,    // pomiń pas przy otwartym brzegu skanu (postrzępiony, to nie przełom) [a.u.]
+    "label_band_au": 0.5          // pomiń pas po obu stronach granicy oznaczenia (niedokładność ręcznego) [a.u.]
   },
 
   // -----------------
   // Syntetyczne kości pocięte na fragmenty - scripts/make_synthetic.py, src/synthetic_bones.py
   // Tworzy osobny zestaw (scanned_bones/<nazwa>/) z prawdą: które fragmenty pasują, gdzie są przełomy.
-  // [od, do] = losowane osobno dla każdej kości. Długości w mm.
+  // [od, do] = losowane osobno dla każdej kości. Długości w a.u.
   // -----------------
   "synthetic": {
     "n_bones": 6,               // ile kości
     "fragments": [2, 4],        // ile fragmentów na kość
-    "length_mm": [50, 90],      // długość kości
-    "radius_mm": [4, 7],        // promień trzonu
+    "length_au": [50, 90],      // długość kości
+    "radius_au": [4, 7],        // promień trzonu
     "flare": 0.35,              // poszerzenie nasad na końcach (0.35 = o 35%)
     "ellipticity": 0.15,        // spłaszczenie przekroju (0 = okrągły)
-    "bend_mm": 2.0,             // wygięcie osi kości
-    "bump_mm": 0.25,            // nierówności kory (RMS)
+    "bend_au": 2.0,             // wygięcie osi kości
+    "bump_au": 0.25,            // nierówności kory (RMS)
     "tilt_deg": 35,             // największe pochylenie przełomu (0 = cięcie prostopadłe do osi)
-    "relief_mm": 1.2,           // duże nierówności przełomu (RMS, fale 3-10 mm) - im więcej, tym łatwiej dopasować
-    "rough_mm": 0.12,           // drobna szorstkość przełomu (RMS, fale 0.8-2 mm)
-    "edge_mm": 0.3,             // długość krawędzi siatki (gęstość skanu)
-    "scan_noise_mm": 0.02,      // szum skanera
+    "relief_au": 1.2,           // duże nierówności przełomu (RMS, fale 3-10 a.u.) - im więcej, tym łatwiej dopasować
+    "rough_au": 0.12,           // drobna szorstkość przełomu (RMS, fale 0.8-2 a.u.)
+    "edge_au": 0.3,             // długość krawędzi siatki (gęstość skanu)
+    "scan_noise_au": 0.02,      // szum skanera
     "holes": 0,                 // dziury w korze na fragment (miejsca niewidoczne dla skanera)
-    "hole_mm": [1.5, 3.0],      // promień dziury
+    "hole_au": [1.5, 3.0],      // promień dziury
     "colors": true,             // kolory: kora jasna, przełom ciemniejszy (false = bez kolorów)
-    "chip_mm": [2, 4],          // grubość płaskiego odłamka (cięcie "chip")
+    "chip_au": [2, 4],          // grubość płaskiego odłamka (cięcie "chip")
     // Ręczny układ cięć zamiast losowego: lista na każdą kość, cięcia od dołu do góry -
     // "fracture" = zwykły przełom, "chip" = płaski odłamek między dwoma bliskimi przełomami.
     // Np. [["fracture", "chip"], ["fracture"]] = 2 kości (4 i 2 części). [] = losowo wg n_bones / fragments.

@@ -45,11 +45,11 @@ def main() -> None:
         raise SystemExit(config.no_bones_message())
     params = config.view3d_params()
     merged = sum(b.n_scans > 1 for b in bones)
-    noise = sum(b.meta.get("noise_removed_mm2", 0) for b in bones)
+    noise = sum(b.meta.get("noise_removed_au2", 0) for b in bones)
     thr = report["params"]["min_overlap"]
     lead = (f"{len(report['scans'])} skanów → <b>{len(bones)} kości</b>; {merged} z nich powstało z kilku skanów. "
-            f"Usunięty szum: {noise:.0f} mm². Dwa skany są uznawane za tę samą kość, gdy nakładanie ≥ {thr} "
-            f"(część mniejszego skanu leżąca na drugim, z tolerancją {report['params']['tolerance_mm']} mm).")
+            f"Usunięty szum: {noise:.0f} a.u.². Dwa skany są uznawane za tę samą kość, gdy nakładanie ≥ {thr} "
+            f"(część mniejszego skanu leżąca na drugim, z tolerancją {report['params']['tolerance_au']} a.u.).")
     sections = [
         ("Skany nałożone na siebie", "Każdy skan w innym kolorze, czerwony = usunięty szum. "
          "Kość wybierasz z listy w lewym dolnym rogu. Kliknięcie w legendzie ukrywa skan.",

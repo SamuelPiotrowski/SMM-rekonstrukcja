@@ -152,11 +152,11 @@ class ToolState:
         """GET /api/bones: lista kości do panelu bocznego + dane startowe strony.
 
         Returns:
-            {"bones": [{"nr", "id", "label", "scans", "area_mm2", "extent_mm", "vertices",
-                        "surfaces": [{"id", "name", "area_mm2"}] - ręczne oznaczenia,
+            {"bones": [{"nr", "id", "label", "scans", "area_au2", "extent_au", "vertices",
+                        "surfaces": [{"id", "name", "area_au2"}] - ręczne oznaczenia,
                         "updated": data zapisu albo None, "auto": czy jest wynik algorytmu}],
              "palette": kolory powierzchni, "detectors": nazwy algorytmów,
-             "params": {"brush_mm", "wand_angle_deg"} - startowe ustawienia pędzla i różdżki}.
+             "params": {"brush_au", "wand_angle_deg"} - startowe ustawienia pędzla i różdżki}.
         """
         items = []
         for nr, bid in enumerate(self.order, 1):
@@ -165,15 +165,15 @@ class ToolState:
             stats = ct.surface_stats(b.mesh, c.labels) if c else []
             items.append({
                 "nr": nr, "id": bid, "label": b.label, "scans": b.n_scans,
-                "area_mm2": b.meta.get("stats", {}).get("area_mm2"),
-                "extent_mm": b.meta.get("stats", {}).get("extent_mm"),
+                "area_au2": b.meta.get("stats", {}).get("area_au2"),
+                "extent_au": b.meta.get("stats", {}).get("extent_au"),
                 "vertices": len(b.mesh.vertices),
-                "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_mm2": s["area_mm2"]} for s in stats],
+                "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_au2": s["area_au2"]} for s in stats],
                 "updated": c.updated if c else None,
                 "auto": ct.contacts_path(bid, "auto").exists(),
             })
         return {"bones": items, "palette": list(ct.PALETTE), "detectors": list(ct.DETECTORS),
-                "params": {"brush_mm": self.params.brush_mm, "wand_angle_deg": self.params.wand_angle_deg}}
+                "params": {"brush_au": self.params.brush_au, "wand_angle_deg": self.params.wand_angle_deg}}
 
     def start_contacts(self, b: Bone) -> tuple[ct.Contacts | None, str, str | None, bool]:
         """Etykiety, od których kość startuje w narzędziu: ręczne, a gdy ich nie ma - automatyczne.
@@ -253,7 +253,7 @@ class ToolState:
 
         Returns:
             {"saved": ścieżka pliku albo None (brak oznaczeń - plik usunięty),
-             "surfaces": [{"id", "name", "area_mm2", "max_diameter_mm"}]}.
+             "surfaces": [{"id", "name", "area_au2", "max_diameter_au"}]}.
 
         Raises:
             KeyError:   nie ma takiej kości.
@@ -267,8 +267,8 @@ class ToolState:
             path = ct.save_contacts(b.mesh, c, frames=ct.scan_frames(b))
         stats = ct.surface_stats(b.mesh, labels)
         return {"saved": str(path) if path else None,
-                "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_mm2": s["area_mm2"],
-                              "max_diameter_mm": s["max_diameter_mm"]} for s in stats]}
+                "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_au2": s["area_au2"],
+                              "max_diameter_au": s["max_diameter_au"]} for s in stats]}
 
     def detect(self, bone_id: str, method: str | None) -> dict:
         """POST /api/bones/<id>/detect: propozycja algorytmu - NIC nie zapisuje.

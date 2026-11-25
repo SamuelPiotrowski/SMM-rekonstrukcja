@@ -68,8 +68,8 @@ def main() -> None:
             raise SystemExit(str(e)) from None
         ct.save_contacts(b.mesh, found, ct.contacts_path(b.id, "auto"), ct.scan_frames(b))
         stats = ct.surface_stats(b.mesh, found.labels)
-        areas = ", ".join(f"{s['area_mm2']:.0f}" for s in stats) or "-"
-        line = f"  {nr:2d}. {b.label}: {len(stats)} pow. [{areas}] mm2 ({time.perf_counter() - start:.1f} s)"
+        areas = ", ".join(f"{s['area_au2']:.0f}" for s in stats) or "-"
+        line = f"  {nr:2d}. {b.label}: {len(stats)} pow. [{areas}] a.u.² ({time.perf_counter() - start:.1f} s)"
         manual = ct.load_contacts(b.id, b.mesh, "manual", frames=ct.scan_frames(b))
         if manual is not None and manual.labels.any():
             r = ct.compare(b.mesh, found.labels, manual.labels)

@@ -52,6 +52,42 @@ SETTINGS_FILE = ROOT / "settings.json"
 _STRING_OR_COMMENT = re.compile(r'("(?:\\.|[^"\\])*")|//[^\n]*')
 
 
+# Stare nazwy kluczy z jednostką mm (np. "tolerance_mm", "area_mm2") - teraz jednostki
+# arbitralne: "tolerance_au", "area_au2". Wartości się nie zmieniły, tylko nazwy.
+_OLD_UNIT_KEY = re.compile(r"_mm(2?)$")
+
+
+def new_unit_keys(data):
+    """Zamienia stare nazwy kluczy *_mm / *_mm2 na *_au / *_au2 (w całym zagnieżdżonym JSON-ie).
+
+    Dzięki temu pliki zapisane przed zmianą jednostek (settings.json, contacts/*.json,
+    meta.json, merging.json, ground_truth.json, ...) wczytują się bez zmian. Gdy w słowniku
+    są oba klucze (stary i nowy), wygrywa nowy.
+
+    Args:
+        data: wczytany JSON (słownik, lista albo pojedyncza wartość).
+
+    Returns:
+        To samo z przemianowanymi kluczami (nowe obiekty dla słowników i list).
+    """
+    if isinstance(data, dict):
+        out = {}
+        for k, v in data.items():
+            new = _OLD_UNIT_KEY.sub(r"_au\1", k) if isinstance(k, str) else k
+            if new != k and new in data:
+                continue
+            out[new] = new_unit_keys(v)
+        return out
+    if isinstance(data, list):
+        return [new_unit_keys(v) for v in data]
+    return data
+
+
+def read_json(path: Path):
+    """Wczytuje plik JSON (UTF-8) i zamienia stare klucze *_mm na *_au (patrz new_unit_keys)."""
+    return new_unit_keys(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
 def load_settings(path: Path = SETTINGS_FILE) -> dict:
     """Wczytuje plik JSON, w którym mogą być komentarze //.
 
@@ -71,7 +107,7 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict:
     text = path.read_text(encoding="utf-8")
     text = _STRING_OR_COMMENT.sub(lambda m: m.group(1) or "", text)
     try:
-        return json.loads(text)
+        return new_unit_keys(json.loads(text))
     except json.JSONDecodeError as e:
         raise SystemExit(f"Błąd składni w {path.name}, linia {e.lineno}: {e.msg}\n"
                          "Sprawdź przecinki (bez przecinka po ostatnim elemencie), cudzysłowy \"...\" "
@@ -303,8 +339,11 @@ def contact_params():
     Raises:
         SystemExit: nieznany klucz w sekcji (patrz _section).
     """
+    from dataclasses import replace
     from contacts import ContactParams
-    return _section("contacts", ContactParams, skip=("port",))
+    params = _section("contacts", ContactParams, skip=("port",))
+    # stara nazwa cechy (przed zmianą mm -> a.u.)
+    return replace(params, feature_keys=tuple("edge_au" if k == "edge_mm" else k for k in params.feature_keys))
 
 
 def matching_params():

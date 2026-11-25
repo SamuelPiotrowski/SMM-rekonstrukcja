@@ -1,4 +1,4 @@
-// Linijka do widoków 3D plotly: odległość [mm] między dwoma klikniętymi punktami kości.
+// Linijka do widoków 3D plotly: odległość [a.u.] między dwoma klikniętymi punktami kości.
 //
 // Używana przez:
 //   - statyczne strony HTML (src/visualization_3d.py: save_figure i write_page - np. bones.html
@@ -7,7 +7,7 @@
 //
 // Użycie: const ruler = attachRuler(divWykresu);   // po pierwszym Plotly.newPlot / Plotly.react
 //   Przycisk "📏 Linijka" (albo klawisz L) włącza pomiar. Klik w kość = punkt, co dwa punkty
-//   powstaje odcinek z długością w mm. Esc - anuluj zaczęty odcinek, "Cofnij" - usuń ostatni
+//   powstaje odcinek z długością w a.u. Esc - anuluj zaczęty odcinek, "Cofnij" - usuń ostatni
 //   odcinek, "Wyczyść" - wszystkie. Obracanie / przesuwanie widoku działa normalnie
 //   (przeciągnięcie myszą nie stawia punktu).
 //   ruler.clear() - usuwa pomiary (np. gdy strona rysuje nową scenę przez Plotly.react).
@@ -48,12 +48,12 @@
   }
 
   /**
-   * Długość w mm jako tekst: 1 miejsce po przecinku, poniżej 10 mm - 2.
-   * @param {number} d  odległość [mm]
+   * Długość w a.u. jako tekst: 1 miejsce po przecinku, poniżej 10 a.u. - 2.
+   * @param {number} d  odległość [a.u.]
    * @returns {string}
    */
   function fmt(d) {
-    return `${d.toFixed(d < 10 ? 2 : 1)} mm`;
+    return `${d.toFixed(d < 10 ? 2 : 1)} a.u.`;
   }
 
   /**
@@ -123,7 +123,7 @@
       el("ruler-undo").hidden = el("ruler-clear").hidden = !st.segs.length;
     }
 
-    /** Odległość dwóch punktów {x, y, z} [mm]. */
+    /** Odległość dwóch punktów {x, y, z} [a.u.]. */
     function dist(p, q) {
       return Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z);
     }
