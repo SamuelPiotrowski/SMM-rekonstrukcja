@@ -30,6 +30,7 @@ Format pliku JSON:
       "format": "bones-smm-contacts/1",
       "bone": "<id kości>", "source": "manual" | "auto:<metoda>", "updated": "<data>",
       "mesh": {"vertices": V, "fingerprint": "..."},    # do wykrycia zmiany siatki
+      "scans": {"<suma kontrolna pliku skanu>": T, ...}, # T 4x4: układ skanu -> układ kości (scan_frames)
       "detector": {"method": "...", "params": {...}},   # tylko wynik algorytmu
       "labels_zlib_b64": "...",          # labels (V,) uint8 skompresowane zlib + base64
       "surfaces": [
@@ -40,7 +41,10 @@ Format pliku JSON:
     }
 Najprościej czytać przez load_contacts(). Jeśli siatka kości się zmieni (np. inne ustawienia
 prepare_data), etykiety są przenoszone na nową siatkę po położeniu punktów
-(najbliższy punkt bliżej niż REMAP_MM).
+(najbliższy punkt bliżej niż REMAP_MM). Punkty są najpierw przeliczane przez wspólny skan
+("scans"), więc przeniesienie działa też wtedy, gdy kość jest inaczej ustawiona (np. po
+włączeniu / wyłączeniu łączenia skanów zmienia się jej środek). Po zmianie nazwy kości
+oznaczenia przechodzą na nową nazwę same (adopt_renamed, wywoływane przez prepare_data.py).
 """
 
 from __future__ import annotations
@@ -276,6 +280,31 @@ def surface_stats(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray) -> list[d
 # ZAPIS / ODCZYT
 # -----------------
 
+def scan_frames(bone) -> dict[str, list]:
+    """Przekształcenia skanów źródłowych kości: {suma kontrolna pliku skanu: T 4x4 układ skanu -> kości}.
+
+    Zapisywane w pliku oznaczeń - dzięki nim punkty da się przenieść na kość, która powstała
+    z tego samego skanu, ale jest inaczej ustawiona (inne łączenie, inna nazwa).
+
+    Args:
+        bone: kość (bones.Bone) z meta.json; None = brak danych.
+
+    Returns:
+        Słownik (pusty dla kości bez sum kontrolnych - przygotowanych starszą wersją).
+    """
+    if bone is None:
+        return {}
+    return {s["checksum"]: s["transform_to_bone"] for s in bone.meta.get("scans", []) if s.get("checksum")}
+
+
+def _frame_shift(saved: dict, current: dict) -> np.ndarray | None:
+    """Przekształcenie 4x4 starego układu kości na nowy przez wspólny skan (None = brak wspólnego)."""
+    common = sorted(set(saved) & set(current))
+    if not common:
+        return None
+    return np.asarray(current[common[0]], dtype=float) @ np.linalg.inv(np.asarray(saved[common[0]], dtype=float))
+
+
 def contacts_path(bone_id: str, source: str = "manual", root: Path | None = None) -> Path:
     """Ścieżka pliku etykiet kości.
 
@@ -294,7 +323,8 @@ def contacts_path(bone_id: str, source: str = "manual", root: Path | None = None
     return root / f"{bone_id}.json" if source == "manual" else root / "auto" / f"{bone_id}.json"
 
 
-def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Path | None = None) -> Path | None:
+def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Path | None = None,
+                  frames: dict | None = None) -> Path | None:
     """Zapisuje etykiety do JSON (format: docstring modułu) i zwraca ścieżkę.
 
     Ręczne bez żadnej powierzchni = plik jest usuwany (zwraca None). Wynik algorytmu jest
@@ -306,6 +336,8 @@ def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Pat
         mesh:     siatka kości, do której należą etykiety.
         contacts: etykiety; contacts.source decyduje o domyślnym folderze.
         path:     plik docelowy (domyślnie contacts_path(...) wg contacts.source).
+        frames:   scan_frames(kość) - układy skanów źródłowych (do przeniesienia na inaczej
+                  ustawioną kość); None = bez nich.
 
     Returns:
         Ścieżka zapisanego pliku albo None (usunięte puste ręczne oznaczenia).
@@ -333,6 +365,7 @@ def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Pat
     data = {"format": FORMAT, "bone": contacts.bone_id, "source": contacts.source,
             "updated": datetime.now().isoformat(timespec="seconds"),
             "mesh": {"vertices": len(v), "fingerprint": mesh_fingerprint(mesh)},
+            **({"scans": frames} if frames else {}),
             **({"detector": contacts.detector} if contacts.detector else {}),
             "labels_zlib_b64": base64.b64encode(zlib.compress(labels.tobytes(), 9)).decode("ascii"),
             "surfaces": surfaces}
@@ -362,13 +395,15 @@ def _compact_lists(text: str) -> str:
 
 
 def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "manual",
-                  path: Path | None = None, root: Path | None = None) -> Contacts | None:
+                  path: Path | None = None, root: Path | None = None,
+                  frames: dict | None = None) -> Contacts | None:
     """Wczytuje zapisane etykiety kości: "manual" (ręczne) albo "auto" (wynik algorytmu).
 
     Jeśli siatka zmieniła się od zapisu (inny fingerprint), etykiety są przenoszone
     po położeniu punktów, a `remapped` = True: wierzchołek dostaje etykietę najbliższego
     zapisanego punktu, jeśli ten jest bliżej niż REMAP_MM (inaczej 0). Plik nie jest
-    przy tym zmieniany - przeniesione etykiety trzeba zapisać samemu.
+    przy tym zmieniany - przeniesione etykiety trzeba zapisać samemu. Gdy plik i kość mają
+    wspólny skan źródłowy (`frames`), punkty są najpierw przeliczane do nowego układu kości.
 
     Args:
         bone_id: id kości.
@@ -376,6 +411,7 @@ def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "
         source:  "manual" albo "auto" - który plik czytać (gdy nie podano `path`).
         path:    konkretny plik zamiast contacts_path(bone_id, source, root).
         root:    folder oznaczeń zamiast CONTACTS_DIR.
+        frames:  scan_frames(kość) - do przeliczenia punktów, gdy kość jest inaczej ustawiona.
 
     Returns:
         Contacts z etykietami (V,) dla `mesh` albo None, gdy pliku nie ma.
@@ -397,11 +433,136 @@ def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "
             pts.append(p)
             ids.append(np.full(len(p), int(s["id"])))
         if pts and sum(len(p) for p in pts):
-            d, idx = cKDTree(np.vstack(pts)).query(np.asarray(mesh.vertices), distance_upper_bound=REMAP_MM)
-            ok = np.isfinite(d)
-            labels[ok] = np.concatenate(ids)[idx[ok]]
+            pts = np.vstack(pts)
+            shift = _frame_shift(data.get("scans", {}), frames or {})
+            if shift is not None:
+                pts = pts @ shift[:3, :3].T + shift[:3, 3]
+            ids = np.concatenate(ids)
+            v = np.asarray(mesh.vertices)
+            saved = np.frombuffer(zlib.decompress(base64.b64decode(data["labels_zlib_b64"])), dtype=np.uint8)
+            dv, vi = cKDTree(v).query(pts) if len(saved) == n else (None, None)
+            if dv is not None and dv.max() < 0.02 and np.array_equal(saved[vi], ids):
+                labels = saved.copy()       # ta sama siatka, tylko przesunięta (np. inny środek) - etykiety wprost
+            else:
+                d, idx = cKDTree(pts).query(v, distance_upper_bound=REMAP_MM)
+                ok = np.isfinite(d)
+                labels[ok] = ids[idx[ok]]
     return Contacts(bone_id=bone_id, labels=labels, names=names, source=data.get("source", source),
                     updated=data.get("updated", ""), remapped=not same, detector=data.get("detector", {}))
+
+
+# -----------------
+# ZMIANA NAZWY KOŚCI
+# -----------------
+
+ADOPT_SHARE = 0.8     # część zapisanych punktów, która musi leżeć na siatce, żeby uznać plik za oznaczenia tej kości
+
+
+def _file_points(data: dict) -> np.ndarray:
+    """Wszystkie zapisane punkty powierzchni z pliku oznaczeń (M, 3)."""
+    pts = [np.asarray(s.get("points", []), dtype=float).reshape(-1, 3) for s in data.get("surfaces", [])]
+    return np.vstack(pts) if pts else np.zeros((0, 3))
+
+
+def adopt_renamed(bones, root: Path | None = None, extra_roots=(), log: Callable | None = print) -> list[dict]:
+    """Po zmianie nazwy kości (np. folderu ze skanem) przenosi jej oznaczenia na nową nazwę.
+
+    Oznaczenia są zapisane pod id kości (<root>/<id>.json), a id pochodzi z nazwy folderu / pliku
+    skanu. Po zmianie nazwy i ponownym prepare_data.py plik zostaje pod starą nazwą ("osierocony").
+    Każda kość BEZ własnych ręcznych oznaczeń dostaje osierocony plik, który do niej pasuje:
+        1. ten sam odcisk siatki (zmieniła się tylko nazwa), albo
+        2. ten sam plik skanu źródłowego (suma kontrolna w "scans") - nazwa i ustawienie kości
+           zmieniły się naraz (np. inne ustawienia łączenia), albo
+        3. (starsze pliki bez "scans") co najmniej ADOPT_SHARE zapisanych punktów powierzchni leży na siatce (bliżej niż
+           REMAP_MM) - nazwa i siatka zmieniły się naraz (np. inne ustawienia łączenia);
+           etykiety przeniesie potem load_contacts, jak przy każdej zmianie siatki.
+    Plik z `root` jest przenoszony pod nową nazwę (z poprawionym polem "bone"), plik z
+    `extra_roots` (np. oznaczenia zestawu o zmienionej nazwie) - kopiowany, oryginał zostaje.
+    Wyniki algorytmu (<root>/auto/) z tym samym odciskiem siatki też są przenoszone, a pozostałe
+    osierocone wyniki algorytmu - usuwane (to tylko cache, policzą się od nowa).
+
+    Args:
+        bones:       wszystkie kości zestawu (z siatkami) - nazwy spoza tej listy to pliki osierocone.
+        root:        folder oznaczeń zestawu (domyślnie CONTACTS_DIR z settings.json).
+        extra_roots: dodatkowe foldery z oznaczeniami do przejrzenia (kopiowane, nie przenoszone).
+        log:         funkcja do komunikatów (None = bez komunikatów).
+
+    Returns:
+        Lista przeniesień {"from": ścieżka, "to": ścieżka, "how": jak rozpoznano, "copy": bool}.
+    """
+    if root is None:
+        from config import CONTACTS_DIR as root
+    root = Path(root)
+    ids = {b.id for b in bones}
+    orphans = [(f, False) for f in sorted(root.glob("*.json")) if f.stem not in ids]
+    for extra in extra_roots:
+        orphans += [(f, True) for f in sorted(Path(extra).glob("*.json"))]
+    moves = []
+    needy = [b for b in bones if not contacts_path(b.id, "manual", root).exists()]
+    if orphans and needy:
+        prints = {b.id: mesh_fingerprint(b.mesh) for b in needy}
+        trees: dict[str, cKDTree] = {}
+        cands = []                                  # (pewność, kolejność, plik, kopia, kość, sposób)
+        for n, (f, copy) in enumerate(orphans):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if data.get("format") != FORMAT or data.get("source", "manual") != "manual":
+                continue
+            fp = data.get("mesh", {}).get("fingerprint")
+            saved_frames = data.get("scans", {})
+            pts = _file_points(data)
+            for b in needy:
+                if fp == prints[b.id]:
+                    cands.append((3.0, n, f, copy, b, "odcisk siatki"))
+                elif set(saved_frames) & set(scan_frames(b)):
+                    cands.append((2.0, n, f, copy, b, "ten sam plik skanu"))
+                elif len(pts):
+                    if b.id not in trees:
+                        trees[b.id] = cKDTree(np.asarray(b.mesh.vertices))
+                    share = float(np.isfinite(trees[b.id].query(pts, distance_upper_bound=REMAP_MM)[0]).mean())
+                    if share >= ADOPT_SHARE:
+                        cands.append((share, n, f, copy, b, f"punkty ({share:.0%} na siatce)"))
+        used_files, used_bones = set(), set()
+        for _, _, f, copy, b, how in sorted(cands, key=lambda c: (-c[0], c[1])):
+            if f in used_files or b.id in used_bones:
+                continue
+            used_files.add(f)
+            used_bones.add(b.id)
+            data = json.loads(f.read_text(encoding="utf-8"))
+            data["bone"] = b.id
+            target = contacts_path(b.id, "manual", root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_compact_lists(json.dumps(data, ensure_ascii=False, indent=1)), encoding="utf-8")
+            if not copy:
+                f.unlink()
+            moves.append({"from": f, "to": target, "how": how, "copy": copy})
+            if log:
+                verb = "skopiowano" if copy else "przeniesiono"
+                log(f"  oznaczenia styku: {verb} {f.parent.name}/{f.name} -> {target.name} "
+                    f"(zmiana nazwy kości; rozpoznane po: {how})")
+    for f, _ in orphans:
+        if f.exists() and f.parent == root and f not in {m["from"] for m in moves} and log:
+            log(f"  UWAGA: oznaczenia {f.name} nie pasują do żadnej kości (zostają w {root.name}/; "
+                "jeśli kość zmieniła nazwę i kształt, zmień nazwę pliku ręcznie)")
+
+    auto_dir = root / "auto"
+    auto_orphans = [f for f in auto_dir.glob("*.json") if f.stem not in ids] if auto_dir.is_dir() else []
+    if auto_orphans:
+        by_print = {mesh_fingerprint(b.mesh): b.id for b in bones if not contacts_path(b.id, "auto", root).exists()}
+        for f in auto_orphans:
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                new_id = by_print.pop(data.get("mesh", {}).get("fingerprint"), None)
+            except (OSError, ValueError):
+                new_id = None
+            if new_id:
+                data["bone"] = new_id
+                contacts_path(new_id, "auto", root).write_text(
+                    _compact_lists(json.dumps(data, ensure_ascii=False, indent=1)), encoding="utf-8")
+            f.unlink()
+    return moves
 
 
 # -----------------
@@ -755,11 +916,11 @@ def auto_contacts(bone, params: ContactParams = ContactParams(),
         (etykiety - puste, gdy algorytm nic nie znalazł; True = właśnie policzone, False = z cache).
     """
     want = detector_info(bone, params.method, params)
-    cached = load_contacts(bone.id, bone.mesh, "auto", root=root)
+    cached = load_contacts(bone.id, bone.mesh, "auto", root=root, frames=scan_frames(bone))
     if cached is not None and not cached.remapped and cached.detector == want:
         return cached, False
     found = detect_contacts(bone, params.method, params)
-    save_contacts(bone.mesh, found, contacts_path(bone.id, "auto", root))
+    save_contacts(bone.mesh, found, contacts_path(bone.id, "auto", root), scan_frames(bone))
     return found, True
 
 

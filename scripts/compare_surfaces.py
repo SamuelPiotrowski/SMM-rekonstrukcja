@@ -26,7 +26,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # ... i w komunikata
 import config  # noqa: E402
 import surface_features as sf  # noqa: E402
 from bones import load_bones, select_bones  # noqa: E402
-from contacts import load_contacts  # noqa: E402
+from contacts import load_contacts, scan_frames  # noqa: E402
 from visualization_3d import write_page  # noqa: E402
 
 
@@ -55,7 +55,7 @@ def main() -> None:
 
     comps = []
     for b in bones:
-        c = load_contacts(b.id, b.mesh, "manual")
+        c = load_contacts(b.id, b.mesh, "manual", frames=scan_frames(b))
         if c is None or not c.labels.any():
             continue
         start = time.perf_counter()

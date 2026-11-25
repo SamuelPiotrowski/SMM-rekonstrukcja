@@ -20,23 +20,28 @@ import numpy as np
 import open3d as o3d
 
 import bones as bones_mod
+import contacts as contacts_mod
 import merging
 from data_parsing import ScanParams, find_scans
 
 
 def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
-                scan: ScanParams | None = None, merge: merging.MergeParams | None = None,
+                contacts_dir: Path | None = None, scan: ScanParams | None = None, merge: merging.MergeParams | None = None,
                 features: bones_mod.FeatureParams | None = None, verbose: bool = True) -> list[bones_mod.Bone]:
     """Przetwarza wszystkie skany z `data_in` i zapisuje kości do `out_dir`.
 
     Kolejne kroki opisuje docstring modułu. Zapisuje: out_dir/bones/<id>/ (każda kość),
     out_dir/cache/pairs.json (wyniki rejestracji par - kolejne uruchomienia są szybkie),
     out_dir/merging.json i out_dir/summary.csv. Foldery kości z poprzednich uruchomień,
-    których już nie ma, są usuwane.
+    których już nie ma, są usuwane. Jeśli kość zmieniła nazwę (np. zmieniona nazwa folderu
+    ze skanem), jej oznaczenia styku są przenoszone na nową nazwę (contacts.adopt_renamed).
 
     Args:
-        data_in:  folder ze skanami (domyślnie DATA_IN z settings.json).
-        out_dir:  folder wyników (domyślnie DATA_OUT z settings.json).
+        data_in:  folder ze skanami (domyślnie DATA_IN bieżącego zestawu, config.use_dataset).
+        out_dir:  folder wyników (domyślnie DATA_OUT bieżącego zestawu).
+        contacts_dir: folder oznaczeń styku (domyślnie CONTACTS_DIR bieżącego zestawu) - tu
+                  szukane są oznaczenia kości, które zmieniły nazwę. Gdy podano własne
+                  data_in / out_dir, a contacts_dir nie - oznaczenia nie są ruszane.
         scan:     ustawienia wyszukiwania skanów (domyślnie sekcja "scans").
         merge:    ustawienia łączenia skanów (domyślnie sekcja "merging").
         features: ustawienia chmury i FPFH (domyślnie sekcja "features").
@@ -50,8 +55,13 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
     """
     import config
 
+    # bez podanego contacts_dir oznaczenia są szukane tylko dla zestawu z settings.json / use_dataset -
+    # funkcja wywołana z własnymi folderami (np. w testach) nie rusza prawdziwego contacts/
+    default_contacts = contacts_dir is None
+    adopt = contacts_dir is not None or (data_in is None and out_dir is None)
     data_in = Path(data_in or config.DATA_IN)
     out_dir = Path(out_dir or config.DATA_OUT)
+    contacts_dir = Path(contacts_dir or config.CONTACTS_DIR)
     scan = scan or config.scan_params()
     merge = merge or config.merge_params()
     features = features or config.feature_params()
@@ -118,10 +128,43 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
     removed = bones_mod.remove_stale(out_dir, {b.id for b in result})
     if removed:
         log(f"Usunięto stare wyniki: {', '.join(removed)}")
+    # kości o zmienionej nazwie: oznaczenia styku pod nową nazwę (także z zestawu o zmienionej nazwie)
+    if adopt:
+        extra = _abandoned_contact_dirs(contacts_dir) if default_contacts else []
+        ids = {b.id for b in result}
+        orphaned = [f for d in (contacts_dir, contacts_dir / "auto") for f in d.glob("*.json") if f.stem not in ids]
+        if orphaned or extra:
+            # kości z dysku (jak w każdym innym skrypcie) - odcisk siatki zgadza się z zapisanym w oznaczeniach
+            contacts_mod.adopt_renamed(bones_mod.load_bones(out_dir), contacts_dir, extra, log=log)
     write_merging_report(prepared, pairs, groups, result, merge, out_dir)
     summary = bones_mod.write_summary(result, out_dir)
     log(f"Gotowe: {len(result)} kości w {out_dir / 'bones'}, tabela: {summary}")
     return result
+
+
+def _abandoned_contact_dirs(current: Path) -> list[Path]:
+    """Foldery oznaczeń zestawów, których skanów już nie ma (np. zestaw zmienił nazwę).
+
+    Stąd adopt_renamed może SKOPIOWAĆ oznaczenia kości, które pasują do kości bieżącego zestawu.
+
+    Args:
+        current: folder oznaczeń bieżącego zestawu (pomijany).
+
+    Returns:
+        Podfoldery CONTACTS_ROOT z plikami .json, dla których nie ma folderu skanów o tej nazwie.
+    """
+    import config
+
+    root = config.CONTACTS_ROOT
+    if not root.is_dir():
+        return []
+    out = []
+    for d in sorted({f.parent for f in root.rglob("*.json")}):
+        if d == Path(current) or d.name == "auto" or d == root:
+            continue
+        if not (config.SCANS_ROOT / d.relative_to(root)).is_dir():
+            out.append(d)
+    return out
 
 
 def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path) -> Path:

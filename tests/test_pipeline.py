@@ -13,7 +13,8 @@ Sprawdza: wyszukiwanie w podfolderach, grupowanie (A razem, B osobno), usunięci
 zapis / odczyt kości, oznaczenia styku (zapis, odczyt, przeniesienie na inną siatkę),
 algorytm wykrywania (zapis w contacts/auto/, cache), dopasowanie powierzchni styku
 (tryby manual / auto / manual-auto, odnalezienie drugiej strony przełomu), przeliczanie jednej
-pary w podglądzie z suwakami (match_tool) i budowę wizualizacji.
+pary w podglądzie z suwakami (match_tool), budowę wizualizacji, zestawy danych oraz przeniesienie
+oznaczeń po zmianie nazwy folderu ze skanem i po wyłączeniu łączenia skanów.
 
 Uruchomienie (z głównego folderu projektu):
     python tests/test_pipeline.py
@@ -326,6 +327,34 @@ def main() -> None:
               "jedyny skan w folderze: nazwa kości = nazwa folderu")
         check(all(np.abs(np.asarray(x.mesh.vertices).mean(axis=0)).max() < 1e-6 for x in loaded),
               "kości wyśrodkowane (także z jednego skanu)")
+        for f in root.glob("*.json"):
+            f.unlink()
+        ct.save_contacts(bone.mesh, ct.Contacts(bone.id, labels), root / f"{bone.id}.json", ct.scan_frames(bone))
+        ct.save_contacts(other.mesh, other_c, root / f"{other.id}.json", ct.scan_frames(other))
+        area_a = ct.vertex_areas(bone.mesh)[labels > 0].sum()
+        (scans_dir / "01.01.2026-test").rename(scans_dir / "nowa_nazwa")
+        renamed = prepare_all(scans_dir, out_dir, contacts_dir=root, scan=ScanParams(), merge=MergeParams(),
+                              features=FeatureParams(), verbose=False)
+        new_ids = {x.id for x in renamed}
+        check(other.id not in new_ids and "nowa_nazwa-lowerjaw" in new_ids, f"nowe nazwy kości: {sorted(new_ids)}")
+        files_now = {f.stem for f in root.glob("*.json")}
+        check(files_now <= new_ids and len(files_now) == 2, f"oznaczenia przeniesione na nowe nazwy: {sorted(files_now)}")
+        nb = [x for x in renamed if x.id == "nowa_nazwa-lowerjaw"][0]
+        got = ct.load_contacts(nb.id, nb.mesh, root=root, frames=ct.scan_frames(nb))
+        check(np.array_equal(got.labels, other_c.labels), "kość z jednego skanu: etykiety bez zmian")
+        na = max(renamed, key=lambda x: x.n_scans)
+        got = ct.load_contacts(na.id, na.mesh, root=root, frames=ct.scan_frames(na))
+        area = ct.vertex_areas(na.mesh)[got.labels > 0].sum()
+        check(0.8 < area / area_a < 1.3, f"połączona kość: oznaczenia po zmianie nazwy ({area:.0f} / {area_a:.0f} mm²)")
+
+        split = prepare_all(scans_dir, out_dir, contacts_dir=root, scan=ScanParams(),
+                            merge=MergeParams(enabled=False), features=FeatureParams(), verbose=False)
+        ref = [x for x in split if x.id == na.id][0]
+        got = ct.load_contacts(ref.id, ref.mesh, root=root, frames=ct.scan_frames(ref))
+        area = ct.vertex_areas(ref.mesh)[got.labels > 0].sum()
+        check(len(split) == 4 and area > 0.2 * area_a,
+              f"łączenie wyłączone (inny środek kości): oznaczenia przeniesione przez wspólny skan ({area:.0f} mm²)")
+
     print(f"Wszystkie testy OK ({time.perf_counter() - start:.0f} s)")
 
 

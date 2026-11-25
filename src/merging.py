@@ -737,7 +737,7 @@ def merge_group(scans: list[PreparedScan], group: dict, pairs: dict, p: MergePar
         others = [i for i in members if i != j]
         scan_meta.append({
             "id": s.file.id, "label": s.file.label, "source": str(s.file.path.name), "folder": s.file.folder,
-            "reference": j == ref,
+            "checksum": s.checksum, "reference": j == ref,
             "overlap_with_reference": None if j == ref else round(pair_overlap(pairs, j, ref), 3),
             "best_overlap_in_group": round(max((pair_overlap(pairs, j, i) for i in others), default=0.0), 3),
             "transform_to_bone": np.round(T[j], 6).tolist(),

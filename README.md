@@ -275,7 +275,7 @@ out/3d/<zestaw>/
         source.npy          z którego skanu pochodzi każdy trójkąt
         cloud.npz           chmura punktów (points, normals, colors), co ~0.5 mm
         fpfh.npy            deskryptory FPFH chmury, (N, 33)
-        meta.json           skany, ich przekształcenia, usunięty szum, statystyki
+        meta.json           skany (z sumą kontrolną pliku), ich przekształcenia, usunięty szum, statystyki
         scans/*.ply         każdy skan w układzie kości (*_noise.ply = usunięty szum)
     merging.json            nakładania wszystkich par skanów i przydział do kości
     matching.json           dopasowanie powierzchni styku: wszystkie pary, wyniki, przekształcenia
@@ -296,11 +296,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))  # dla p
 
 import config
 from bones import load_bones
-from contacts import load_contacts, surface_stats
+from contacts import load_contacts, scan_frames, surface_stats
 
 config.use_dataset("first_scans")                  # opcjonalnie: inny zestaw niż w settings.json
 for bone in load_bones(features=True):              # bone.mesh, bone.cloud, bone.fpfh, bone.meta
-    c = load_contacts(bone.id, bone.mesh)            # ręczne; None = nie oznaczona ("auto" = wynik algorytmu)
+    c = load_contacts(bone.id, bone.mesh, frames=scan_frames(bone))   # ręczne; None = nie oznaczona
     if c:
         print(bone.label, surface_stats(bone.mesh, c.labels))   # pole, średnica, normalna, ...
 ```

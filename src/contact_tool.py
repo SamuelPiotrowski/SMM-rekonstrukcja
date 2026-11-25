@@ -143,7 +143,7 @@ class ToolState:
         items = []
         for nr, bid in enumerate(self.order, 1):
             b = self.bones[bid]
-            c = ct.load_contacts(bid, b.mesh)
+            c = ct.load_contacts(bid, b.mesh, frames=ct.scan_frames(b))
             stats = ct.surface_stats(b.mesh, c.labels) if c else []
             items.append({
                 "nr": nr, "id": bid, "label": b.label, "scans": b.n_scans,
@@ -172,7 +172,7 @@ class ToolState:
             (etykiety albo None - algorytm się nie udał, "manual" albo "auto",
              komunikat błędu algorytmu albo None, True = ręczny plik jest, ale nie pasuje do siatki).
         """
-        c = ct.load_contacts(b.id, b.mesh)
+        c = ct.load_contacts(b.id, b.mesh, frames=ct.scan_frames(b))
         if c is not None and c.surface_ids:
             return c, "manual", None, False
         lost = c is not None
@@ -246,7 +246,7 @@ class ToolState:
         names = {int(k): str(v)[:80] for k, v in body.get("names", {}).items()}
         c = ct.Contacts(bone_id=bone_id, labels=labels, names=names, source="manual")
         with self.lock:
-            path = ct.save_contacts(b.mesh, c)
+            path = ct.save_contacts(b.mesh, c, frames=ct.scan_frames(b))
         stats = ct.surface_stats(b.mesh, labels)
         return {"saved": str(path) if path else None,
                 "surfaces": [{"id": s["id"], "name": c.name(s["id"]), "area_mm2": s["area_mm2"],

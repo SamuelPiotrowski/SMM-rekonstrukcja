@@ -56,7 +56,7 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 from bones import Bone
-from contacts import ContactParams, Contacts, auto_contacts, load_contacts, triangle_labels
+from contacts import ContactParams, Contacts, auto_contacts, load_contacts, scan_frames, triangle_labels
 from data_parsing import compute_fpfh, sample_surface, submesh, to_cloud, voxel_keep
 from merging import covered, transform_points
 
@@ -185,7 +185,7 @@ def bone_contacts(bone: Bone, source: str, contact_params: ContactParams = Conta
     if source not in SOURCES:
         raise ValueError(f"matching.source = {source!r}, dostępne: {', '.join(SOURCES)}")
     if source in ("manual", "manual-auto"):
-        c = load_contacts(bone.id, bone.mesh, "manual", root=root)
+        c = load_contacts(bone.id, bone.mesh, "manual", root=root, frames=scan_frames(bone))
         if c is not None and c.labels.any():
             return c, "ręczne"
         if source == "manual":
