@@ -56,7 +56,8 @@ from visualization_3d import View3DParams, _surface_overlay, decimate, match_mat
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STATIC = {"/": ("match_tool.html", "text/html; charset=utf-8"),
           "/match_tool.js": ("match_tool.js", "text/javascript; charset=utf-8"),
-          "/match_tool.css": ("match_tool.css", "text/css; charset=utf-8")}
+          "/match_tool.css": ("match_tool.css", "text/css; charset=utf-8"),
+          "/ruler.js": ("ruler.js", "text/javascript; charset=utf-8")}
 PARAM_NAMES = {f.name for f in fields(ms.SurfaceMatchParams)}
 
 

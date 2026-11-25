@@ -26,7 +26,8 @@ Trzy wizualizacje:
 
 Zapis: save_figure (jedna figura na całe okno) albo write_page (kilka figur w sekcjach
 z nagłówkami). Przy embed_plotly = True plik HTML działa bez internetu i można go
-po prostu komuś wysłać.
+po prostu komuś wysłać. Każdy widok 3D ma linijkę (src/web/ruler.js): przycisk "📏 Linijka"
+na dole albo klawisz L, potem dwa kliknięcia w kość = odległość w mm.
 
 Wizualizacja nie zmienia wyników - czyta tylko out/3d/<zestaw>/ i contacts/.
 """
@@ -53,6 +54,7 @@ NOISE_COLOR = "#d64545"
 COLOR_MODES = ("scan", "fragment", "fpfh")
 FONT = dict(family="Segoe UI, Arial, sans-serif", color="#1f2a36")
 LIGHTING = dict(ambient=0.55, diffuse=0.75, specular=0.12, roughness=0.65, fresnel=0.05)
+RULER_JS = Path(__file__).resolve().parent / "web" / "ruler.js"     # linijka w widokach 3D (pomiar w mm)
 
 
 @dataclass(frozen=True)
@@ -405,7 +407,8 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
             f"kolory: {dict(scan='skanera', fragment='osobny dla każdej kości', fpfh='FPFH (podobny kolor = podobny kształt)')[color_mode]}",
             "",
             "<i>lewy przycisk: obrót · kółko: zoom · prawy: przesuwanie</i>",
-            "<i>najedź na kość: szczegóły · legenda: ukryj / pokaż</i>"]
+            "<i>najedź na kość: szczegóły · legenda: ukryj / pokaż</i>",
+            "<i>📏 Linijka (na dole, klawisz L): 2 kliknięcia = odległość w mm</i>"]
     fig = go.Figure(data=traces)
     fig.update_layout(
         title=dict(text="Fragmenty kości", x=0.5, font=dict(size=20)),
@@ -781,6 +784,18 @@ section .note {{ font-size: 13px; color: #6b7b8c; padding: 8px 16px 0; margin: 0
 </body></html>"""
 
 
+def _ruler_head() -> str:
+    """Znacznik <script> z linijką (src/web/ruler.js) do <head> strony - definiuje attachRuler."""
+    return f"<script>{RULER_JS.read_text(encoding='utf-8')}</script>"
+
+
+def _ruler_post(fig: go.Figure) -> str | None:
+    """post_script dla fig.to_html: podpina linijkę, gdy figura jest 3D (None = figura 2D, bez linijki)."""
+    if any(t.type in ("mesh3d", "scatter3d") for t in fig.data):
+        return "attachRuler(document.getElementById('{plot_id}'));"
+    return None
+
+
 def _plotly_head(embed: bool) -> str:
     """Znacznik <script> z plotly.js do <head> strony write_page.
 
@@ -816,9 +831,9 @@ def write_page(path: Path, title: str, lead: str, sections: list[tuple[str, str,
     config = dict(displaylogo=False, scrollZoom=True, toImageButtonOptions=dict(format="png", scale=2))
     body = []
     for heading, note, fig in sections:
-        div = fig.to_html(full_html=False, include_plotlyjs=False, config=config)
+        div = fig.to_html(full_html=False, include_plotlyjs=False, config=config, post_script=_ruler_post(fig))
         body.append(f"<section><h2>{heading}</h2>" + (f"<p class='note'>{note}</p>" if note else "") + f"{div}</section>")
-    html = PAGE.format(title=title, lead=lead, bg=params.background, head=_plotly_head(params.embed_plotly),
+    html = PAGE.format(title=title, lead=lead, bg=params.background, head=_plotly_head(params.embed_plotly) + _ruler_head(),
                        sections="\n".join(body))
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -847,11 +862,12 @@ def save_figure(fig: go.Figure, path: Path, params: View3DParams = View3DParams(
     div = fig.to_html(full_html=False, include_plotlyjs=True if params.embed_plotly else "cdn",
                       default_height="100vh", default_width="100%",
                       config=dict(displaylogo=False, scrollZoom=True, responsive=True,
-                                  toImageButtonOptions=dict(format="png", filename=path.stem, scale=2)))
+                                  toImageButtonOptions=dict(format="png", filename=path.stem, scale=2)),
+                      post_script=_ruler_post(fig))
     path.write_text(f"<!doctype html><html lang='pl'><head><meta charset='utf-8'><title>{title}</title>"
                     f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
                     f"<style>html,body{{margin:0;height:100%;overflow:hidden;background:{params.background}}}</style>"
-                    f"</head><body>{div}</body></html>", encoding="utf-8")
+                    f"{_ruler_head()}</head><body>{div}</body></html>", encoding="utf-8")
     if open_browser:
         webbrowser.open(path.resolve().as_uri())
     return path

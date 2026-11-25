@@ -11,7 +11,8 @@
 //   computed    - {klucz pary: {result, params}} - wyniki przeliczone na tej stronie,
 //   geometry    - {klucz powierzchni: siatki} - pobierane raz,
 //   current     - indeks pokazanej pary w `pairs`,
-//   busy        - trwa zapytanie POST /api/match, pending - ostatnie żądanie czekające na swoją kolej.
+//   busy        - trwa zapytanie POST /api/match, pending - ostatnie żądanie czekające na swoją kolej,
+//   ruler       - linijka w widoku 3D (src/web/ruler.js; przycisk "📏 Linijka" albo klawisz L).
 // Zmiana suwaka przelicza TYLKO pokazaną parę. Gdy zmieniło się któreś z ustawień
 // szukania (SEARCH), para jest dopasowywana od nowa; gdy tylko ustawienia oceny -
 // oceniane jest obecne ustawienie (szybko). Zapytania nie nakładają się: w trakcie
@@ -56,7 +57,7 @@ const ALL = SLIDERS.map((s) => s.key);                                          
 /** Element strony o danym id. */
 const $ = (id) => document.getElementById(id);
 const state = { pairs: [], base: {}, params: {}, computed: {}, geometry: {}, current: 0,
-                busy: false, pending: null };
+                busy: false, pending: null, ruler: null };
 
 // ---------- pomocnicze ----------
 
@@ -310,11 +311,14 @@ async function draw() {
   traces.push(meshTrace(ga.pos, ga.idx, T, COLORS.a, "A: " + ga.label));
   if (ga.sidx.length) traces.push(meshTrace(ga.spos, ga.sidx, T, COLORS.surf_a, ga.name));
   const axis = { visible: false };
-  Plotly.react("plot", traces, {
+  await Plotly.react("plot", traces, {
     paper_bgcolor: "#f4f6f8", margin: { l: 0, r: 0, t: 0, b: 0 },
     scene: { xaxis: axis, yaxis: axis, zaxis: axis, aspectmode: "data" },
     uirevision: pairKey(p),                           // kamera zostaje przy przeliczaniu, zmienia się z parą
   }, { displaylogo: false, scrollZoom: true, responsive: true });
+  // linijka (src/web/ruler.js): po każdym przerysowaniu pomiary znikają - kość A mogła się przesunąć
+  if (!state.ruler) state.ruler = attachRuler($("plot"), { place: "right" });
+  else state.ruler.clear();
 }
 
 // ---------- wynik ----------

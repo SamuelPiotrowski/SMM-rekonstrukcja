@@ -164,6 +164,8 @@ Za pierwszym razem narzędzie potrzebuje internetu (pobiera bibliotekę three.js
 
 Wszystkie kości ułożone płasko „na stole”, ponumerowane, z oznaczonymi powierzchniami styku. Lista „Wszystkie kości” przybliża wybraną kość, przyciski: widok 3D / z góry / z boku, powierzchnie styku pokaż / ukryj, legenda ukrywa kości, najechanie myszą pokazuje szczegóły (skany, pole, wymiary, pola i średnice powierzchni styku).
 
+**Linijka** (przycisk „📏 Linijka” na dole albo klawisz `L`): dwa kliknięcia w kość = odległość w mm (odcinek z podpisem na scenie i lista pomiarów). Obracanie myszą nie stawia punktu, `Esc` anuluje zaczęty odcinek, „Cofnij” / „Wyczyść” usuwa pomiary. Punkt przyciąga się do najbliższego wierzchołka pokazanej (uproszczonej) siatki - dla dokładniejszego pomiaru pokaż mniej kości (`show_bones.py 3`) albo zwiększ `triangles_total`. Linijka jest też w `merging.html`, `matching.html` i na stronie z suwakami (`tune_matching.py`).
+
 ```powershell
 python scripts/show_bones.py                    # kolory skanera
 python scripts/show_bones.py --colors fragment  # każda kość w innym kolorze
@@ -244,6 +246,8 @@ python scripts/tune_matching.py --html   # statyczna strona out/3d/<zestaw>/matc
 **Suwaki** (domyślnie): lokalna strona w przeglądarce (jak narzędzie do oznaczania, działa bez internetu): lista par z `matching.json`, para w 3D i suwaki ustawień z sekcji `matching`. Po puszczeniu suwaka przeliczana jest **tylko pokazana para**:
 - suwaki „Szukanie ustawienia” (odstęp punktów, FPFH, RANSAC, ICP) - dopasowanie od nowa (~2-3 s przy 1 mln iteracji × 2 próby),
 - suwaki „Ocena” (styk, kolizja) - tylko nowa ocena obecnego ustawienia (ułamek sekundy).
+
+W widoku 3D jest **linijka** (prawy dolny róg albo klawisz `L`, jak w `show_bones.py`) - np. do zmierzenia szczeliny między kośćmi; pomiary znikają po przeliczeniu albo zmianie pary.
 
 Lista par pokazuje stary → nowy wynik, „Przelicz od nowa” powtarza losowy RANSAC, „Przywróć ustawienia” wraca do `matching.json`. Nic nie jest zapisywane - zmienione ustawienia strona wypisuje gotowe do wklejenia w `settings.json`; potem `match_surfaces.py` przelicza wszystkie pary. Port: `settings.json` → `matching` → `port` (8766).
 
