@@ -167,6 +167,37 @@
   },
 
   // -----------------
+  // Syntetyczne kości pocięte na fragmenty - scripts/make_synthetic.py, src/synthetic_bones.py
+  // Tworzy osobny zestaw (scanned_bones/<nazwa>/) z prawdą: które fragmenty pasują, gdzie są przełomy.
+  // [od, do] = losowane osobno dla każdej kości. Długości w mm.
+  // -----------------
+  "synthetic": {
+    "n_bones": 6,               // ile kości
+    "fragments": [2, 4],        // ile fragmentów na kość
+    "length_mm": [50, 90],      // długość kości
+    "radius_mm": [4, 7],        // promień trzonu
+    "flare": 0.35,              // poszerzenie nasad na końcach (0.35 = o 35%)
+    "ellipticity": 0.15,        // spłaszczenie przekroju (0 = okrągły)
+    "bend_mm": 2.0,             // wygięcie osi kości
+    "bump_mm": 0.25,            // nierówności kory (RMS)
+    "tilt_deg": 35,             // największe pochylenie przełomu (0 = cięcie prostopadłe do osi)
+    "relief_mm": 1.2,           // duże nierówności przełomu (RMS, fale 3-10 mm) - im więcej, tym łatwiej dopasować
+    "rough_mm": 0.12,           // drobna szorstkość przełomu (RMS, fale 0.8-2 mm)
+    "edge_mm": 0.3,             // długość krawędzi siatki (gęstość skanu)
+    "scan_noise_mm": 0.02,      // szum skanera
+    "holes": 0,                 // dziury w korze na fragment (miejsca niewidoczne dla skanera)
+    "hole_mm": [1.5, 3.0],      // promień dziury
+    "colors": true,             // kolory: kora jasna, przełom ciemniejszy (false = bez kolorów)
+    "chip_mm": [2, 4],          // grubość płaskiego odłamka (cięcie "chip")
+    // Ręczny układ cięć zamiast losowego: lista na każdą kość, cięcia od dołu do góry -
+    // "fracture" = zwykły przełom, "chip" = płaski odłamek między dwoma bliskimi przełomami.
+    // Np. [["fracture", "chip"], ["fracture"]] = 2 kości (4 i 2 części). [] = losowo wg n_bones / fragments.
+    // Gotowe układy: python scripts/make_synthetic.py --preset chip
+    "layout": [],
+    "seed": 0                   // ziarno losowania: to samo = ten sam zestaw
+  },
+
+  // -----------------
   // Wizualizacje 3D (pliki HTML w przeglądarce) - src/visualization_3d.py
   // -----------------
   "visualization_3d": {

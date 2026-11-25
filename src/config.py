@@ -27,7 +27,7 @@ Co udostępnia:
     use_dataset(), list_datasets(), dataset_dirs(), add_dataset_argument()
                                     - wybór i lista zestawów,
     scan_params(), merge_params(), feature_params(), contact_params(),
-    matching_params(), surface_feature_params(), view3d_params()
+    matching_params(), surface_feature_params(), view3d_params(), synthetic_params()
                                     - obiekty parametrów modułów (po jednym na sekcję),
     DATASET_SETTINGS                - ustawienia bieżącego zestawu (jego settings.json, {} = brak),
     OPEN_BROWSER, CONTACT_TOOL_PORT, MATCH_TOOL_PORT
@@ -333,6 +333,19 @@ def surface_feature_params():
     """
     from surface_features import SurfaceFeatureParams
     return _section("surface_features", SurfaceFeatureParams)
+
+
+def synthetic_params():
+    """Generator syntetycznych kości (scripts/make_synthetic.py): sekcja "synthetic" settings.json.
+
+    Returns:
+        synthetic_bones.SyntheticParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
+    """
+    from synthetic_bones import SyntheticParams
+    return _section("synthetic", SyntheticParams)
 
 
 def view3d_params():

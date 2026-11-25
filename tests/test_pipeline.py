@@ -355,6 +355,37 @@ def main() -> None:
         check(len(split) == 4 and area > 0.2 * area_a,
               f"łączenie wyłączone (inny środek kości): oznaczenia przeniesione przez wspólny skan ({area:.0f} mm²)")
 
+        print("Syntetyczne kości (make_synthetic.py)")
+        import synthetic_bones as sb
+        from scipy.spatial import cKDTree
+        synth =sb.generate(sb.SyntheticParams(n_bones=2, fragments=(3, 3), edge_mm=0.5, seed=1))
+        meshes = [trimesh.Trimesh(f.vertices, f.faces, process=False) for f in synth.fragments]
+        check(len(synth.fragments) == 6 and all(m.is_watertight and m.is_winding_consistent and m.volume > 0
+                                                for m in meshes), "6 fragmentów, siatki szczelne, normalne na zewnątrz")
+        syn_in, syn_out, syn_ct = tmp / "syn" / "skany", tmp / "syn" / "out", tmp / "syn" / "contacts"
+        gt = sb.write_dataset(synth, syn_in, syn_ct)
+        check(len(gt["pairs"]) == 4, f"4 pary (po 2 przełomy na kość): {len(gt['pairs'])}")
+        saved_in, saved_settings = config.DATA_IN, config.DATASET_SETTINGS
+        config.DATA_IN, config.DATASET_SETTINGS = syn_in, config.load_settings(syn_in / sb.DATASET_SETTINGS)
+        check(not config.merge_params().enabled, "settings.json zestawu wyłącza łączenie skanów")
+        config.DATA_IN, config.DATASET_SETTINGS = saved_in, saved_settings
+        syn_bones = {b.id: b for b in prepare_all(syn_in, syn_out, contacts_dir=syn_ct, scan=ScanParams(),
+                                                  merge=MergeParams(enabled=False), features=FeatureParams(),
+                                                  verbose=False)}
+        p = gt["pairs"][0]
+        a, b = syn_bones[p["a"]], syn_bones[p["b"]]
+        la = ct.load_contacts(a.id, a.mesh, root=syn_ct, frames=ct.scan_frames(a)).labels
+        lb = ct.load_contacts(b.id, b.mesh, root=syn_ct, frames=ct.scan_frames(b)).labels
+        T = sb.true_transform(gt, a, b)
+        pb = np.asarray(b.mesh.vertices)[lb == p["surface_b"]] @ T[:3, :3].T + T[:3, 3]
+        d = cKDTree(np.asarray(a.mesh.vertices)[la == p["surface_a"]]).query(pb)[0]
+        check(np.median(d) < 0.3, f"prawdziwe przełomy na przygotowanych kościach nakładają się "
+                                  f"(true_transform, mediana {np.median(d):.2f} mm)")
+        chip = sb.generate(replace(sb.SyntheticParams(edge_mm=0.5), **sb.PRESETS["chip"]))
+        thin = [f for f in chip.fragments if f.index == 2][0]
+        tm = trimesh.Trimesh(thin.vertices, thin.faces, process=False)
+        check(len(chip.fragments) == 4 and len(thin.surfaces) == 2 and tm.is_watertight and tm.volume > 0,
+              f"preset chip: 4 części, płaski odłamek szczelny, 2 przełomy ({tm.volume:.0f} mm³)")
     print(f"Wszystkie testy OK ({time.perf_counter() - start:.0f} s)")
 
 
