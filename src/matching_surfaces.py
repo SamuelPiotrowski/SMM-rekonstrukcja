@@ -47,6 +47,7 @@ W kodzie:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -436,6 +437,27 @@ def match_all(surfaces: list[Surface], p: SurfaceMatchParams, progress=print) ->
             progress(f"  {n}/{len(pairs)} par ({time.perf_counter() - start:.0f} s)")
     results.sort(key=lambda r: -r["score"])
     return results
+
+
+def json_safe(obj):
+    """Kopia `obj` z NaN / nieskończonościami zamienionymi na None (w JSON: null).
+
+    Python zapisuje float("nan") jako NaN, a to nie jest poprawny JSON - przeglądarka
+    (JSON.parse) odrzuca cały plik. NaN ma np. rmse_mm pary bez styku.
+
+    Args:
+        obj: słownik / lista / liczba / tekst (zagnieżdżone dowolnie).
+
+    Returns:
+        Ten sam obiekt z niekończonymi liczbami zamienionymi na None.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
 
 
 def report(surfaces: list[Surface], results: list[dict], p: SurfaceMatchParams,

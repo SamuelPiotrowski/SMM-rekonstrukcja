@@ -685,7 +685,7 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
             f"<span style='color:{MATCH_COLORS['surf_b']}'>■</span> B: {r['b_name']} ({r['b_area_mm2']:.0f} mm²"
             f"{', ręczna' if r.get('b_manual', True) else ', z algorytmu'})",
             f"styk: {r['contact_mm2']:.0f} mm²  (A pokryte w {r['cover_a']:.0%}, B w {r['cover_b']:.0%})",
-            f"RMSE w styku: {r['rmse_mm']:.2f} mm",
+            f"RMSE w styku: {r['rmse_mm']:.2f} mm" if r.get("rmse_mm") is not None else "RMSE w styku: –",
             f"kolizja kości: {r['collision_mm2']:.0f} mm²",
             "", "<i>wynik = styk - kolizja</i>"]))
 

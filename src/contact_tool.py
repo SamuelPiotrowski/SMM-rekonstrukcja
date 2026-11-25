@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 import threading
 import urllib.request
 import webbrowser
@@ -43,6 +44,23 @@ import contacts as ct
 from bones import Bone, load_bones
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+
+
+class LocalServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer, który NIE dzieli portu z innym, już działającym serwerem.
+
+    Zwykły HTTPServer ustawia SO_REUSEADDR, a na Windows to pozwala drugiemu procesowi
+    zająć ten sam port bez błędu - przeglądarka trafia wtedy do STAREGO serwera (np. podgląd
+    innego zestawu, uruchomiony wcześniej w innym oknie). Tu port zajęty = OSError przy starcie.
+    """
+
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        """Na Windows rezerwuje port na wyłączność (SO_EXCLUSIVEADDRUSE), potem zwykłe bind."""
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 STATIC = {"/": ("contact_tool.html", "text/html; charset=utf-8"),
           "/contact_tool.js": ("contact_tool.js", "text/javascript; charset=utf-8"),
           "/contact_tool.css": ("contact_tool.css", "text/css; charset=utf-8")}
@@ -455,7 +473,7 @@ def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | No
         raise SystemExit(config.no_bones_message())
     cache_dir = config.OUT_ROOT / ".cache" / "web"      # wspólny dla wszystkich zestawów
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state, cache_dir))
+        server = LocalServer(("127.0.0.1", port), make_handler(state, cache_dir))
     except OSError:
         raise SystemExit(f"Port {port} jest zajęty - może narzędzie już działa w innym oknie? "
                          f"Inny port: python scripts/mark_contacts.py --port {port + 1}") from None

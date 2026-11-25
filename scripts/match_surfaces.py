@@ -124,7 +124,7 @@ def main() -> None:
 
     path = config.DATA_OUT / "matching.json"
     rep = ms.report(surfaces, results, params, contact_params)
-    path.write_text(json.dumps(rep, indent=1, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(ms.json_safe(rep), indent=1, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     print(f"Zapisano {path}")
     print("Obejrzyj: python scripts/tune_matching.py (suwaki) albo python scripts/tune_matching.py --html (plik)")
 

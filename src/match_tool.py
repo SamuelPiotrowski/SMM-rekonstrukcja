@@ -40,7 +40,7 @@ import time
 import webbrowser
 from dataclasses import asdict, fields, replace
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -49,7 +49,7 @@ from scipy.spatial import cKDTree
 
 import matching_surfaces as ms
 from bones import Bone, load_bones
-from contact_tool import _b64
+from contact_tool import LocalServer, _b64
 from contacts import ContactParams, triangle_labels
 from visualization_3d import View3DParams, _surface_overlay, decimate, match_matrix_figure, matching_figure, write_page
 
@@ -283,10 +283,11 @@ def make_handler(state: MatchState):
             """Wysyła `data` jako JSON (UTF-8, polskie znaki bez escape).
 
             Args:
-                data:   obiekt do zapisania w JSON (słownik, lista, ...).
+                data:   obiekt do zapisania w JSON (słownik, lista, ...); NaN -> null (ms.json_safe).
                 status: kod HTTP (domyślnie 200).
             """
-            self._send(status, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json")
+            self._send(status, json.dumps(ms.json_safe(data), ensure_ascii=False, allow_nan=False).encode("utf-8"),
+                       "application/json")
 
         def _guard(self, fn):
             """Wywołuje fn() i zamienia wyjątki na odpowiedź JSON {"error": ...}.
@@ -427,7 +428,7 @@ def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | No
     port = port or config.MATCH_TOOL_PORT
     state = _load(out_dir)
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state))
+        server = LocalServer(("127.0.0.1", port), make_handler(state))
     except OSError:
         raise SystemExit(f"Port {port} jest zajęty - może podgląd już działa w innym oknie? "
                          f"Inny port: python scripts/tune_matching.py --port {port + 1}") from None
