@@ -1,5 +1,9 @@
 """
-Dopasowanie fragmentów kości po POWIERZCHNIACH STYKU (przełomach): RANSAC + ICP na samych przełomach.
+KROK 5: dopasowanie fragmentów kości po POWIERZCHNIACH STYKU (przełomach): RANSAC + ICP na samych przełomach.
+
+Tylko liczy i zapisuje wynik (out/3d/matching.json). Oglądanie - jak show_bones.py dla prepare_data.py:
+    python scripts/tune_matching.py          # podgląd z suwakami ustawień
+    python scripts/tune_matching.py --html   # statyczna strona out/3d/matching.html
 
 SKĄD DANE - trzy tryby:
     manual (domyślny) - tylko RĘCZNIE oznaczone powierzchnie z contacts/<id kości>.json
@@ -45,15 +49,9 @@ Użycie (z głównego folderu projektu, po scripts/prepare_data.py i mark_contac
     python scripts/match_surfaces.py                      # wszystkie kości, tryb z settings.json
     python scripts/match_surfaces.py first_test 3         # tylko wybrane kości (numer albo fragment nazwy)
     python scripts/match_surfaces.py --source manual-auto # jednorazowo inny tryb
-    python scripts/match_surfaces.py --no-open            # bez otwierania przeglądarki
 
-Wyniki:
-    out/3d/matching.html  - najlepsze pary w 3D (kość A ustawiona na kości B, lista wybiera parę)
-                            + macierz wyników wszystkich par
-    out/3d/matching.json  - wszystkie pary: wynik, styk, kolizja, RMSE, macierz przekształcenia T
-                            (4x4, układ kości A -> układ kości B, jak w out/3d/bones/<id>/mesh.ply),
-                            użyte ustawienia
-Podgląd z suwakami ustawień (zmiana przelicza jedną pokazaną parę): python scripts/tune_matching.py
+Wynik: out/3d/matching.json - wszystkie pary: wynik, styk, kolizja, RMSE, macierz przekształcenia T
+       (4x4, układ kości A -> układ kości B, jak w out/3d/bones/<id>/mesh.ply), użyte ustawienia.
 Kod: src/matching_surfaces.py.
 """
 
@@ -71,19 +69,19 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # ... i w komunikata
 import config  # noqa: E402
 import matching_surfaces as ms  # noqa: E402
 from bones import load_bones, select_bones  # noqa: E402
-from visualization_3d import match_matrix_figure, matching_figure, write_page  # noqa: E402
-
-SOURCE_NAMES = {"manual": "tylko ręczne", "auto": "tylko z algorytmu",
-                "manual-auto": "ręczne, a gdy brak - z algorytmu"}
 
 
 def main() -> None:
-    """Wybiera powierzchnie styku, dopasowuje każdą parę, wypisuje najlepsze i zapisuje matching.json / .html."""
+    """Wybiera powierzchnie styku, dopasowuje każdą parę, wypisuje najlepsze i zapisuje matching.json.
+
+    Raises:
+        SystemExit: zły "source" w settings.json, brak przygotowanych kości, wzorzec nie pasuje
+                    do żadnej kości albo mniej niż 2 kości mają powierzchnie styku.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--source", choices=ms.SOURCES, default=None,
                         help="skąd powierzchnie styku (domyślnie z settings.json, \"matching\" -> \"source\")")
-    parser.add_argument("--no-open", action="store_true", help="nie otwieraj przeglądarki")
     args = parser.parse_args()
 
     params = config.matching_params()
@@ -102,7 +100,7 @@ def main() -> None:
         raise SystemExit(str(e)) from None
 
     algo = f" (algorytm: {contact_params.method})" if params.source != "manual" else ""
-    print(f"Powierzchnie styku: {SOURCE_NAMES[params.source]}{algo}")
+    print(f"Powierzchnie styku: {ms.SOURCE_NAMES[params.source]}{algo}")
     start = time.perf_counter()
     surfaces, info = ms.extract_surfaces(bones, params, contact_params)
     for b in bones:
@@ -122,26 +120,11 @@ def main() -> None:
         print(f"  {k:2d}. {r['score']:6.0f}  {r['a_name']}  <->  {r['b_name']}   "
               f"styk {r['contact_mm2']:.0f}, kolizja {r['collision_mm2']:.0f}, RMSE {r['rmse_mm']:.2f} mm")
 
-    out = config.DATA_OUT
+    path = config.DATA_OUT / "matching.json"
     rep = ms.report(surfaces, results, params, contact_params)
-    (out / "matching.json").write_text(json.dumps(rep, indent=1, ensure_ascii=False), encoding="utf-8")
-    view = config.view3d_params()
-    by_id = {s.bone.id: s.bone for s in surfaces}
-    contacts = {s.bone.id: s.contacts for s in surfaces}
-    page = write_page(
-        out / "matching.html", "Dopasowanie powierzchni styku",
-        f"Powierzchnie styku: {SOURCE_NAMES[params.source]}{algo}. Każda dopasowana (RANSAC + ICP) "
-        "do każdej powierzchni innej kości, twarzą w twarz. Wynik = pole styku (powierzchnie bliżej niż "
-        f"{params.tolerance_mm:g} mm, normalne przeciwne) minus pole, na którym kości wchodzą w siebie.",
-        [("Najlepsze pary", "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę. "
-          "Suwaki ustawień z przeliczaniem jednej pary: python scripts/tune_matching.py",
-          matching_figure(results, by_id, contacts, view, params.max_shown)),
-         ("Wszystkie pary", "Wynik każdej pary powierzchni [mm²]; puste pola = ta sama kość, "
-          "„(algorytm)” = powierzchnia z algorytmu wykrywania.",
-          match_matrix_figure(rep, view))],
-        view, open_browser=config.OPEN_BROWSER and not args.no_open)
-    print(f"Zapisano {out / 'matching.json'} i {page}")
-
+    path.write_text(json.dumps(rep, indent=1, ensure_ascii=False), encoding="utf-8")
+    print(f"Zapisano {path}")
+    print("Obejrzyj: python scripts/tune_matching.py (suwaki) albo python scripts/tune_matching.py --html (plik)")
 
 if __name__ == "__main__":
     main()

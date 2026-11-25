@@ -1,7 +1,13 @@
 """
-Podgląd dopasowania powierzchni styku z suwakami ustawień - lokalna strona w przeglądarce.
+Podgląd wyników dopasowania (out/3d/matching.json) - jak show_bones dla prepare_data.
 
-Uruchamia mały serwer HTTP (tylko na tym komputerze, 127.0.0.1) i otwiera stronę
+scripts/match_surfaces.py liczy i zapisuje matching.json, a ten moduł go pokazuje:
+    - write_html(): statyczna strona out/3d/matching.html (najlepsze pary w 3D + macierz
+      wyników wszystkich par) - jeden plik, można go komuś wysłać,
+    - serve():      strona z suwakami ustawień (opis niżej).
+Oba sprawdzają, czy matching.json jest aktualny (MatchState.warnings).
+
+Strona z suwakami: uruchamia mały serwer HTTP (tylko na tym komputerze, 127.0.0.1) i otwiera stronę
 src/web/match_tool.html. Strona pokazuje pary z out/3d/matching.json (wynik
 scripts/match_surfaces.py) w 3D: kość A ustawiona na kości B. Suwaki zmieniają
 ustawienia dopasowania, a po każdej zmianie serwer przelicza TYLKO pokazaną parę:
@@ -12,11 +18,12 @@ ustawienia dopasowania, a po każdej zmianie serwer przelicza TYLKO pokazaną pa
 Nic nie jest zapisywane - matching.json zostaje bez zmian. Strona pokazuje zmienione
 ustawienia gotowe do wklejenia w settings.json.
 
-    from match_tool import serve
+    from match_tool import serve, write_html
+    write_html()                  # out/3d/matching.html
     serve()                       # Ctrl+C w konsoli kończy
 
 API (używa go strona):
-    GET  /api/pairs               pary z matching.json + ustawienia         (MatchState.summary)
+    GET  /api/pairs               pary z matching.json + ustawienia + ostrzeżenia (MatchState.summary)
     GET  /api/geometry?key=<k>    siatka kości + nakładka powierzchni k     (MatchState.geometry)
                                   (k = "<id kości>#<numer powierzchni>")
     POST /api/match               przeliczenie pary                         (MatchState.match)
@@ -44,7 +51,7 @@ import matching_surfaces as ms
 from bones import Bone, load_bones
 from contact_tool import _b64
 from contacts import ContactParams, triangle_labels
-from visualization_3d import View3DParams, _surface_overlay, decimate
+from visualization_3d import View3DParams, _surface_overlay, decimate, match_matrix_figure, matching_figure, write_page
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STATIC = {"/": ("match_tool.html", "text/html; charset=utf-8"),
@@ -96,9 +103,17 @@ class MatchState:
             self.contacts[bid] = c
         self._surfaces: dict[tuple[str, float], ms.Surface] = {}
         self._geometry: dict[str, dict] = {}
+        self._settings: ms.SurfaceMatchParams | None = None   # ustawia _load() - do warnings()
 
     def surface(self, key: str, sample_mm: float) -> ms.Surface:
-        """Powierzchnia "<id kości>#<numer>" próbkowana co sample_mm (liczona raz dla każdej wartości).
+        """Powierzchnia styku próbkowana co `sample_mm` (liczona raz dla każdej wartości).
+
+        Args:
+            key:       klucz "<id kości>#<numer powierzchni>" (jak w matching.json).
+            sample_mm: odstęp punktów powierzchni [mm] (ustawienie "sample_mm").
+
+        Returns:
+            Powierzchnia z matching_surfaces.make_surface (z pamięci, jeśli już liczona).
 
         Raises:
             KeyError: nieznana kość albo powierzchnia (np. oznaczenia zmieniono po matching.json).
@@ -124,18 +139,48 @@ class MatchState:
             {"pairs": pary z matching.json, "surfaces": opisy powierzchni,
              "params": ustawienia z matching.json (startowe położenie suwaków)}.
         """
-        return {"pairs": self.report["pairs"], "surfaces": self.report["surfaces"], "params": asdict(self.params)}
+        return {"pairs": self.report["pairs"], "surfaces": self.report["surfaces"], "params": asdict(self.params),
+                "warnings": self.warnings(self._settings)}
+
+    def warnings(self, settings: ms.SurfaceMatchParams | None = None) -> list[str]:
+        """Czy matching.json jest aktualny: ustawienia z settings.json i obecne oznaczenia.
+
+        Args:
+            settings: ustawienia z settings.json (config.matching_params()); None = nie porównuj.
+
+        Returns:
+            Opisy różnic (pusta lista = aktualny). Każdy kończy się podpowiedzią, co uruchomić.
+        """
+        out = []
+        if settings is not None:
+            now, then = asdict(settings), asdict(self.params)
+            diff = [f"{k}: {then[k]} -> {now[k]}" for k in now if now[k] != then.get(k)]
+            if diff:
+                out.append("settings.json (sekcja \"matching\") różni się od ustawień, z którymi liczono "
+                           f"matching.json ({', '.join(diff)}) - przelicz: python scripts/match_surfaces.py")
+        gone = [s["key"] for s in self.report["surfaces"]
+                if int(s["surface"]) not in set(np.unique(self.contacts[s["bone"]].labels).tolist())]
+        if gone:
+            out.append(f"oznaczenia zmieniły się po matching.json, nie ma już powierzchni: {', '.join(gone)} "
+                       "- przelicz: python scripts/match_surfaces.py")
+        return out
 
     def geometry(self, key: str) -> dict:
         """GET /api/geometry?key=...: uproszczona siatka kości i nakładka powierzchni styku.
 
         Wszystko w układzie kości (strona sama przenosi kość A macierzą T). Nakładka jest
-        lekko odsunięta wzdłuż normalnych, żeby nie migotała na siatce.
+        lekko odsunięta wzdłuż normalnych, żeby nie migotała na siatce. Wynik jest pamiętany.
+
+        Args:
+            key: klucz "<id kości>#<numer powierzchni>".
 
         Returns:
             {"key", "label", "name", "positions": float32 (V, 3), "indices": uint32 (T, 3),
              "surf_positions", "surf_indices" - nakładka (puste, gdy po uproszczeniu nic nie zostało)}
             - tablice jako base64.
+
+        Raises:
+            KeyError: nieznana kość.
         """
         if key not in self._geometry:
             bid, sid = key.rsplit("#", 1)
@@ -165,10 +210,12 @@ class MatchState:
 
         Returns:
             Wynik jak w matching.json (score, contact_mm2, collision_mm2, cover_a, cover_b,
-            rmse_mm, T, seed) + "seconds" (czas liczenia) i "mode".
+            rmse_mm, T, seed) + "seconds" (czas liczenia) i "mode". Wartości nieskończone
+            (np. rmse_mm bez dopasowania) są zamieniane na None, bo JSON ich nie obsługuje.
 
         Raises:
             ValueError: nieznane ustawienie albo tryb.
+            KeyError:   nieznana kość albo powierzchnia, brak "a" / "b" (albo "T" w trybie "score").
         """
         values = body.get("params", {})
         unknown = sorted(set(values) - PARAM_NAMES)
@@ -193,17 +240,34 @@ class MatchState:
 
 
 def make_handler(state: MatchState):
-    """Tworzy klasę obsługi zapytań HTTP, która widzi `state` (jak w contact_tool.make_handler)."""
+    """Tworzy klasę obsługi zapytań HTTP, która widzi `state` (jak w contact_tool.make_handler).
+
+    plotly.js (~4 MB) jest brany z zainstalowanego pakietu plotly przy pierwszym zapytaniu
+    i pamiętany - strona działa bez internetu.
+
+    Args:
+        state: stan serwera, wspólny dla wszystkich zapytań.
+
+    Returns:
+        Klasa (podklasa BaseHTTPRequestHandler) do przekazania ThreadingHTTPServer.
+    """
     plotly_js: list[bytes] = []
 
     class Handler(BaseHTTPRequestHandler):
         """Routing: pliki strony, plotly.js i API /api/... Wyjątki -> JSON {"error": ...}."""
 
-        def log_message(self, fmt, *args):     # bez logu każdego zapytania w konsoli
+        def log_message(self, fmt, *args):
+            """Wyłącza log każdego zapytania w konsoli (nadpisuje BaseHTTPRequestHandler)."""
             pass
 
         def _send(self, status, body: bytes, ctype: str):
-            """Wysyła odpowiedź z treścią `body` typu `ctype` (bez cache przeglądarki)."""
+            """Wysyła odpowiedź z treścią `body` typu `ctype` (bez cache przeglądarki).
+
+            Args:
+                status: kod HTTP (HTTPStatus).
+                body:   treść odpowiedzi.
+                ctype:  nagłówek Content-Type, np. "application/json".
+            """
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -212,11 +276,25 @@ def make_handler(state: MatchState):
             self.wfile.write(body)
 
         def _json(self, data, status=HTTPStatus.OK):
-            """Wysyła `data` jako JSON (UTF-8, polskie znaki bez escape)."""
+            """Wysyła `data` jako JSON (UTF-8, polskie znaki bez escape).
+
+            Args:
+                data:   obiekt do zapisania w JSON (słownik, lista, ...).
+                status: kod HTTP (domyślnie 200).
+            """
             self._send(status, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json")
 
         def _guard(self, fn):
-            """Wywołuje fn(); KeyError -> 404, inne wyjątki -> 500 (serwer działa dalej)."""
+            """Wywołuje fn() i zamienia wyjątki na odpowiedź JSON {"error": ...}.
+
+            KeyError -> 404, inne wyjątki -> 500; serwer działa dalej, a błąd widać na stronie.
+
+            Args:
+                fn: funkcja bez argumentów, która sama wysyła odpowiedź.
+
+            Returns:
+                To, co zwróciła fn (albo wysłanie błędu) - wartość nie jest używana.
+            """
             try:
                 return fn()
             except KeyError as e:
@@ -225,10 +303,11 @@ def make_handler(state: MatchState):
                 return self._json({"error": f"{type(e).__name__}: {e}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
         def do_GET(self):
-            """Pliki strony, plotly.js, lista par i geometria powierzchni."""
+            """Pliki strony (STATIC), plotly.js, lista par i geometria powierzchni."""
             url = urlsplit(self.path)
 
             def handle():
+                """Wysyła odpowiedź dla url.path (wywoływana przez _guard)."""
                 if url.path in STATIC:
                     name, ctype = STATIC[url.path]
                     return self._send(HTTPStatus.OK, (WEB_DIR / name).read_bytes(), ctype)
@@ -246,8 +325,9 @@ def make_handler(state: MatchState):
             self._guard(handle)
 
         def do_POST(self):
-            """Przeliczenie pary: POST /api/match."""
+            """Przeliczenie pary: POST /api/match (treść: MatchState.match)."""
             def handle():
+                """Czyta treść JSON, przelicza parę i wysyła wynik (wywoływana przez _guard)."""
                 if urlsplit(self.path).path != "/api/match":
                     return self._json({"error": "nie ma takiej strony"}, HTTPStatus.NOT_FOUND)
                 n = int(self.headers.get("Content-Length", 0))
@@ -257,6 +337,74 @@ def make_handler(state: MatchState):
             self._guard(handle)
 
     return Handler
+
+
+def _load(out_dir: Path | None) -> MatchState:
+    """Wczytuje matching.json z kośćmi (ustawienia z settings.json) i wypisuje ostrzeżenia w konsoli.
+
+    Args:
+        out_dir: folder wyników z matching.json i kośćmi (None = DATA_OUT).
+
+    Returns:
+        Stan z ustawieniami z settings.json w `_settings` (do porównania w warnings()).
+    """
+    import config
+
+    print("Wczytywanie kości i powierzchni styku...")
+    state = MatchState(Path(out_dir or config.DATA_OUT), config.contact_params(), config.view3d_params())
+    state._settings = config.matching_params()
+    for w in state.warnings(state._settings):
+        print(f"UWAGA: {w}")
+    return state
+
+
+def matching_page(state: MatchState, path: Path, open_browser: bool = False) -> Path:
+    """Zapisuje statyczną stronę z wynikami `state`: najlepsze pary w 3D + macierz wyników.
+
+    Args:
+        state:        wczytany matching.json (MatchState).
+        path:         plik wynikowy, np. out/3d/matching.html.
+        open_browser: otwórz stronę po zapisie.
+
+    Returns:
+        Ścieżka zapisanej strony.
+    """
+    p, rep = state.params, state.report
+    algo = f" (algorytm: {rep['contact_params'].get('method')})" if p.source != "manual" else ""
+    return write_page(
+        path, "Dopasowanie powierzchni styku",
+        f"Powierzchnie styku: {ms.SOURCE_NAMES.get(p.source, p.source)}{algo}. Każda dopasowana (RANSAC + ICP) "
+        "do każdej powierzchni innej kości, twarzą w twarz. Wynik = pole styku (powierzchnie bliżej niż "
+        f"{p.tolerance_mm:g} mm, normalne przeciwne) minus pole, na którym kości wchodzą w siebie.",
+        [("Najlepsze pary", "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę. "
+          "Suwaki ustawień z przeliczaniem jednej pary: python scripts/tune_matching.py",
+          matching_figure(rep["pairs"], state.bones, state.contacts, state.view, p.max_shown)),
+         ("Wszystkie pary", "Wynik każdej pary powierzchni [mm²]; puste pola = ta sama kość, "
+          "„(algorytm)” = powierzchnia z algorytmu wykrywania.",
+          match_matrix_figure(rep, state.view))],
+        state.view, open_browser=open_browser)
+
+
+def write_html(out_dir: Path | None = None, open_browser: bool = True) -> Path:
+    """tune_matching.py --html: wczytuje matching.json i zapisuje out/3d/matching.html (matching_page).
+
+    Args:
+        out_dir:      folder wyników z matching.json i kośćmi (None = DATA_OUT); strona trafia tam.
+        open_browser: otwórz stronę po zapisie (o ile pozwala OPEN_BROWSER z settings.json).
+
+    Returns:
+        Ścieżka zapisanej strony.
+
+    Raises:
+        SystemExit: brak matching.json albo kości z niego (komunikat mówi, co zrobić).
+    """
+    import config
+
+    state = _load(out_dir)
+    page = matching_page(state, Path(out_dir or config.DATA_OUT) / "matching.html",
+                         open_browser=config.OPEN_BROWSER and open_browser)
+    print(f"Zapisano {page}")
+    return page
 
 
 def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | None = None) -> None:
@@ -273,8 +421,7 @@ def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | No
     import config
 
     port = port or config.MATCH_TOOL_PORT
-    print("Wczytywanie kości i powierzchni styku...")
-    state = MatchState(Path(out_dir or config.DATA_OUT), config.contact_params(), config.view3d_params())
+    state = _load(out_dir)
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state))
     except OSError:

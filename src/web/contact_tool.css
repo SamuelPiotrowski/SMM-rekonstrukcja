@@ -36,6 +36,12 @@ kbd {
 .bone-title b { color: var(--text); }
 .top-actions { display: flex; align-items: center; gap: 10px; }
 .dirty { font-size: 12px; color: #a86b16; background: #fdf1dc; padding: 4px 10px; border-radius: 99px; }
+.auto-badge { font-size: 12px; font-weight: 600; color: #5643c4; background: #eeeafd; padding: 4px 10px;
+  border-radius: 99px; white-space: nowrap; cursor: help; }
+.auto-note { font-size: 12px; line-height: 1.45; color: #3d3278; background: #f4f1fe; border: 1px solid #ddd5fb;
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
+.auto-note b { color: #5643c4; }
+.auto-note kbd { margin: 0 1px; }
 
 /* ---------- układ ---------- */
 .layout { display: grid; grid-template-columns: 270px 1fr 300px; height: calc(100% - 52px); }
@@ -60,6 +66,7 @@ kbd {
 .bone-list .name small { display: block; color: var(--muted); font-size: 11px; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 2px solid #b8c4cf; }
 .dot.done { background: var(--ok); border-color: var(--ok); }
+.dot.auto { background: #e4defc; border-color: #8f7ee6; }
 .legend-mini { display: flex; gap: 14px; padding: 10px 16px; font-size: 11px; color: var(--muted);
   border-top: 1px solid var(--line); }
 .legend-mini .dot { margin-right: 5px; vertical-align: -1px; }

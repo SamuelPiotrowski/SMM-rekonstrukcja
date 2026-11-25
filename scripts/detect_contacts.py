@@ -1,12 +1,14 @@
 """
 Automatyczne wykrywanie powierzchni styku (algorytm) + porównanie z ręcznymi oznaczeniami.
 
-Na razie jest tylko prosty algorytm bazowy "roughness" (szorstkość) - to punkt wyjścia
-do pisania lepszego. Nowy algorytm dodaje się w src/contacts.py dekoratorem @detector.
+Algorytmy (src/contacts.py, nowe dodaje się dekoratorem @detector):
+    roughness - bazowy: przełom = szorstka powierzchnia (słaby),
+    features  - szorstkość + rozrzut normalnych + gęstość siatki naraz, bez żadnych oznaczeń:
+                przełom = wyraźnie ponad typową wartość tej samej kości (lepszy od roughness).
 
 Użycie (z głównego folderu projektu, po scripts/prepare_data.py):
     python scripts/detect_contacts.py                      # wszystkie kości, algorytm z settings.json
-    python scripts/detect_contacts.py --method roughness   # wybrany algorytm
+    python scripts/detect_contacts.py --method features    # wybrany algorytm
     python scripts/detect_contacts.py 3 5                  # tylko kości nr 3 i 5
 
 Algorytm i jego ustawienia: settings.json, sekcja "contacts" ("method", "rough_threshold", ...).
@@ -30,7 +32,13 @@ from bones import load_bones, select_bones  # noqa: E402
 
 
 def main() -> None:
-    """Uruchamia algorytm na wybranych kościach, zapisuje wyniki i porównuje je z ręcznymi oznaczeniami."""
+    """Uruchamia algorytm na wybranych kościach, zapisuje wyniki i porównuje je z ręcznymi oznaczeniami.
+
+    Wyniki trafiają do contacts/auto/<id>.json (zawsze liczone od nowa, bez cache).
+
+    Raises:
+        SystemExit: brak przygotowanych kości albo wzorzec nie pasuje do żadnej kości.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--method", choices=list(ct.DETECTORS), default=None, help="algorytm")
@@ -51,7 +59,10 @@ def main() -> None:
     for b in bones:
         nr = all_bones.index(b) + 1
         start = time.perf_counter()
-        found = ct.detect_contacts(b, method, params)
+        try:
+            found = ct.detect_contacts(b, method, params)
+        except ValueError as e:         # np. zła nazwa cechy w "feature_keys"
+            raise SystemExit(str(e)) from None
         ct.save_contacts(b.mesh, found, ct.contacts_path(b.id, "auto"))
         stats = ct.surface_stats(b.mesh, found.labels)
         areas = ", ".join(f"{s['area_mm2']:.0f}" for s in stats) or "-"

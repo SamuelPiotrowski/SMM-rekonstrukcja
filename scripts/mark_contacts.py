@@ -5,6 +5,10 @@ Otwiera stronę z kością w 3D: pędzel, gumka i "różdżka" (zaznacza obszar 
 krawędzi), kilka powierzchni na kość, cofanie (Ctrl+Z), zapis (Ctrl+S).
 Oznaczenia trafiają do contacts/<id_kości>.json (format: src/contacts.py).
 
+Kość bez ręcznych oznaczeń otwiera się od razu z USTAWIENIEM AUTOMATYCZNYM (wynik algorytmu
+z sekcji "contacts" w settings.json) - wystarczy je poprawić i zapisać (Ctrl+S). Strona pisze
+wtedy "ustawienie automatyczne"; niezapisane nie staje się ręcznym oznaczeniem.
+
 Użycie (z głównego folderu projektu, po scripts/prepare_data.py):
     python scripts/mark_contacts.py
     python scripts/mark_contacts.py --port 8800      # inny port

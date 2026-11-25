@@ -27,7 +27,7 @@
     // Oderwany kawałek skanu jest szumem, jeśli jest mniejszy niż ten ułamek największego
     // albo dalej od niego niż max_component_gap_mm - chyba że potwierdzają go inne skany tej kości.
     "min_component_area_ratio": 0.05,
-    "max_component_gap_mm": 3.0
+    "max_component_gap_mm": 10
   },
 
   // -----------------
@@ -35,7 +35,7 @@
   // Po zmianie uruchom ponownie prepare_data.py (wyniki par są w cache, więc szybko).
   // -----------------
   "merging": {
-    "enabled": true,           // false = każdy skan to osobna kość
+    "enabled": false,           // false = każdy skan to osobna kość
 
     // Dwa skany = ta sama kość, gdy co najmniej taka część mniejszego leży na drugim
     // (bliżej niż tolerance_mm, normalne w tę samą stronę). Różne fragmenty: ~0.05-0.16,
@@ -51,7 +51,7 @@
     "fuse_method": "union",
     "poisson_depth": 9,
 
-    "sample_mm": 0.25,         // odstęp punktów do porównywania skanów [mm]
+    "sample_mm": 0.25,         // odstęp punktów do porównywania skanów (dokładność chmury) [mm]
     "coarse_voxel_mm": 1.0,    // rozdzielczość zgrubnej rejestracji (FPFH + RANSAC) [mm]
     "ransac_seeds": 3,         // prób zgrubnej rejestracji na parę (więcej = pewniej, wolniej)
     "ransac_iterations": 50000,
@@ -83,14 +83,24 @@
     "brush_mm": 2.0,            // startowy promień pędzla [mm]
     "wand_angle_deg": 25,       // startowa tolerancja kąta "różdżki" (zaznacza obszar do ostrej krawędzi)
 
-    // Algorytm wykrywania - używany przez detect_contacts.py, przycisk "Propozycja algorytmu"
-    // w narzędziu i dopasowanie w trybie "auto" / "manual-auto". Po zmianie któregokolwiek
+    // Algorytm wykrywania - używany przez detect_contacts.py, narzędzie (kość bez ręcznych oznaczeń
+    // startuje od jego wyniku = "ustawienie automatyczne"; przycisk "Propozycja algorytmu")
+    // i dopasowanie w trybie "auto" / "manual-auto". Po zmianie któregokolwiek
     // ustawienia poniżej dopasowanie samo policzy wyniki algorytmu od nowa.
-    "method": "roughness",      // nazwa algorytmu (@detector w src/contacts.py)
+    "method": "features",      // nazwa algorytmu (@detector w src/contacts.py): "roughness" albo "features"
+    "min_surface_mm2": 15.0,    // oba algorytmy: mniejsze wykryte obszary są pomijane [mm²]
+
     // "roughness" = algorytm bazowy: przełom to szorstka powierzchnia, kora kości gładka (słaby!)
     "roughness_radius_mm": 1.0, // promień sąsiedztwa do liczenia szorstkości [mm]
     "rough_threshold": 0.09,    // od tej szorstkości powierzchnia = przełom (kora ~0.04, gąbczasty przełom ~0.15)
-    "min_surface_mm2": 15.0     // mniejsze wykryte obszary są pomijane [mm²]
+
+    // "features" = kilka cech naraz, BEZ oznaczeń: przełom jest bardziej szorstki, ma większy rozrzut
+    // normalnych i gęstszą siatkę niż reszta TEJ SAMEJ kości (mediana kości = kora).
+    // Cechy i ich promienie: sekcja "surface_features"; opis cech: raporty/przelom_vs_kora.md.
+    "feature_keys": ["spread_2", "rough_1", "edge_mm"],  // rozrzut normalnych 2 mm, szorstkość 1 mm, krawędź siatki
+    "feature_threshold": 0.15,  // o ile ponad typową wartość tej kości (w odchyleniach) = przełom (wyżej = mniej, ale pewniej)
+    "feature_smooth_mm": 1.0,   // uśrednianie wyniku w tym promieniu przed progiem [mm] (0 = bez)
+    "feature_open_mm": 1.0      // otwarcie morfologiczne [mm]: rozcina wąskie mostki między obszarami (więcej = więcej kawałków)
   },
 
   // -----------------
@@ -105,11 +115,11 @@
     //                   albo nieaktualne - liczone i zapisywane; bazowy "roughness" jest słaby,
     //   "manual-auto" = ręczne, a dla kości bez ręcznych - z algorytmu.
     // Jednorazowo: python scripts/match_surfaces.py --source auto
-    "source": "manual",
+    "source": "manual-auto",
     "min_area_mm2": 20.0,       // mniejsze powierzchnie styku są pomijane [mm²]
 
     // Punkty i deskryptory
-    "sample_mm": 0.3,           // odstęp punktów powierzchni [mm]; mniej = dokładniej, wolniej
+    "sample_mm": 0.3,           // odstęp punktów powierzchni (do ICP) [mm]; mniej = dokładniej, wolniej
     "coarse_voxel_mm": 1.0,     // odstęp punktów do zgrubnego ustawienia (RANSAC) [mm]
     "fpfh_radius_mm": 4.0,      // promień deskryptora kształtu FPFH [mm]; ~ wielkość charakterystycznych nierówności przełomu
 
@@ -128,10 +138,20 @@
     "collision_mm": 1.0,        // KOLIZJA: punkt jednej kości głębiej niż to pod powierzchnią drugiej [mm]
     "collision_search_mm": 4.0, // ... szukane tylko w tej odległości od powierzchni drugiej kości [mm]
 
-    "max_shown": 15,            // ile najlepszych par pokazać w 3D (matching.html)
+    "max_shown": 15,            // ile najlepszych par pokazać w 3D (tune_matching.py --html -> matching.html)
 
     // Podgląd z suwakami (python scripts/tune_matching.py): zmiana suwaka przelicza wybraną parę
     "port": 8766                // port lokalnego serwera podglądu
+  },
+
+  // -----------------
+  // Porównanie cech przełomu i kory - scripts/compare_surfaces.py -> out/3d/surface_features.html
+  // Ręcznie oznaczone powierzchnie styku vs reszta kości (kora): szorstkość, kształt, kolor, ...
+  // -----------------
+  "surface_features": {
+    "radii_mm": [0.5, 1.0, 2.0],  // promienie liczenia szorstkości i rozrzutu normalnych [mm]
+    "boundary_margin_mm": 1.0,    // pomiń pas przy otwartym brzegu skanu (postrzępiony, to nie przełom) [mm]
+    "label_band_mm": 0.5          // pomiń pas po obu stronach granicy oznaczenia (niedokładność ręcznego) [mm]
   },
 
   // -----------------
@@ -140,6 +160,13 @@
   "visualization_3d": {
     "triangles_total": 240000,  // trójkątów w całym HTML, dzielone między kości (więcej = dokładniej, większy plik)
     "embed_plotly": true,       // true = działa bez internetu; false = mniejszy plik, wymaga internetu
-    "open_browser": true        // otwórz wynik w przeglądarce
+    "open_browser": true,       // otwórz wynik w przeglądarce
+
+    // Które powierzchnie styku pokazuje show_bones.py (tak jak "source" w sekcji "matching"):
+    //   "manual"      = ręczne (contacts/<id>.json),
+    //   "auto"        = z algorytmu (contacts/auto/; gdy brak albo nieaktualne - liczone i zapisywane),
+    //   "manual-auto" = ręczne, a dla kości bez ręcznych - z algorytmu.
+    // Jednorazowo: python scripts/show_bones.py --source auto   (albo krócej: --auto)
+    "source": "manual"
   }
 }

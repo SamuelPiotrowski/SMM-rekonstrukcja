@@ -58,7 +58,11 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
     start = time.perf_counter()
 
     def log(msg):
-        """Wypisuje komunikat z czasem od startu (tylko gdy verbose)."""
+        """Wypisuje komunikat z czasem od startu (tylko gdy verbose).
+
+        Args:
+            msg: tekst komunikatu.
+        """
         if verbose:
             print(f"[{time.perf_counter() - start:6.1f} s] {msg}", flush=True)
 

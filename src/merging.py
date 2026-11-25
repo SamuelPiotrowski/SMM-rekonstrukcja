@@ -86,6 +86,10 @@ class MergeParams:
         Zmiana któregoś z nich = pary liczone od nowa. Pozostałe ustawienia (min_overlap,
         min_support, fuse_method, groups, ...) działają już na gotowych wynikach par,
         więc ich zmiana nie wymaga ponownej rejestracji.
+
+        Returns:
+            Np. "s0.25-c1.0-t0.15-r3x50000" (sample_mm, coarse_voxel_mm, tolerance_mm,
+            ransac_seeds x ransac_iterations).
         """
         return (f"s{self.sample_mm}-c{self.coarse_voxel_mm}-t{self.tolerance_mm}"
                 f"-r{self.ransac_seeds}x{self.ransac_iterations}")
@@ -146,7 +150,11 @@ class PreparedScan:
         return self._cache[key]
 
     def tree(self) -> cKDTree:
-        """KD-drzewo punktów main_points (szukanie najbliższych sąsiadów) - liczone raz."""
+        """KD-drzewo punktów main_points (szukanie najbliższych sąsiadów) - liczone raz.
+
+        Returns:
+            cKDTree z sample.points[main_points] (indeksy jak w tej wybranej części).
+        """
         if "tree" not in self._cache:
             self._cache["tree"] = cKDTree(self.sample.points[self.main_points])
         return self._cache["tree"]
@@ -156,7 +164,13 @@ def file_checksum(path: Path) -> str:
     """Skrót zawartości pliku: SHA-1, pierwsze 16 znaków hex.
 
     Zmieniony plik skanu = inny skrót = jego pary są rejestrowane od nowa; zmiana samej
-    nazwy pliku albo folderu nie wymaga ponownego liczenia.
+    nazwy pliku albo folderu nie wymaga ponownego liczenia. Plik jest czytany po 1 MB.
+
+    Args:
+        path: plik skanu.
+
+    Returns:
+        16 znaków hex.
     """
     h = hashlib.sha1()
     with open(path, "rb") as f:
@@ -197,9 +211,16 @@ def prepare_scan(file: ScanFile, scan: ScanParams, merge: MergeParams) -> Prepar
 # -----------------
 
 def transform_points(T: np.ndarray, pts: np.ndarray) -> np.ndarray:
-    """Przekształca punkty (N, 3) macierzą 4x4 T (obrót + przesunięcie).
+    """Przekształca punkty macierzą 4x4 T (obrót + przesunięcie).
 
     Normalne przekształca się samym obrotem: normals @ T[:3, :3].T.
+
+    Args:
+        T:   macierz 4x4 przekształcenia sztywnego.
+        pts: (N, 3) punkty.
+
+    Returns:
+        (N, 3) nowe punkty (`pts` się nie zmienia).
     """
     return pts @ T[:3, :3].T + T[:3, 3]
 
@@ -361,9 +382,17 @@ def pairwise(scans: list[PreparedScan], p: MergeParams, cache_file: Path | None 
 
 
 def pair_T(pairs: dict, i: int, j: int) -> np.ndarray:
-    """Przekształcenie 4x4 z układu skanu i do układu skanu j (dowolna kolejność i, j).
+    """Przekształcenie z układu skanu i do układu skanu j (dowolna kolejność i, j).
 
-    Gdy w `pairs` jest tylko para (j, i), zwracana jest odwrotność jej przekształcenia.
+    Args:
+        pairs: wyniki pairwise {(i, j): wynik register_pair}.
+        i, j:  indeksy skanów.
+
+    Returns:
+        Macierz 4x4; gdy w `pairs` jest tylko para (j, i) - odwrotność jej przekształcenia.
+
+    Raises:
+        KeyError: nie ma ani pary (i, j), ani (j, i).
     """
     if (i, j) in pairs:
         return np.asarray(pairs[i, j]["T"])
@@ -371,7 +400,18 @@ def pair_T(pairs: dict, i: int, j: int) -> np.ndarray:
 
 
 def pair_overlap(pairs: dict, i: int, j: int) -> float:
-    """Nakładanie skanów i, j (wynik register_pair, niezależnie od kolejności)."""
+    """Nakładanie skanów i, j (niezależnie od kolejności).
+
+    Args:
+        pairs: wyniki pairwise {(i, j): wynik register_pair}.
+        i, j:  indeksy skanów.
+
+    Returns:
+        "overlap" z register_pair - większy z ułamków pokrycia, w [0, 1].
+
+    Raises:
+        KeyError: nie ma ani pary (i, j), ani (j, i).
+    """
     return pairs[(i, j) if (i, j) in pairs else (j, i)]["overlap"]
 
 
@@ -380,7 +420,15 @@ def pair_overlap(pairs: dict, i: int, j: int) -> float:
 # -----------------
 
 def _matches(scan: PreparedScan, pattern: str) -> bool:
-    """Czy `pattern` (bez wielkości liter) występuje w id, nazwie albo ścieżce skanu."""
+    """Czy wzorzec ręcznej grupy pasuje do skanu.
+
+    Args:
+        scan:    skan.
+        pattern: fragment tekstu z settings.json ("merging" -> "groups").
+
+    Returns:
+        True, gdy `pattern` (bez wielkości liter) występuje w id, nazwie albo ścieżce skanu.
+    """
     p = pattern.lower()
     return p in scan.file.id.lower() or p in scan.file.label.lower() or p in str(scan.file.path).lower()
 
@@ -427,7 +475,14 @@ def group_scans(scans: list[PreparedScan], pairs: dict, p: MergeParams) -> list[
     parent = list(range(n))
 
     def find(x):
-        """Korzeń grupy skanu x (union-find ze skracaniem ścieżek)."""
+        """Korzeń grupy skanu x (union-find ze skracaniem ścieżek).
+
+        Args:
+            x: indeks skanu.
+
+        Returns:
+            Indeks skanu-korzenia jego grupy (ten sam dla wszystkich skanów grupy).
+        """
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]

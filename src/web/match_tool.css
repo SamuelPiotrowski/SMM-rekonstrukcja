@@ -116,3 +116,4 @@ button:disabled { opacity: .5; cursor: default; }
   padding: 10px 16px; border-radius: 8px; font-size: 13px; max-width: 70vw; z-index: 10;
 }
 .toast.error { background: var(--danger); }
+.stale.warnings { margin: 0 12px 8px; white-space: pre-line; display: block; }

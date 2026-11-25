@@ -34,9 +34,10 @@ import trimesh  # noqa: E402
 
 import contacts as ct  # noqa: E402
 import matching_surfaces as ms  # noqa: E402
+import surface_features as sf  # noqa: E402
 from bones import FeatureParams, load_bones  # noqa: E402
 from data_parsing import ScanParams, find_scans  # noqa: E402
-from match_tool import MatchState  # noqa: E402
+from match_tool import MatchState, matching_page  # noqa: E402
 from merging import MergeParams  # noqa: E402
 from pipeline import prepare_all  # noqa: E402
 from visualization_3d import (View3DParams, bones_figure, match_matrix_figure, matching_figure,  # noqa: E402
@@ -49,6 +50,9 @@ def bumpy_sphere(seed: int, radius: float = 12.0) -> trimesh.Trimesh:
     Args:
         seed:   ziarno - inne ziarno = inny kształt (inny "fragment kości").
         radius: promień kuli przed wybrzuszeniami [mm] (30 wybrzuszeń i wgłębień, każde do ±2 mm).
+
+    Returns:
+        Zamknięta siatka trimesh (icosphere, ~82 tys. trójkątów), środek w (0, 0, 0).
     """
     rng = np.random.default_rng(seed)
     m = trimesh.creation.icosphere(subdivisions=6, radius=1.0)
@@ -68,6 +72,14 @@ def partial_scan(mesh: trimesh.Trimesh, view: np.ndarray, seed: int) -> trimesh.
     Zostają trójkąty po stronie `view` (trochę ponad połowę kuli), więc dwa skany z różnych
     stron częściowo się pokrywają - jak prawdziwe skany tego samego fragmentu.
     Potem losowy obrót i przesunięcie do ±30 mm (ziarno `seed`).
+
+    Args:
+        mesh: cały fragment (np. z bumpy_sphere), środek w (0, 0, 0).
+        view: kierunek "skanera" (nie musi być jednostkowy).
+        seed: ziarno losowego układu współrzędnych skanu.
+
+    Returns:
+        Nowa siatka (otwarta - z brzegiem); `mesh` się nie zmienia.
     """
     view = np.asarray(view, dtype=float) / np.linalg.norm(view)
     centers = mesh.triangles_center / np.linalg.norm(mesh.triangles_center, axis=1, keepdims=True)
@@ -82,7 +94,13 @@ def partial_scan(mesh: trimesh.Trimesh, view: np.ndarray, seed: int) -> trimesh.
 
 
 def save(mesh: trimesh.Trimesh, path: Path, color=(214, 196, 168)) -> None:
-    """Zapisuje siatkę z jednolitym kolorem wierzchołków (jak skaner) i tworzy foldery."""
+    """Zapisuje siatkę z jednolitym kolorem wierzchołków (jak skaner) i tworzy foldery.
+
+    Args:
+        mesh:  siatka (nie jest zmieniana - kolor dostaje kopia).
+        path:  plik docelowy; rozszerzenie wybiera format (.ply, .stl).
+        color: kolor RGB 0-255 wszystkich wierzchołków.
+    """
     mesh = mesh.copy()
     mesh.visual.vertex_colors = np.tile([*color, 255], (len(mesh.vertices), 1)).astype(np.uint8)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,7 +108,11 @@ def save(mesh: trimesh.Trimesh, path: Path, color=(214, 196, 168)) -> None:
 
 
 def make_scans(root: Path) -> None:
-    """Tworzy w `root` sztuczne skany opisane w docstringu modułu (A1-A3 + szum, B, occlusion, kopia .stl)."""
+    """Tworzy w `root` sztuczne skany opisane w docstringu modułu (A1-A3 + szum, B, occlusion, kopia .stl).
+
+    Args:
+        root: folder, który będzie DATA_IN testu (podfoldery są tworzone).
+    """
     a, b = bumpy_sphere(1), bumpy_sphere(2, radius=10.0)
     a1 = partial_scan(a, [1, 0, 0], 11)
     a2 = partial_scan(a, [0.3, 1, 0.2], 12)
@@ -107,7 +129,15 @@ def make_scans(root: Path) -> None:
 
 
 def check(cond: bool, msg: str) -> None:
-    """Wypisuje "OK" albo "BŁĄD" z opisem; przy błędzie kończy test kodem wyjścia 1."""
+    """Wypisuje "OK" albo "BŁĄD" z opisem; przy błędzie kończy test.
+
+    Args:
+        cond: wynik sprawdzenia.
+        msg:  opis tego, co jest sprawdzane.
+
+    Raises:
+        SystemExit: kod 1, gdy `cond` jest fałszywe.
+    """
     print(("  OK   " if cond else "  BŁĄD ") + msg)
     if not cond:
         raise SystemExit(1)
@@ -178,13 +208,24 @@ def main() -> None:
               "statystyki powierzchni (pole, średnica)")
         r = ct.compare(bone.mesh, labels, labels)
         check(abs(r["iou"] - 1) < 1e-9, "ocena: te same etykiety -> IoU = 1")
+        root = tmp / "contacts"
+        other = [x for x in loaded if x.id != bone.id][0]
         for name in ct.DETECTORS:
             found = ct.detect_contacts(bone, name, ct.ContactParams())
             check(len(found.labels) == len(v), f"algorytm \"{name}\" działa ({len(found.surface_ids)} pow.)")
+        n = 1000
+        fake = {"spread_2": np.r_[np.full(800, 0.02), np.full(200, 0.3)], "edge_mm": np.r_[np.full(800, 0.3), np.full(200, 0.15)]}
+        fake = {k: x * np.random.default_rng(0).uniform(0.9, 1.1, n) for k, x in fake.items()}
+        sc = ct.bone_scores(fake, np.ones(n), ("spread_2", "edge_mm"))
+        check(abs(np.median(sc[:800])) < 0.5 and sc[800:].min() > 3,
+              "features: wynik ~0 na typowej (korze), wysoki tam, gdzie większy rozrzut i gęstsza siatka")
+        try:
+            ct.bone_scores({"brightness": np.ones(n)}, np.ones(n), ("brightness",))
+            check(False, "features: cecha bez stałego kierunku -> błąd")
+        except ValueError:
+            check(True, "features: cecha bez stałego kierunku (jasność) -> czytelny błąd")
 
         print("Wynik algorytmu: zapis w contacts/auto/ i cache")
-        root = tmp / "contacts"
-        other = [x for x in loaded if x.id != bone.id][0]
         cp = ct.ContactParams(rough_threshold=0.02)                 # niski próg - na gładkiej kuli też coś znajdzie
         first, computed1 = ct.auto_contacts(other, cp, root)
         again, computed2 = ct.auto_contacts(other, cp, root)
@@ -233,6 +274,24 @@ def main() -> None:
         check(len(results) > 0 and len(fig.data) >= 2 and len(match_matrix_figure(rep).data) == 1,
               f"figury dopasowania ({len(results)} par)")
 
+        print("Porównanie cech przełomu i kory (surface_features)")
+        one = np.ones(1)
+        check(sf.weighted_auc(np.array([2.0]), np.array([1.0]), one, one) == 1.0
+              and sf.weighted_auc(np.array([1.0]), np.array([1.0]), one, one) == 0.5, "AUC: większy = 1, remis = 0.5")
+        ow = np.asarray(other.mesh.vertices)
+        other_c = ct.Contacts(other.id, (ow[:, 0] > np.percentile(ow[:, 0], 80)).astype(np.uint8))
+        sfp = sf.SurfaceFeatureParams()
+        comps = [sf.compare_bone(bone, back, sfp), sf.compare_bone(other, other_c, sfp)]
+        n_feat = len(sf.feature_info(sfp))
+        check(len(comps[0].stats) == 3 * n_feat and comps[0].marked.any() and comps[0].cortex.any()
+              and not (comps[0].marked & comps[0].cortex).any(),
+              f"cechy kości: {n_feat} cech x (wszystkie + 2 powierzchnie), przełom i kora rozłączne")
+        model = sf.combined_model(comps, sfp)
+        rows = sf.summary(comps, sfp)
+        check(set(model["auc"]) == {bone.id, other.id} and len(rows) == n_feat, "model łączący cechy + ranking")
+        check(len(sf.features_3d_figure(comps, model, sfp, View3DParams(triangles_total=20000)).data) == 4
+              and len(sf.distributions_figure(comps, rows, sfp).data) == 2 * n_feat, "figury porównania cech")
+
         print("Podgląd z suwakami (match_tool)")
         rep["params"]["source"] = "manual-auto"
         (out_dir / "matching.json").write_text(json.dumps(rep, ensure_ascii=False), encoding="utf-8")
@@ -248,6 +307,10 @@ def main() -> None:
         check(len(full["T"]) == 4 and full["mode"] == "full", f"dopasowanie pary od nowa ({full['seconds']} s)")
         g = tool.geometry(top["a"])
         check(len(g["positions"]) > 0 and len(g["surf_indices"]) > 0, "geometria do strony (siatka + powierzchnia)")
+        check(tool.warnings(tool.params) == [] and len(tool.warnings(replace(tool.params, tolerance_mm=9.0))) == 1,
+              "ostrzeżenie, gdy settings.json różni się od matching.json")
+        page = matching_page(tool, out_dir / "matching.html")
+        check(page.stat().st_size > 1000, "strona HTML z zapisanego matching.json (tune_matching.py --html)")
     print(f"Wszystkie testy OK ({time.perf_counter() - start:.0f} s)")
 
 

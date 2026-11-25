@@ -82,7 +82,11 @@ def write_mesh(path: Path, mesh: o3d.geometry.TriangleMesh) -> None:
     """Zapisuje siatkę open3d do pliku (format wg rozszerzenia, np. .ply) przez trimesh.
 
     Zapisywane są wierzchołki, trójkąty i kolory wierzchołków (jako 0-255). Normalne
-    liczy na nowo read_mesh. Brakujące foldery są tworzone.
+    liczy na nowo read_mesh. Brakujące foldery są tworzone, istniejący plik jest nadpisywany.
+
+    Args:
+        path: plik docelowy; rozszerzenie wybiera format (.ply, .stl, .obj, ...).
+        mesh: siatka do zapisania (nie jest zmieniana).
     """
     colors = None
     if mesh.has_vertex_colors():
@@ -94,7 +98,14 @@ def write_mesh(path: Path, mesh: o3d.geometry.TriangleMesh) -> None:
 
 
 def read_mesh(path: Path) -> o3d.geometry.TriangleMesh:
-    """Wczytuje siatkę zapisaną przez write_mesh i liczy normalne wierzchołków i trójkątów."""
+    """Wczytuje siatkę zapisaną przez write_mesh i liczy normalne wierzchołków i trójkątów.
+
+    Args:
+        path: plik siatki (zwykle DATA_OUT/bones/<id>/mesh.ply).
+
+    Returns:
+        Siatka open3d z kolorami (jeśli były w pliku) i normalnymi.
+    """
     from data_parsing import load_mesh
 
     mesh = load_mesh(path)
@@ -219,19 +230,29 @@ def load_bones(out_dir: Path | None = None, features: bool = False) -> list[Bone
     if out_dir is None:
         from config import DATA_OUT
         out_dir = DATA_OUT
-    bones = []
-    for meta_path in sorted((Path(out_dir) / "bones").glob("*/meta.json")):
-        d = meta_path.parent
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        mesh = read_mesh(d / "mesh.ply")
-        source = np.load(d / "source.npy") if (d / "source.npy").exists() else np.zeros(len(mesh.triangles), int)
-        bone = Bone(id=d.name, label=meta.get("label", d.name), mesh=mesh, source=source, meta=meta, folder=d)
-        if features:
-            c = np.load(d / "cloud.npz")
-            bone.cloud = to_cloud(c["points"], c["normals"], c["colors"])
-            bone.fpfh = np.load(d / "fpfh.npy")
-        bones.append(bone)
-    return bones
+    return [load_bone(p.parent, features) for p in sorted((Path(out_dir) / "bones").glob("*/meta.json"))]
+
+
+def load_bone(folder: Path, features: bool = False) -> Bone:
+    """Wczytuje jedną kość z jej folderu DATA_OUT/bones/<id>/ (jak load_bones, ale jedną).
+
+    Args:
+        folder:   folder kości (z meta.json i mesh.ply).
+        features: wczytaj też chmurę punktów i FPFH.
+
+    Returns:
+        Kość; id = nazwa folderu.
+    """
+    d = Path(folder)
+    meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+    mesh = read_mesh(d / "mesh.ply")
+    source = np.load(d / "source.npy") if (d / "source.npy").exists() else np.zeros(len(mesh.triangles), int)
+    bone = Bone(id=d.name, label=meta.get("label", d.name), mesh=mesh, source=source, meta=meta, folder=d)
+    if features:
+        c = np.load(d / "cloud.npz")
+        bone.cloud = to_cloud(c["points"], c["normals"], c["colors"])
+        bone.fpfh = np.load(d / "fpfh.npy")
+    return bone
 
 
 def select_bones(bones: list[Bone], patterns: list[str] | None) -> list[Bone]:

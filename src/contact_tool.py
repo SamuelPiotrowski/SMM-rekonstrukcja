@@ -5,12 +5,18 @@ Uruchamia mały serwer HTTP (tylko na tym komputerze, 127.0.0.1) i otwiera stron
 src/web/contact_tool.html. Strona pokazuje kość w 3D (three.js), a malowanie
 zapisuje się przez serwer do contacts/<id_kości>.json (contacts.py).
 
+Kość bez ręcznych oznaczeń otwiera się z USTAWIENIEM AUTOMATYCZNYM: wynikiem algorytmu
+(contacts.auto_contacts - z contacts/auto/, a gdy brak albo nieaktualny - liczony).
+Strona pisze wtedy "ustawienie automatyczne"; dopiero zapis (Ctrl+S) robi z niego ręczne
+oznaczenie w contacts/<id>.json. Bez zapisu kość dalej nie ma ręcznych oznaczeń.
+
     from contact_tool import serve
     serve()                       # Ctrl+C w konsoli kończy
 
 API (używa go strona):
     GET  /api/bones                lista kości + stan oznaczeń      (ToolState.summary)
-    GET  /api/bones/<id>           siatka (base64) + etykiety       (ToolState.bone_payload)
+    GET  /api/bones/<id>           siatka (base64) + etykiety: ręczne albo automatyczne
+                                                                     (ToolState.bone_payload)
     PUT  /api/bones/<id>/contacts  zapis etykiet {labels: base64 uint8, names: {k: nazwa}}
                                                                      (ToolState.save)
     POST /api/bones/<id>/detect    propozycja algorytmu (nic nie zapisuje)  (ToolState.detect)
@@ -49,13 +55,25 @@ VENDOR = {"/vendor/three.module.js": f"https://cdn.jsdelivr.net/npm/three@{THREE
 def _b64(a: np.ndarray) -> str:
     """Surowe bajty tablicy w base64 - strona czyta je jako Float32Array / Uint32Array / Uint8Array.
 
-    Typ tablicy musi zgadzać się z tym, czego oczekuje contact_tool.js (float32, uint32, uint8).
+    Typ tablicy musi zgadzać się z tym, czego oczekuje strona (float32, uint32, uint8).
+    Używane też przez match_tool.
+
+    Args:
+        a: tablica numpy dowolnego kształtu (zapisywana w kolejności C, bez nagłówka).
+
+    Returns:
+        Tekst base64 (ASCII) z bajtami tablicy.
     """
     return base64.b64encode(np.ascontiguousarray(a).tobytes()).decode("ascii")
 
 
 def view_rotation(mesh) -> np.ndarray:
     """Obrót do widoku: najdłuższa oś kości poziomo (X), najcieńsza w stronę kamery (Z).
+
+    Osie główne są liczone z co najwyżej ~20 000 wierzchołków (szybko także dla dużych siatek).
+
+    Args:
+        mesh: siatka kości (open3d), w układzie kości.
 
     Returns:
         Macierz 3x3 (wiersze = osie główne PCA wierzchołków, bez odbicia lustrzanego);
@@ -74,7 +92,8 @@ class ToolState:
     """Stan serwera: kości wczytane raz przy starcie (bez chmur i FPFH) + ustawienia narzędzia.
 
     Metody odpowiadają zapytaniom API (opis w docstringu modułu). Serwer obsługuje
-    zapytania w osobnych wątkach, dlatego zapis pliku jest chroniony blokadą `lock`.
+    zapytania w osobnych wątkach, dlatego zapis ręcznych oznaczeń jest chroniony blokadą
+    `lock`, a liczenie i zapis wyniku algorytmu (contacts/auto/) - blokadą `auto_lock`.
     """
 
     def __init__(self, out_dir: Path | None, params: ct.ContactParams):
@@ -87,6 +106,7 @@ class ToolState:
         self.params = params
         self.out_dir = out_dir
         self.lock = threading.Lock()
+        self.auto_lock = threading.Lock()
         self.reload()
 
     def reload(self) -> None:
@@ -95,7 +115,17 @@ class ToolState:
         self.order = list(self.bones)
 
     def bone(self, bone_id: str) -> Bone:
-        """Kość o danym id. KeyError, gdy jej nie ma (serwer odpowiada wtedy 404)."""
+        """Kość o danym id.
+
+        Args:
+            bone_id: id kości (nazwa folderu w DATA_OUT/bones/).
+
+        Returns:
+            Wczytana kość (bez chmury i FPFH).
+
+        Raises:
+            KeyError: nie ma takiej kości (serwer odpowiada wtedy 404).
+        """
         if bone_id not in self.bones:
             raise KeyError(bone_id)
         return self.bones[bone_id]
@@ -127,22 +157,57 @@ class ToolState:
         return {"bones": items, "palette": list(ct.PALETTE), "detectors": list(ct.DETECTORS),
                 "params": {"brush_mm": self.params.brush_mm, "wand_angle_deg": self.params.wand_angle_deg}}
 
+    def start_contacts(self, b: Bone) -> tuple[ct.Contacts | None, str, str | None, bool]:
+        """Etykiety, od których kość startuje w narzędziu: ręczne, a gdy ich nie ma - automatyczne.
+
+        Automatyczne = contacts.auto_contacts (wynik algorytmu params.method z contacts/auto/,
+        liczony i zapisywany tam, gdy brak albo nieaktualny). Ręcznych plików nie zmienia.
+        Ręczny plik, z którego po zmianie siatki nic nie dało się przenieść (load_contacts:
+        remapped, same zera), traktowany jest jak brak ręcznych - tak jak w summary.
+
+        Args:
+            b: kość.
+
+        Returns:
+            (etykiety albo None - algorytm się nie udał, "manual" albo "auto",
+             komunikat błędu algorytmu albo None, True = ręczny plik jest, ale nie pasuje do siatki).
+        """
+        c = ct.load_contacts(b.id, b.mesh)
+        if c is not None and c.surface_ids:
+            return c, "manual", None, False
+        lost = c is not None
+        try:
+            with self.auto_lock:
+                c, _ = ct.auto_contacts(b, self.params)
+            return c, "auto", None, lost
+        except Exception as e:      # zły algorytm / ustawienia: kość i tak ma się otworzyć
+            return None, "auto", f"{type(e).__name__}: {e}", lost
+
     def bone_payload(self, bone_id: str) -> dict:
-        """GET /api/bones/<id>: siatka kości i jej ręczne etykiety dla three.js.
+        """GET /api/bones/<id>: siatka kości i jej etykiety dla three.js.
+
+        Etykiety ręczne (contacts/<id>.json), a gdy ich nie ma - ustawienie automatyczne
+        (start_contacts); pole "origin" mówi, które.
+
+        Args:
+            bone_id: id kości.
 
         Returns:
             {"id", "label",
              "positions": float32 (V, 3), "normals": float32 (V, 3), "indices": uint32 (T, 3),
              "colors": uint8 (V, 3) - kolory skanera albo szare, "labels": uint8 (V,)
              - wszystkie tablice jako base64 (_b64),
-             "names": {"k": nazwa}, "remapped": etykiety przeniesione ze starej siatki,
+             "names": {"k": nazwa}, "remapped": ręczne etykiety przeniesione ze starej siatki,
+             "origin": "manual" (ręczne) albo "auto" (ustawienie automatyczne, niezapisane),
+             "method": algorytm ustawienia automatycznego, "auto_error": błąd algorytmu albo None,
+             "manual_lost": ręczny plik jest, ale nic z niego nie pasuje do obecnej siatki,
              "rotation": 3x3 z view_rotation}.
         """
         b = self.bone(bone_id)
         m = b.mesh
         colors = (np.asarray(m.vertex_colors) * 255).round().astype(np.uint8) if m.has_vertex_colors() \
             else np.full((len(m.vertices), 3), 220, dtype=np.uint8)
-        c = ct.load_contacts(bone_id, m)
+        c, origin, error, lost = self.start_contacts(b)
         labels = c.labels if c else np.zeros(len(m.vertices), dtype=np.uint8)
         return {
             "id": bone_id, "label": b.label,
@@ -153,6 +218,10 @@ class ToolState:
             "labels": _b64(labels.astype(np.uint8)),
             "names": {str(k): v for k, v in (c.names if c else {}).items()},
             "remapped": bool(c and c.remapped),
+            "origin": origin,
+            "method": (c.detector.get("method") if c and c.detector else None) or self.params.method,
+            "auto_error": error,
+            "manual_lost": lost,
             "rotation": view_rotation(m).tolist(),
         }
 
@@ -167,6 +236,10 @@ class ToolState:
         Returns:
             {"saved": ścieżka pliku albo None (brak oznaczeń - plik usunięty),
              "surfaces": [{"id", "name", "area_mm2", "max_diameter_mm"}]}.
+
+        Raises:
+            KeyError:   nie ma takiej kości.
+            ValueError: liczba etykiet nie zgadza się z liczbą wierzchołków (contacts.save_contacts).
         """
         b = self.bone(bone_id)
         labels = np.frombuffer(base64.b64decode(body["labels"]), dtype=np.uint8).copy()
@@ -190,6 +263,10 @@ class ToolState:
 
         Returns:
             {"labels": base64 uint8 (V,), "names": {"k": nazwa}, "method": użyty algorytm}.
+
+        Raises:
+            KeyError:   nie ma takiej kości.
+            ValueError: nieznany algorytm (contacts.detect_contacts).
         """
         b = self.bone(bone_id)
         method = method or self.params.method
@@ -223,6 +300,13 @@ def make_handler(state: ToolState, cache_dir: Path):
 
     HTTPServer sam tworzy obiekt obsługi dla każdego zapytania i nie pozwala przekazać
     mu własnych argumentów - dlatego klasa jest zdefiniowana wewnątrz funkcji.
+
+    Args:
+        state:     stan serwera (kości i ustawienia), wspólny dla wszystkich zapytań.
+        cache_dir: folder cache plików three.js (fetch_vendor).
+
+    Returns:
+        Klasa (podklasa BaseHTTPRequestHandler) do przekazania ThreadingHTTPServer.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -230,13 +314,22 @@ def make_handler(state: ToolState, cache_dir: Path):
 
         Każdy wyjątek jest zamieniany na odpowiedź JSON {"error": ...} (KeyError -> 404,
         inne -> 500), żeby błąd było widać na stronie, a serwer działał dalej.
+        Metody do_* zwracają wynik _send / _json / _error tylko po to, żeby zakończyć
+        obsługę jednym `return` - sama wartość (None) nie ma znaczenia.
         """
 
-        def log_message(self, fmt, *args):     # bez logu każdego zapytania w konsoli
+        def log_message(self, fmt, *args):
+            """Wyłącza log każdego zapytania w konsoli (nadpisuje BaseHTTPRequestHandler)."""
             pass
 
         def _send(self, status, body: bytes, ctype: str):
-            """Wysyła odpowiedź z treścią `body` typu `ctype` (bez cache przeglądarki)."""
+            """Wysyła odpowiedź z treścią `body` typu `ctype` (bez cache przeglądarki).
+
+            Args:
+                status: kod HTTP (HTTPStatus).
+                body:   treść odpowiedzi.
+                ctype:  nagłówek Content-Type, np. "application/json".
+            """
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -245,25 +338,49 @@ def make_handler(state: ToolState, cache_dir: Path):
             self.wfile.write(body)
 
         def _json(self, data, status=HTTPStatus.OK):
-            """Wysyła `data` jako JSON (UTF-8, polskie znaki bez escape)."""
+            """Wysyła `data` jako JSON (UTF-8, polskie znaki bez escape).
+
+            Args:
+                data:   obiekt do zapisania w JSON (słownik, lista, ...).
+                status: kod HTTP (domyślnie 200).
+            """
             self._send(status, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json")
 
         def _error(self, status, msg):
-            """Wysyła błąd {"error": msg} - strona pokazuje go w dymku."""
+            """Wysyła błąd {"error": msg} - strona pokazuje go w dymku.
+
+            Args:
+                status: kod HTTP błędu (404, 500, 502).
+                msg:    komunikat dla użytkownika (po polsku).
+            """
             self._json({"error": msg}, status)
 
         def _body(self) -> dict:
-            """Treść zapytania jako słownik z JSON ({} dla pustej)."""
+            """Treść zapytania jako słownik z JSON.
+
+            Returns:
+                Odczytany JSON; {} dla pustej treści (Content-Length 0 albo brak).
+
+            Raises:
+                json.JSONDecodeError: treść nie jest poprawnym JSON (do_* zwraca wtedy 500).
+            """
             n = int(self.headers.get("Content-Length", 0))
             return json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
 
         def _route(self):
-            """Ścieżka URL bez parametrów, podzielona na części: "/api/bones/x" -> ["api", "bones", "x"]."""
+            """Ścieżka URL bez parametrów, podzielona na części.
+
+            Returns:
+                Lista niepustych części ścieżki: "/api/bones/x?a=1" -> ["api", "bones", "x"].
+            """
             parts = [p for p in self.path.split("?")[0].split("/") if p]
             return parts
 
         def do_GET(self):
-            """Pliki strony, three.js, lista kości i dane jednej kości."""
+            """Pliki strony (STATIC), three.js (VENDOR), lista kości i dane jednej kości.
+
+            Brak pliku three.js w cache i brak internetu -> 502 z wyjaśnieniem.
+            """
             path = self.path.split("?")[0]
             try:
                 if path in STATIC:

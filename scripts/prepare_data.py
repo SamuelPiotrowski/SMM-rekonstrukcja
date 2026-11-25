@@ -1,5 +1,5 @@
 """
-KROK 1: przygotowanie danych - skany z scanned_bones/ (z podfolderami) -> kości w out/3d/bones/.
+KROK 1: przygotowanie danych - skany z DATA_IN (scanned_bones/ z podfolderami) -> kości w out/3d/bones/.
 
 Łączy skany tej samej kości w jedną, usuwa szum (oderwane kawałki niepotwierdzone przez
 inne skany), liczy chmurę punktów i FPFH. Szczegóły: src/pipeline.py, src/merging.py.

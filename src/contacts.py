@@ -20,6 +20,8 @@ Jak dodać własny algorytm:
         ...  # zwróć labels (V,) jak wyżej
         return labels
     potem: python scripts/detect_contacts.py --method moja_metoda
+    Jeśli wynik zależy od czegoś poza sekcją "contacts" (np. od ustawień innej sekcji),
+    podaj @detector("nazwa", data_key=funkcja) - zmiana jej wyniku = auto_contacts liczy od nowa.
     albo na stałe (też dla dopasowania i narzędzia): settings.json, "contacts" -> "method".
     Skrypt porówna wynik z ręcznymi oznaczeniami (IoU, precyzja, czułość), jeśli są.
 
@@ -76,7 +78,11 @@ class ContactParams:
     wand_angle_deg: float = 25.0      # startowa tolerancja kąta różdżki [stopnie]
     roughness_radius_mm: float = 1.0  # algorytm bazowy: promień liczenia szorstkości
     rough_threshold: float = 0.09     # algorytm bazowy: szorstkość, od której powierzchnia = przełom
-    min_surface_mm2: float = 15.0     # algorytm bazowy: mniejsze obszary są pomijane
+    min_surface_mm2: float = 15.0     # oba algorytmy: mniejsze obszary są pomijane
+    feature_keys: tuple = ("spread_2", "rough_1", "edge_mm")  # "features": łączone cechy (surface_features)
+    feature_threshold: float = 0.15   # "features": o ile wynik ponad typowy dla tej kości (w odchyleniach) = przełom
+    feature_smooth_mm: float = 1.0    # "features": uśrednianie wyniku w tym promieniu przed progiem
+    feature_open_mm: float = 1.0      # "features": otwarcie morfologiczne (rozcina wąskie mostki między obszarami)
 
 
 @dataclass
@@ -101,12 +107,26 @@ class Contacts:
         return [int(k) for k in np.unique(self.labels) if k > 0]
 
     def name(self, k: int) -> str:
-        """Nazwa powierzchni k; gdy nie nadano - "Powierzchnia k"."""
+        """Nazwa powierzchni k do wyświetlania.
+
+        Args:
+            k: numer powierzchni (1, 2, ...).
+
+        Returns:
+            Nazwa nadana w narzędziu; gdy nie nadano (albo pusta) - "Powierzchnia k".
+        """
         return self.names.get(k) or f"Powierzchnia {k}"
 
 
 def surface_color(k: int) -> str:
-    """Kolor "#rrggbb" powierzchni nr k (z PALETTE, od k = 1, po kolei w kółko)."""
+    """Kolor powierzchni nr k - ten sam w narzędziu do oznaczania i w wizualizacjach.
+
+    Args:
+        k: numer powierzchni (1, 2, ...); po wyczerpaniu PALETTE kolory się powtarzają.
+
+    Returns:
+        Kolor "#rrggbb" z PALETTE.
+    """
     return PALETTE[(k - 1) % len(PALETTE)]
 
 
@@ -120,6 +140,12 @@ def mesh_fingerprint(mesh: o3d.geometry.TriangleMesh) -> str:
     Zapisywany razem z etykietami. Inny odcisk przy odczycie = siatka kości się zmieniła
     (np. inne ustawienia prepare_data), więc etykiet nie da się wziąć wprost - trzeba je
     przenieść po położeniu punktów.
+
+    Args:
+        mesh: siatka kości.
+
+    Returns:
+        16 znaków hex.
     """
     v = np.round(np.asarray(mesh.vertices), 3).astype(np.float32)
     return hashlib.sha1(v.tobytes()).hexdigest()[:16]
@@ -131,8 +157,11 @@ def vertex_areas(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
     Suma po wierzchołkach = pole całej siatki, więc suma po wierzchołkach powierzchni
     styku = jej pole.
 
+    Args:
+        mesh: siatka kości.
+
     Returns:
-        (V,) pola.
+        (V,) pola; 0 dla wierzchołków bez trójkątów.
     """
     v, t = np.asarray(mesh.vertices), np.asarray(mesh.triangles)
     a = 0.5 * np.linalg.norm(np.cross(v[t[:, 1]] - v[t[:, 0]], v[t[:, 2]] - v[t[:, 0]]), axis=1)
@@ -142,9 +171,14 @@ def vertex_areas(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
 def vertex_adjacency(mesh: o3d.geometry.TriangleMesh):
     """Macierz sąsiedztwa wierzchołków (krawędzie siatki), scipy.sparse CSR (V, V).
 
-    Element [i, j] > 0, gdy i oraz j łączy krawędź (symetryczna; wartość = liczba
-    trójkątów z tą krawędzią). (adj @ maska_0_1) > 0 = wierzchołki, które mają
-    zaznaczonego sąsiada.
+    Przykład: (adj @ maska_0_1) > 0 = wierzchołki, które mają zaznaczonego sąsiada.
+
+    Args:
+        mesh: siatka kości.
+
+    Returns:
+        Macierz int8 (V, V): element [i, j] > 0, gdy i oraz j łączy krawędź (symetryczna;
+        wartość = liczba trójkątów z tą krawędzią).
     """
     t = np.asarray(mesh.triangles)
     n = len(mesh.vertices)
@@ -250,6 +284,9 @@ def contacts_path(bone_id: str, source: str = "manual", root: Path | None = None
         source:  "manual" -> <root>/<id>.json, cokolwiek innego (np. "auto")
                  -> <root>/auto/<id>.json.
         root:    folder oznaczeń (domyślnie CONTACTS_DIR z settings.json, np. inny w testach).
+
+    Returns:
+        Ścieżka pliku (plik nie musi istnieć).
     """
     if root is None:
         from config import CONTACTS_DIR as root
@@ -308,7 +345,14 @@ def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Pat
 
 
 def _compact_lists(text: str) -> str:
-    """Skraca tekst JSON: listy liczb i listy punktów [[x, y, z], ...] zapisuje w jednej linii."""
+    """Skraca tekst JSON: listy liczb i listy punktów [[x, y, z], ...] zapisuje w jednej linii.
+
+    Args:
+        text: JSON z json.dumps(..., indent=...).
+
+    Returns:
+        Ten sam JSON (te same dane), krótszy.
+    """
     import re
 
     text = re.sub(r"\[\s*([-0-9.,\s]+?)\s*\]", lambda m: "[" + " ".join(m.group(1).split()) + "]", text)
@@ -365,16 +409,29 @@ def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "
 # -----------------
 
 DETECTORS: dict[str, Callable] = {}
+DATA_KEYS: dict[str, Callable] = {}     # algorytm -> funkcja (bone, params) -> tekst (patrz detector)
 
 
-def detector(name: str):
+def detector(name: str, data_key: Callable | None = None):
     """Dekorator rejestrujący algorytm wykrywania w DETECTORS pod nazwą `name`.
 
     Funkcja dostaje (bone: Bone, params: ContactParams) i zwraca labels (V,) dla
     wierzchołków bone.mesh. Przykład: docstring modułu, "Jak dodać własny algorytm".
+
+    Args:
+        name:     nazwa algorytmu (argument --method, klucz "method" w settings.json).
+        data_key: dla algorytmów, których wynik zależy od czegoś poza sekcją "contacts" (np. od
+                  ustawień innej sekcji): (bone, params) -> krótki tekst, który się zmienia,
+                  gdy te dane się zmienią. Zapisywany w wyniku ("detector" -> "data").
+
+    Returns:
+        Dekorator, który rejestruje funkcję i zwraca ją bez zmian.
     """
     def wrap(fn):
+        """Rejestruje `fn` w DETECTORS pod nazwą `name` i zwraca ją bez zmian."""
         DETECTORS[name] = fn
+        if data_key is not None:
+            DATA_KEYS[name] = data_key
         return fn
     return wrap
 
@@ -445,7 +502,17 @@ def local_shape(mesh: o3d.geometry.TriangleMesh, radius: float) -> tuple[np.ndar
 
 
 def _rings(mesh: o3d.geometry.TriangleMesh, mm: float) -> int:
-    """Ile pierścieni sąsiadów siatki odpowiada odległości `mm` (wg średniej długości krawędzi)."""
+    """Ile pierścieni sąsiadów siatki odpowiada odległości `mm` (wg średniej długości krawędzi).
+
+    Średnia jest liczona z jednej krawędzi każdego trójkąta (v0-v1) - to wystarcza.
+
+    Args:
+        mesh: siatka kości.
+        mm:   odległość po powierzchni [mm].
+
+    Returns:
+        Liczba pierścieni, co najmniej 1.
+    """
     v, t = np.asarray(mesh.vertices), np.asarray(mesh.triangles)
     edge = np.linalg.norm(v[t[:, 0]] - v[t[:, 1]], axis=1).mean()
     return max(1, int(round(mm / edge)))
@@ -502,11 +569,109 @@ def detect_roughness(bone, params: ContactParams) -> np.ndarray:
     return split_regions(mesh, mask, params.min_surface_mm2)
 
 
+def _features_data_key(bone, params: ContactParams) -> str:
+    """Ustawienia cech (settings.json, sekcja "surface_features") - od nich zależy wynik "features"."""
+    import config
+
+    return json.dumps(asdict(config.surface_feature_params()), sort_keys=True)
+
+
+def bone_scores(features: dict[str, np.ndarray], areas: np.ndarray, keys) -> np.ndarray:
+    """Wynik "jak bardzo to przełom" każdego wierzchołka - bez żadnych oznaczeń.
+
+    Każda cecha jest porównywana z typową wartością na TEJ SAMEJ kości: większość kości to
+    kora, więc mediana cechy (ważona polem) to "poziom kory". Cecha (log) jest zamieniana na
+    liczbę odchyleń od mediany: (log x - mediana) / (1.4826 * MAD) - odporne na przełom
+    i niezależne od skanera (inna gęstość siatki, inna skala szorstkości = te same liczby).
+    Cechy mniejsze na przełomie (np. długość krawędzi siatki) dostają znak minus
+    (feature_info "sign"). Wynik = średnia po cechach: ~0 na typowej korze, > 0 na przełomie.
+
+    Args:
+        features: wynik surface_features.vertex_features.
+        areas:    (V,) pola wierzchołków (wagi mediany).
+        keys:     które cechy połączyć.
+
+    Returns:
+        (V,) wynik.
+
+    Raises:
+        ValueError: nieznana cecha albo cecha bez stałego kierunku (np. jasność koloru).
+    """
+    import surface_features as sf
+
+    info = sf.feature_info()
+    out = np.zeros(len(areas))
+    for k in keys:
+        if k not in features:
+            raise ValueError(f"Nieznana cecha {k!r}, dostępne: {', '.join(features)}")
+        sign = info.get(k, {}).get("sign", 0)
+        if sign == 0:
+            raise ValueError(f"Cecha {k!r} nie ma stałego kierunku (na różnych kościach raz większa, raz mniejsza "
+                             f"na przełomie) - nie nadaje się do \"features\"")
+        x = np.log(features[k] + 1e-3)
+        med = sf.weighted_quantiles(x, areas, [0.5])[0]
+        mad = 1.4826 * sf.weighted_quantiles(np.abs(x - med), areas, [0.5])[0]
+        out += sign * (x - med) / max(mad, 1e-9)
+    return out / max(len(keys), 1)
+
+
+@detector("features", data_key=_features_data_key)
+def detect_features(bone, params: ContactParams) -> np.ndarray:
+    """KILKA CECH NARAZ, BEZ OZNACZEŃ: szorstkość, rozrzut normalnych i gęstość siatki.
+
+    1. Cechy każdego wierzchołka (src/surface_features.py; domyślnie rozrzut normalnych 2 mm,
+       szorstkość 1 mm, długość krawędzi siatki - lista: feature_keys, promienie:
+       settings.json -> "surface_features"; opis: raporty/przelom_vs_kora.md).
+    2. Każda cecha względem typowej wartości na tej samej kości (bone_scores): przełom jest
+       bardziej szorstki, ma większy rozrzut normalnych i gęstszą siatkę niż reszta kości.
+       Wynik = średnia tych odchyleń.
+    3. Uśrednienie wyniku w promieniu feature_smooth_mm (pojedyncze szorstkie punkty kory
+       i gładkie punkty przełomu znikają) i próg feature_threshold.
+    4. Bez pasu przy otwartym brzegu skanu, otwarcie morfologiczne o feature_open_mm (znikają
+       cienkie linie krawędzi i wąskie mostki - bez tego np. oba końce długiej kości potrafią
+       połączyć się w jeden obszar), spójne obszary >= min_surface_mm2 (od największego).
+    Założenie: większość zeskanowanej powierzchni to kora (mediana = kora). Na kości, która
+    jest prawie cała przełomem, algorytm zaznaczy za mało.
+
+    Args:
+        bone:   kość.
+        params: feature_keys, feature_threshold, feature_smooth_mm, feature_open_mm, min_surface_mm2.
+
+    Returns:
+        (V,) uint8 etykiety wierzchołków bone.mesh.
+
+    Raises:
+        ValueError: zła nazwa cechy w feature_keys.
+    """
+    import config
+    import surface_features as sf
+
+    sfp = config.surface_feature_params()
+    mesh = bone.mesh
+    v, va = np.asarray(mesh.vertices), vertex_areas(mesh)
+    score = bone_scores(sf.cached_features(bone, sfp), va, params.feature_keys)
+    if params.feature_smooth_mm > 0:
+        W, _ = sf._neighbours(v, v, params.feature_smooth_mm)
+        score = (W @ (score * va)) / np.maximum(W @ va, 1e-12)
+    mask = score > params.feature_threshold
+    mask &= sf._distance_to(v, boundary_vertices(mesh)) > sfp.boundary_margin_mm
+    if params.feature_open_mm > 0:
+        r = params.feature_open_mm
+        mask = morph(mesh, morph(mesh, mask, r, grow=False), r, grow=True)
+    return split_regions(mesh, mask, params.min_surface_mm2)
+
+
 def boundary_vertices(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
     """Maska wierzchołków na otwartym brzegu siatki (krawędź tylko jednego trójkąta).
 
     Skan ma brzeg tam, gdzie skaner przestał widzieć powierzchnię - to NIE jest przełom,
     a brzeg bywa postrzępiony, więc wygląda na szorstki.
+
+    Args:
+        mesh: siatka kości.
+
+    Returns:
+        (V,) bool; same False dla siatki zamkniętej.
     """
     t = np.asarray(mesh.triangles)
     e = np.sort(np.vstack([t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]]), axis=1)
@@ -521,8 +686,33 @@ def detection_params(params: ContactParams) -> dict:
 
     Zapisywane w pliku wyniku ("detector" -> "params"); auto_contacts porównuje je
     z bieżącymi, żeby wiedzieć, czy zapisany wynik jest aktualny.
+
+    Args:
+        params: wszystkie ustawienia sekcji "contacts".
+
+    Returns:
+        {nazwa: wartość} bez method, brush_mm i wand_angle_deg (krotki jako listy - jak po odczycie JSON).
     """
-    return {k: v for k, v in asdict(params).items() if k not in ("method", "brush_mm", "wand_angle_deg")}
+    return {k: list(v) if isinstance(v, tuple) else v for k, v in asdict(params).items()
+            if k not in ("method", "brush_mm", "wand_angle_deg")}
+
+
+def detector_info(bone, method: str, params: ContactParams) -> dict:
+    """Opis algorytmu zapisywany z wynikiem ("detector"): nazwa, ustawienia i - jeśli algorytm
+    ma data_key - dane spoza sekcji "contacts", od których zależy.
+
+    Args:
+        bone:   kość.
+        method: nazwa algorytmu.
+        params: ustawienia.
+
+    Returns:
+        {"method", "params"[, "data"]}.
+    """
+    info = {"method": method, "params": detection_params(params)}
+    if method in DATA_KEYS:
+        info["data"] = DATA_KEYS[method](bone, params)
+    return info
 
 
 def detect_contacts(bone, method: str | None = None, params: ContactParams = ContactParams()) -> Contacts:
@@ -546,15 +736,15 @@ def detect_contacts(bone, method: str | None = None, params: ContactParams = Con
     labels = np.asarray(DETECTORS[method](bone, params), dtype=np.uint8)
     names = {int(k): f"Wykryta {k}" for k in np.unique(labels) if k > 0}
     return Contacts(bone_id=bone.id, labels=labels, names=names, source=f"auto:{method}",
-                    detector={"method": method, "params": detection_params(params)})
+                    detector=detector_info(bone, method, params))
 
 
 def auto_contacts(bone, params: ContactParams = ContactParams(),
                   root: Path | None = None) -> tuple[Contacts, bool]:
     """Wynik algorytmu params.method dla kości: z cache (contacts/auto/) albo policzony i zapisany.
 
-    Liczy na nowo, gdy pliku nie ma albo powstał innym algorytmem, z innymi ustawieniami
-    lub na innej siatce kości.
+    Liczy na nowo, gdy pliku nie ma albo powstał innym algorytmem, z innymi ustawieniami,
+    na innej siatce kości lub (algorytmy z data_key, np. "features") z innymi danymi spoza sekcji.
 
     Args:
         bone:   kość.
@@ -564,7 +754,7 @@ def auto_contacts(bone, params: ContactParams = ContactParams(),
     Returns:
         (etykiety - puste, gdy algorytm nic nie znalazł; True = właśnie policzone, False = z cache).
     """
-    want = {"method": params.method, "params": detection_params(params)}
+    want = detector_info(bone, params.method, params)
     cached = load_contacts(bone.id, bone.mesh, "auto", root=root)
     if cached is not None and not cached.remapped and cached.detector == want:
         return cached, False

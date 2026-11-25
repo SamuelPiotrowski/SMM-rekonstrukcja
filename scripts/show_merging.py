@@ -27,7 +27,11 @@ from visualization_3d import load_report, merging_figure, overlap_figure, write_
 
 
 def main() -> None:
-    """Wczytuje kości i merging.json, buduje obie figury i zapisuje out/3d/merging.html."""
+    """Wczytuje kości i merging.json, buduje obie figury i zapisuje out/3d/merging.html.
+
+    Raises:
+        SystemExit: brak przygotowanych kości albo merging.json (nie uruchomiono prepare_data.py).
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-open", action="store_true", help="nie otwieraj przeglądarki")
     args = parser.parse_args()

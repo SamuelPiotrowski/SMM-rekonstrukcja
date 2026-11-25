@@ -2,7 +2,8 @@
 // Etykiety są przypisane do wierzchołków siatki: 0 = brak, k = powierzchnia k.
 //
 // Przebieg: init() pobiera listę kości (GET /api/bones) -> loadBone() pobiera siatkę
-// i etykiety (GET /api/bones/<id>) -> malowanie zmienia S.cur.labels w pamięci ->
+// i etykiety (GET /api/bones/<id>; kość bez ręcznych oznaczeń dostaje "ustawienie
+// automatyczne" = wynik algorytmu, origin 'auto') -> malowanie zmienia S.cur.labels w pamięci ->
 // save() wysyła etykiety na serwer (PUT /api/bones/<id>/contacts).
 // Współrzędne P / N są w układzie kości (mm); obrót do widoku robi tylko mesh.matrix.
 import * as THREE from 'three';
@@ -19,7 +20,9 @@ const MIX = 0.78;                      // jak mocno kolor powierzchni przykrywa 
  * - cur: wczytana kość (loadBone) - {id, label, nV: liczba wierzchołków, P: pozycje (3*nV),
  *   N: normalne, Ns: wygładzone normalne (do różdżki), I: trójkąty (3*T), C: kolory skanera
  *   uint8, adj: sąsiedztwo (buildAdjacency), area: pole na wierzchołek [mm²],
- *   labels: Uint8Array etykiet, names: {k: nazwa}},
+ *   labels: Uint8Array etykiet, names: {k: nazwa}, origin: 'manual' (z contacts/<id>.json)
+ *   albo 'auto' (ustawienie automatyczne - wynik algorytmu, jeszcze niezapisany jako ręczny),
+ *   method: algorytm ustawienia automatycznego, autoError: błąd algorytmu albo null},
  * - tool / brush [mm] / wand [stopnie] / active (malowana powierzchnia) / scanColors,
  * - dirty: są niezapisane zmiany, undo / redo: stos snapshot(), painting / lastHit: trwa
  *   pociągnięcie pędzla, busy: trwa wczytywanie albo algorytm.
@@ -169,12 +172,15 @@ function vertexAreas(P, idx, nV) {
 /**
  * Wczytuje kość z serwera i pokazuje ją. Niezapisane zmiany poprzedniej kości są
  * najpierw zapisywane; historia cofania jest czyszczona. Id kości trafia do adresu (#id),
- * więc odświeżenie strony wraca do tej samej kości.
+ * więc odświeżenie strony wraca do tej samej kości. Kość bez ręcznych oznaczeń przychodzi
+ * z ustawieniem automatycznym (serwer może je wtedy liczyć - stąd inny napis wczytywania).
  */
 async function loadBone(id) {
   if (S.busy) return;
   if (S.cur && S.dirty) await save(true);
+  const manual = S.bones.find((x) => x.id === id)?.surfaces.length;
   S.busy = true; $('loading').hidden = false;
+  $('loading').querySelector('span').textContent = manual ? 'Wczytywanie kości…' : 'Wczytywanie kości i ustawienia automatycznego…';
   try {
     const d = await api(`/api/bones/${encodeURIComponent(id)}`);
     const P = new Float32Array(b64ToBytes(d.positions).buffer);
@@ -187,6 +193,7 @@ async function loadBone(id) {
       id: d.id, label: d.label, nV, P, N, I, C, adj,
       Ns: smoothNormals(N, adj, 3), area: vertexAreas(P, I, nV),
       labels: b64ToBytes(d.labels), names: Object.fromEntries(Object.entries(d.names).map(([k, v]) => [+k, v])),
+      origin: d.origin, method: d.method, autoError: d.auto_error,
     };
     S.undo = []; S.redo = []; setDirty(false);
     const ids = surfaceIds();
@@ -211,11 +218,31 @@ async function loadBone(id) {
     $('boneTitle').innerHTML = `<b>${b.nr}. ${escapeHtml(d.label)}</b> &nbsp;·&nbsp; ${b.scans} skan(y) · ${fmt(b.area_mm2)} mm²`;
     history.replaceState(null, '', `#${encodeURIComponent(id)}`);
     if (d.remapped) toast('Siatka kości zmieniła się od zapisu - oznaczenia przeniesiono po położeniu. Sprawdź je i zapisz.', 'error');
+    if (d.auto_error) toast(`Ustawienie automatyczne: algorytm nie zadziałał (${d.auto_error})`, 'error');
+    else if (d.manual_lost) toast('Stare ręczne oznaczenia tej kości nie pasują do obecnej siatki - pokazano ustawienie automatyczne. Zapis nadpisze stary plik.', 'error');
   } catch (e) {
     toast(`Nie udało się wczytać kości: ${e.message}`, 'error');
   } finally {
     S.busy = false; $('loading').hidden = true;
   }
+}
+
+/**
+ * Plakietka w górnym pasku i opis nad listą powierzchni, gdy kość ma ustawienie automatyczne
+ * (S.cur.origin === 'auto': wynik algorytmu, jeszcze niezapisany jako ręczne oznaczenie).
+ * Zapis (save) zmienia origin na 'manual' - wtedy oba znikają.
+ */
+function updateOrigin() {
+  const c = S.cur; const auto = !!c && c.origin === 'auto';
+  $('autoBadge').hidden = !auto; $('autoNote').hidden = !auto;
+  if (!auto) return;
+  const m = `algorytm „${escapeHtml(c.method)}”`;
+  let note;
+  if (S.dirty) note = `<b>Ustawienie automatyczne</b> (${m}) ze zmianami. Zapisz (<kbd>Ctrl+S</kbd>), żeby stało się ręcznym oznaczeniem.`;
+  else if (c.autoError) note = `<b>Ustawienie automatyczne:</b> ${m} nie zadziałał (${escapeHtml(c.autoError)}). Oznacz przełom ręcznie.`;
+  else if (!surfaceIds(false).length) note = `<b>Ustawienie automatyczne:</b> ${m} nie znalazł tu przełomu. Oznacz go ręcznie.`;
+  else note = `<b>Ustawienie automatyczne</b> - propozycja (${m}), jeszcze niesprawdzona. Popraw pędzlem, gumką albo różdżką i zapisz (<kbd>Ctrl+S</kbd>) - wtedy stanie się ręcznym oznaczeniem.`;
+  $('autoNote').innerHTML = note;
 }
 
 /** Kamera na wprost całej kości; flip = true - od drugiej strony. */
@@ -286,16 +313,16 @@ function renderBoneList() {
     if (q && !(`${b.nr} ${b.label} ${b.id}`.toLowerCase().includes(q))) continue;
     const li = document.createElement('li');
     if (S.cur && b.id === S.cur.id) li.className = 'active';
-    const n = b.surfaces.length;
+    const n = b.surfaces.length;     // ręczne powierzchnie; bez nich kość otwiera się z ustawieniem automatycznym
     const [title, part] = b.label.includes(' / ') ? b.label.split(' / ', 2) : [b.label, ''];
     li.title = `${b.label}\n${b.id}`;
     li.innerHTML = `<span class="nr">${b.nr}.</span>
-      <span class="name"><b>${escapeHtml(title)}</b><small>${part ? `${escapeHtml(part)} · ` : ''}${b.scans} skan(y) · ${n ? `${n} pow. styku` : 'brak oznaczeń'}</small></span>
-      <i class="dot ${n ? 'done' : ''}"></i>`;
+      <span class="name"><b>${escapeHtml(title)}</b><small>${part ? `${escapeHtml(part)} · ` : ''}${b.scans} skan(y) · ${n ? `${n} pow. styku` : 'ustawienie automatyczne'}</small></span>
+      <i class="dot ${n ? 'done' : 'auto'}"></i>`;
     li.onclick = () => { if (!S.cur || b.id !== S.cur.id) loadBone(b.id); };
     ul.appendChild(li);
   }
-  $('boneCount').textContent = `${S.bones.filter((b) => b.surfaces.length).length}/${S.bones.length} oznaczonych`;
+  $('boneCount').textContent = `${S.bones.filter((b) => b.surfaces.length).length}/${S.bones.length} ręcznie`;
 }
 
 /** Lista powierzchni bieżącej kości: kolor, nazwa (dwuklik = zmiana), pole, usuwanie. */
@@ -327,6 +354,7 @@ function renameSurface(li, k) {
   const input = document.createElement('input');
   input.value = S.cur.names[k] || `Powierzchnia ${k}`;
   span.replaceWith(input); input.focus(); input.select();
+  // koniec edycji: ok = zapisz nową nazwę (pustej nie), inaczej zostaw starą
   const done = (ok) => {
     if (ok && input.value.trim()) { pushUndo(); S.cur.names[k] = input.value.trim(); setDirty(true); }
     renderSurfaces();
@@ -373,8 +401,12 @@ function restore(from, to) {
 }
 /** Odświeża wszystko, co zależy od etykiet (kolory, lista powierzchni, statystyki, przyciski). */
 function afterEdit() { recolor(); renderSurfaces(); updateStats(); updateButtons(); }
-/** Ustawia znacznik niezapisanych zmian (plakietka przy tytule). */
-function setDirty(v) { S.dirty = v; $('dirtyBadge').hidden = !v; updateButtons(); }
+/** Ustawia znacznik niezapisanych zmian (plakietka przy tytule) i opis ustawienia automatycznego. */
+function setDirty(v) {
+  const changed = S.dirty !== v;
+  S.dirty = v; $('dirtyBadge').hidden = !v; updateButtons();
+  if (changed || !v) updateOrigin();     // nie przy każdym ruchu pędzla
+}
 /** Włącza / wyłącza przyciski cofnij, ponów, zapisz. */
 function updateButtons() {
   $('undoBtn').disabled = !S.undo.length; $('redoBtn').disabled = !S.redo.length;
@@ -579,6 +611,7 @@ async function save(silent) {
     const r = await api(`/api/bones/${encodeURIComponent(c.id)}/contacts`, { method: 'PUT', body: JSON.stringify({ labels: bytesToB64(c.labels), names }) });
     const b = S.bones.find((x) => x.id === c.id);
     b.surfaces = r.surfaces;
+    c.origin = 'manual';            // zapisane ustawienie automatyczne = ręczne oznaczenie
     setDirty(false); renderBoneList();
     const total = r.surfaces.reduce((a, s) => a + s.area_mm2, 0);
     toast(r.saved ? `Zapisano ✓  ${r.surfaces.length} pow. styku, ${fmt(total, 1)} mm²` : 'Zapisano ✓  (brak oznaczeń - plik usunięty)', 'ok');
@@ -598,7 +631,8 @@ async function detect() {
     pushUndo();
     c.labels = b64ToBytes(r.labels);
     c.names = Object.fromEntries(Object.entries(r.names).map(([k, v]) => [+k, v]));
-    S.active = surfaceIds()[0] || 1; setDirty(true); afterEdit();
+    c.origin = 'auto'; c.method = r.method; c.autoError = null;
+    S.active = surfaceIds()[0] || 1; setDirty(true); afterEdit(); updateOrigin();
     const n = surfaceIds(false).length;
     toast(n ? `Algorytm „${r.method}” zaproponował ${n} pow. - popraw i zapisz` : 'Algorytm niczego nie znalazł', n ? 'ok' : '');
   } catch (e) {

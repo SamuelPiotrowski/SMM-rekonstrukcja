@@ -20,7 +20,7 @@ Trzy wizualizacje:
    na czerwono, macierz nakładania wszystkich par skanów.
 
 3. DOPASOWANIE POWIERZCHNI STYKU (matching_figure + match_matrix_figure;
-   scripts/match_surfaces.py -> out/3d/matching.html) - najlepsze pary: kość A
+   scripts/tune_matching.py --html -> out/3d/matching.html) - najlepsze pary: kość A
    ustawiona na kości B znalezionym przekształceniem, obie powierzchnie styku
    w kolorze; macierz wyników wszystkich par powierzchni.
 
@@ -64,6 +64,7 @@ class View3DParams:
     background: str = "#f4f6f8"        # kolor tła strony
     bone_color: str = "#e3d9c6"        # kolor kości, gdy skan nie ma kolorów
     gap_mm: float = 10.0               # odstęp między kośćmi na stole
+    source: str = "manual"             # powierzchnie styku w show_bones.py: "manual" / "auto" / "manual-auto"
 
 
 # -----------------
@@ -94,6 +95,11 @@ def decimate(mesh: o3d.geometry.TriangleMesh, max_triangles: int) -> o3d.geometr
 def lying_rotation(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
     """Obrót kładący kość płasko: najdłuższa oś = X, najcieńsza = Z (do góry).
 
+    Osie główne są liczone z co najwyżej ~20 000 wierzchołków (szybko także dla dużych siatek).
+
+    Args:
+        mesh: siatka kości.
+
     Returns:
         Macierz 3x3 R (wiersze = osie główne PCA, bez odbicia lustrzanego);
         użycie: (v - środek) @ R.T.
@@ -107,18 +113,40 @@ def lying_rotation(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
 
 
 def _hex(rgb: np.ndarray) -> np.ndarray:
-    """Kolory (N, 3) w [0, 1] -> tablica (N,) tekstów "#rrggbb" (vertexcolor w plotly)."""
+    """Kolory RGB -> teksty "#rrggbb" (format vertexcolor w plotly).
+
+    Args:
+        rgb: (N, 3) kolory w [0, 1] (wartości spoza są przycinane).
+
+    Returns:
+        (N,) tablica tekstów "#rrggbb".
+    """
     rgb = (np.clip(rgb, 0, 1) * 255).round().astype(int)
     return np.array([f"#{r:02x}{g:02x}{b:02x}" for r, g, b in rgb])
 
 
 def _f32(a) -> np.ndarray:
-    """Tablica float32 - plotly zapisuje ją binarnie, o połowę mniej niż float64."""
+    """Tablica float32 - plotly zapisuje ją binarnie, o połowę mniej niż float64.
+
+    Args:
+        a: tablica albo lista liczb.
+
+    Returns:
+        Ta sama tablica jako float32 (bez kopii, jeśli już jest float32).
+    """
     return np.asarray(a, dtype=np.float32)
 
 
 def _ijk(t: np.ndarray, n_vertices: int) -> dict:
-    """Indeksy trójkątów w najmniejszym typie (plotly zapisuje je binarnie - mniejszy plik)."""
+    """Indeksy trójkątów w najmniejszym typie (plotly zapisuje je binarnie - mniejszy plik).
+
+    Args:
+        t:          (T, 3) indeksy wierzchołków trójkątów.
+        n_vertices: liczba wierzchołków - decyduje o typie (uint16 do 65535, inaczej int32).
+
+    Returns:
+        {"i", "j", "k"} - argumenty go.Mesh3d.
+    """
     t = np.asarray(t, dtype=np.uint16 if n_vertices < 65536 else np.int32)
     return dict(i=t[:, 0], j=t[:, 1], k=t[:, 2])
 
@@ -191,7 +219,16 @@ def _bone_hover(nr: int, bone: Bone, stats: list[dict], contacts: Contacts | Non
     """Podpowiedź po najechaniu na kość (hovertemplate plotly, HTML).
 
     Zawiera: numer i nazwę, skany, pole, wymiary, usunięty szum, powierzchnie styku
-    (`stats` z contacts.surface_stats) z ich kolorem, polem i średnicą.
+    z ich kolorem, polem i średnicą.
+
+    Args:
+        nr:       numer kości na liście.
+        bone:     kość (dane z bone.meta).
+        stats:    powierzchnie styku z contacts.surface_stats; [] = nie oznaczone.
+        contacts: etykiety kości (nazwy powierzchni) albo None.
+
+    Returns:
+        Tekst HTML dla hovertemplate (z "<extra></extra>" - bez nazwy śladu obok).
     """
     m = bone.meta
     st = m.get("stats", {})
@@ -333,7 +370,17 @@ def bones_figure(bones: list[Bone], contacts: dict[str, Contacts | None] | None 
     mid_scene = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (z_lo + z_hi) / 2])
 
     def camera(box_lo, box_hi, direction, up=(0, 0, 1), zoom=0.8):
-        """Kamera plotly patrząca na pudełko box_lo..box_hi [mm] z kierunku `direction`."""
+        """Kamera plotly patrząca na pudełko box_lo..box_hi [mm] z kierunku `direction`.
+
+        Args:
+            box_lo, box_hi: rogi pudełka (x, y, z) w mm, w układzie sceny.
+            direction:      kierunek od środka pudełka do kamery (nie musi być jednostkowy).
+            up:             kierunek "do góry" na ekranie.
+            zoom:           odległość kamery względem rozmiaru pudełka (większa = dalej).
+
+        Returns:
+            {"center", "eye", "up"} w znormalizowanym układzie sceny plotly (scene.camera).
+        """
         center = ((np.asarray(box_lo) + np.asarray(box_hi)) / 2 - mid_scene) / span * aspect
         size = max(((np.asarray(box_hi) - np.asarray(box_lo)) / span * aspect)[:2])
         eye = center + zoom * max(size, 0.08) * np.asarray(direction, dtype=float)
@@ -459,7 +506,14 @@ def merging_figure(bones: list[Bone], params: View3DParams = View3DParams(),
         return fig
 
     def layout_for(k):
-        """Zmiany układu (osie, proporcje, opis) po wybraniu k-tej kości z listy."""
+        """Zmiany układu (osie, proporcje, opis) po wybraniu k-tej kości z listy.
+
+        Args:
+            k: indeks kości w `chosen`.
+
+        Returns:
+            {ścieżka plotly: wartość} - drugi argument przycisku "update".
+        """
         lo, hi = boxes[k]
         span = np.maximum(hi - lo, 1e-3)
         return {"scene.xaxis.range": [lo[0], hi[0]], "scene.yaxis.range": [lo[1], hi[1]],
@@ -633,7 +687,14 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
             "", "<i>wynik = styk - kolizja</i>"]))
 
     def layout_for(k):
-        """Zmiany układu (sześcienne osie wokół pary, opis) po wybraniu k-tej pary z listy."""
+        """Zmiany układu (sześcienne osie wokół pary, opis) po wybraniu k-tej pary z listy.
+
+        Args:
+            k: indeks pary w `shown`.
+
+        Returns:
+            {ścieżka plotly: wartość} - drugi argument przycisku "update".
+        """
         lo, hi = boxes[k]
         c, half = (lo + hi) / 2, (hi - lo).max() / 2 * 1.05
         return {"scene.xaxis.range": [c[0] - half, c[0] + half], "scene.yaxis.range": [c[1] - half, c[1] + half],
@@ -721,7 +782,15 @@ section .note {{ font-size: 13px; color: #6b7b8c; padding: 8px 16px 0; margin: 0
 
 
 def _plotly_head(embed: bool) -> str:
-    """Znacznik <script> z plotly.js: wklejony w całości (embed=True, działa offline) albo z CDN."""
+    """Znacznik <script> z plotly.js do <head> strony write_page.
+
+    Args:
+        embed: True = cały plotly.js wklejony w stronę (~4.5 MB, działa offline),
+               False = link do CDN w wersji zainstalowanego pakietu plotly.
+
+    Returns:
+        Tekst HTML znacznika <script>.
+    """
     if embed:
         from plotly.offline import get_plotlyjs
         return f"<script>{get_plotlyjs()}</script>"
@@ -789,6 +858,13 @@ def save_figure(fig: go.Figure, path: Path, params: View3DParams = View3DParams(
 
 
 def load_report(out_dir: Path) -> dict | None:
-    """Wczytuje out_dir/merging.json (pipeline.write_merging_report); None, gdy go nie ma."""
+    """Wczytuje raport łączenia skanów out_dir/merging.json (pipeline.write_merging_report).
+
+    Args:
+        out_dir: folder wyników (DATA_OUT).
+
+    Returns:
+        Zawartość merging.json ({"params", "scans", "pairs", ...}) albo None, gdy pliku nie ma.
+    """
     p = Path(out_dir) / "merging.json"
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None

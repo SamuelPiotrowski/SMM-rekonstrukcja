@@ -13,7 +13,7 @@ Co udostępnia:
     SETTINGS                        - cały settings.json jako słownik,
     DATA_IN, DATA_OUT, CONTACTS_DIR - foldery (sekcja "paths"),
     scan_params(), merge_params(), feature_params(), contact_params(),
-    matching_params(), view3d_params()
+    matching_params(), surface_feature_params(), view3d_params()
                                     - obiekty parametrów modułów (po jednym na sekcję),
     OPEN_BROWSER, CONTACT_TOOL_PORT, MATCH_TOOL_PORT
                                     - pojedyncze ustawienia skryptów.
@@ -107,45 +107,97 @@ def _section(name: str, cls, skip=()):
 
 
 def scan_params():
-    """Wyszukiwanie i czyszczenie skanów: sekcja "scans" -> data_parsing.ScanParams."""
+    """Wyszukiwanie i czyszczenie skanów: sekcja "scans" settings.json.
+
+    Returns:
+        data_parsing.ScanParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
+    """
     from data_parsing import ScanParams
     return _section("scans", ScanParams)
 
 
 def merge_params():
-    """Łączenie skanów tej samej kości: sekcja "merging" -> merging.MergeParams."""
+    """Łączenie skanów tej samej kości: sekcja "merging" settings.json.
+
+    Returns:
+        merging.MergeParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
+    """
     from merging import MergeParams
     return _section("merging", MergeParams)
 
 
 def feature_params():
-    """Chmura punktów i FPFH kości: sekcja "features" -> bones.FeatureParams."""
+    """Chmura punktów i FPFH kości: sekcja "features" settings.json.
+
+    Returns:
+        bones.FeatureParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
+    """
     from bones import FeatureParams
     return _section("features", FeatureParams)
 
 
 def contact_params():
-    """Powierzchnie styku (narzędzie + algorytm): sekcja "contacts" -> contacts.ContactParams.
+    """Powierzchnie styku (narzędzie + algorytm): sekcja "contacts" settings.json.
 
     Klucz "port" jest pomijany - to CONTACT_TOOL_PORT.
+
+    Returns:
+        contacts.ContactParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
     """
     from contacts import ContactParams
     return _section("contacts", ContactParams, skip=("port",))
 
 
 def matching_params():
-    """Dopasowanie powierzchni styku: sekcja "matching" -> matching_surfaces.SurfaceMatchParams.
+    """Dopasowanie powierzchni styku: sekcja "matching" settings.json.
 
     Klucz "port" jest pomijany - to MATCH_TOOL_PORT.
+
+    Returns:
+        matching_surfaces.SurfaceMatchParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
     """
     from matching_surfaces import SurfaceMatchParams
     return _section("matching", SurfaceMatchParams, skip=("port",))
 
 
+def surface_feature_params():
+    """Porównanie cech przełomu i kory: sekcja "surface_features" settings.json.
+
+    Returns:
+        surface_features.SurfaceFeatureParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
+    """
+    from surface_features import SurfaceFeatureParams
+    return _section("surface_features", SurfaceFeatureParams)
+
+
 def view3d_params():
-    """Wygląd wizualizacji HTML: sekcja "visualization_3d" -> visualization_3d.View3DParams.
+    """Wygląd wizualizacji HTML: sekcja "visualization_3d" settings.json.
 
     Klucz "open_browser" jest pomijany - to OPEN_BROWSER.
+
+    Returns:
+        visualization_3d.View3DParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
     """
     from visualization_3d import View3DParams
     return _section("visualization_3d", View3DParams, skip=("open_browser",))

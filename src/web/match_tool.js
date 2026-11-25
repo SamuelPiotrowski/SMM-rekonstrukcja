@@ -1,10 +1,17 @@
 // Podgląd dopasowania z suwakami (serwer: src/match_tool.py).
 //
-// Stan:
+// Przebieg: main() pobiera pary i ustawienia (GET /api/pairs) -> buildSliders() ->
+// selectPair() rysuje parę (GET /api/geometry dla obu powierzchni) -> zmiana suwaka ->
+// requestCompute() -> runPending() (POST /api/match) -> draw() + renderResult().
+//
+// Stan (obiekt `state`):
+//   pairs       - pary z matching.json, od najlepszej (wyniki i T z pliku),
 //   base        - ustawienia, z którymi policzono matching.json (startowe położenie suwaków),
 //   params      - obecne położenie suwaków,
 //   computed    - {klucz pary: {result, params}} - wyniki przeliczone na tej stronie,
-//   geometry    - {klucz powierzchni: siatki} - pobierane raz.
+//   geometry    - {klucz powierzchni: siatki} - pobierane raz,
+//   current     - indeks pokazanej pary w `pairs`,
+//   busy        - trwa zapytanie POST /api/match, pending - ostatnie żądanie czekające na swoją kolej.
 // Zmiana suwaka przelicza TYLKO pokazaną parę. Gdy zmieniło się któreś z ustawień
 // szukania (SEARCH), para jest dopasowywana od nowa; gdy tylko ustawienia oceny -
 // oceniane jest obecne ustawienie (szybko). Zapytania nie nakładają się: w trakcie
@@ -12,9 +19,13 @@
 
 const COLORS = { a: "#6f9fd8", b: "#e0c9a0", surf_a: "#e8508f", surf_b: "#18b0a6" };
 const LIGHTING = { ambient: 0.55, diffuse: 0.75, specular: 0.12, roughness: 0.65, fresnel: 0.05 };
-const ITERATIONS = [10000, 25000, 50000, 100000, 250000, 500000, 1000000, 2000000];
+const ITERATIONS = [10000, 25000, 50000, 100000, 250000, 500000, 1000000, 2000000];   // wartości suwaka iteracji
 
-// group: "search" = dopasowanie od nowa, "score" = tylko ocena
+// Suwaki ustawień z sekcji "matching" (klucze = pola SurfaceMatchParams):
+//   group: "search" = zmiana wymaga dopasowania od nowa, "score" = wystarczy nowa ocena,
+//   min / max / step - zakres suwaka (rozszerzany, gdy wartość z matching.json jest poza nim),
+//   values - zamiast min/max: lista dozwolonych wartości (suwak wybiera indeks),
+//   unit, help - opis pod suwakiem. buildSliders dopisuje: input (element <input>), out (pole wartości).
 const SLIDERS = [
   { group: "search", key: "sample_mm", label: "Odstęp punktów powierzchni", unit: "mm", min: 0.15, max: 1, step: 0.05,
     help: "Mniej = dokładniej i wolniej. Wpływa też na ocenę." },
@@ -39,15 +50,23 @@ const SLIDERS = [
   { group: "score", key: "collision_search_mm", label: "Kolizja: zasięg szukania", unit: "mm", min: 1, max: 10,
     step: 0.5, help: "Sprawdzane tylko tak blisko drugiej kości." },
 ];
-const SEARCH = SLIDERS.filter((s) => s.group === "search").map((s) => s.key);
-const ALL = SLIDERS.map((s) => s.key);
+const SEARCH = SLIDERS.filter((s) => s.group === "search").map((s) => s.key);   // ustawienia szukania
+const ALL = SLIDERS.map((s) => s.key);                                          // wszystkie ustawienia z suwaków
 
+/** Element strony o danym id. */
 const $ = (id) => document.getElementById(id);
 const state = { pairs: [], base: {}, params: {}, computed: {}, geometry: {}, current: 0,
                 busy: false, pending: null };
 
 // ---------- pomocnicze ----------
 
+/**
+ * Zapytanie JSON do serwera podglądu.
+ * @param {string} url      np. '/api/pairs'
+ * @param {object} options  opcje fetch (method, headers, body, ...)
+ * @returns {Promise<object>} odpowiedź serwera
+ * @throws {Error} z komunikatem serwera ({"error": ...}), gdy odpowiedź nie jest OK
+ */
 async function api(url, options) {
   const r = await fetch(url, options);
   const data = await r.json();
@@ -55,6 +74,12 @@ async function api(url, options) {
   return data;
 }
 
+/**
+ * Base64 z serwera (surowe bajty tablicy numpy, match_tool._b64) -> tablica typu `Type`.
+ * @param {string} s        tekst base64
+ * @param {Function} Type   np. Float32Array, Uint32Array - musi zgadzać się z typem po stronie Pythona
+ * @returns {ArrayBufferView}
+ */
 function b64(s, Type) {
   const bin = atob(s);
   const bytes = new Uint8Array(bin.length);
@@ -63,6 +88,11 @@ function b64(s, Type) {
 }
 
 let toastTimer;
+/**
+ * Dymek z komunikatem na dole strony (błąd wisi dłużej: 8 s zamiast 2,5 s).
+ * @param {string} msg
+ * @param {boolean} error  true = czerwony dymek błędu
+ */
 function toast(msg, error = false) {
   const t = $("toast");
   t.textContent = msg;
@@ -72,17 +102,32 @@ function toast(msg, error = false) {
   toastTimer = setTimeout(() => (t.hidden = true), error ? 8000 : 2500);
 }
 
+/** Klucz pary "<klucz A>|<klucz B>" - indeks w state.computed. */
 const pairKey = (p) => `${p.a}|${p.b}`;
+/** Liczba z `d` miejscami po przecinku; brak wartości (null / NaN) -> "–". */
 const fmt = (x, d = 0) => (x === null || x === undefined || Number.isNaN(x) ? "–" : Number(x).toFixed(d));
+/** Liczba miejsc po przecinku kroku suwaka, np. 0.05 -> 2. */
 const decimals = (step) => (String(step).split(".")[1] || "").length;
+/** Czy ustawienia `p` i `q` mają te same wartości dla wszystkich kluczy `keys`. */
 const sameParams = (p, q, keys) => keys.every((k) => Number(p[k]) === Number(q[k]));
 
+/**
+ * Wartość suwaka do wyświetlenia: z jednostką i liczbą miejsc wg kroku
+ * (iteracje - z separatorem tysięcy, bez jednostki).
+ * @param {object} s  suwak z SLIDERS
+ * @param {number} v  wartość
+ * @returns {string}
+ */
 function fmtValue(s, v) {
   if (s.values) return Number(v).toLocaleString("pl-PL");
   return `${Number(v).toFixed(decimals(s.step))}${s.unit ? " " + s.unit : ""}`;
 }
 
-// Wynik pary pokazywany teraz: przeliczony na stronie albo z matching.json.
+/**
+ * Wynik pary pokazywany teraz: przeliczony na stronie albo z matching.json.
+ * @param {number} k  indeks pary w state.pairs
+ * @returns {{result: object, params: object}} wynik (score, T, ...) i ustawienia, z którymi go policzono
+ */
 function shown(k) {
   const p = state.pairs[k];
   return state.computed[pairKey(p)] || { result: p, params: state.base };
@@ -90,6 +135,11 @@ function shown(k) {
 
 // ---------- suwaki ----------
 
+/**
+ * Tworzy suwaki z SLIDERS w panelach "Szukanie ustawienia" i "Ocena" i ustawia je na state.base.
+ * Przesuwanie zmienia tylko wyświetlaną wartość; puszczenie suwaka zapisuje ją w state.params
+ * i zleca przeliczenie pokazanej pary (requestCompute).
+ */
 function buildSliders() {
   for (const s of SLIDERS) {
     const box = document.createElement("div");
@@ -107,6 +157,7 @@ function buildSliders() {
     box.innerHTML = `<div class="row"><label for="${input.id}">${s.label}</label><span class="v"></span></div>`;
     box.appendChild(input);
     box.insertAdjacentHTML("beforeend", `<div class="help">${s.help}</div>`);
+    // obecna wartość suwaka (z listy `values` albo zaokrąglona do kroku)
     const value = () => (s.values ? s.values[Number(input.value)] : Number(Number(input.value).toFixed(decimals(s.step))));
     input.addEventListener("input", () => showValue(s, value()));
     input.addEventListener("change", () => {
@@ -121,11 +172,20 @@ function buildSliders() {
   setSliders(state.base);
 }
 
+/**
+ * Wyświetla wartość suwaka; wyróżnia ją, gdy różni się od matching.json.
+ * @param {object} s  suwak z SLIDERS
+ * @param {number} v  wartość
+ */
 function showValue(s, v) {
   s.out.textContent = fmtValue(s, v);
   s.out.classList.toggle("changed", Number(v) !== Number(state.base[s.key]));
 }
 
+/**
+ * Ustawia wszystkie suwaki i state.params na podane wartości (bez przeliczania).
+ * @param {object} values  {klucz ustawienia: wartość}, np. state.base
+ */
 function setSliders(values) {
   for (const s of SLIDERS) {
     const v = values[s.key];
@@ -136,6 +196,7 @@ function setSliders(values) {
   updateSnippet();
 }
 
+/** Wypisuje zmienione ustawienia jako linie gotowe do wklejenia w settings.json (i pokazuje "Kopiuj"). */
 function updateSnippet() {
   const changed = ALL.filter((k) => Number(state.params[k]) !== Number(state.base[k]));
   $("snippet").textContent = changed.length
@@ -146,6 +207,10 @@ function updateSnippet() {
 
 // ---------- lista par ----------
 
+/**
+ * Rysuje listę par (z filtrem z pola wyszukiwania). Przy parach przeliczonych na stronie:
+ * stary wynik → nowy, z kolorem wzrostu / spadku (różnica co najmniej 0,5 mm²).
+ */
 function renderList() {
   const q = $("pairSearch").value.trim().toLowerCase();
   const ul = $("pairList");
@@ -170,6 +235,12 @@ function renderList() {
 
 // ---------- 3D ----------
 
+/**
+ * Siatka kości i nakładka powierzchni (GET /api/geometry) - pobierana raz i pamiętana.
+ * @param {string} key  klucz powierzchni "<id kości>#<numer>"
+ * @returns {Promise<{name, label, pos: Float32Array, idx: Uint32Array, spos: Float32Array, sidx: Uint32Array}>}
+ *          pos / idx - kość, spos / sidx - nakładka powierzchni; wszystko w układzie kości
+ */
 async function getGeometry(key) {
   if (!state.geometry[key]) {
     const g = await api(`/api/geometry?key=${encodeURIComponent(key)}`);
@@ -182,7 +253,12 @@ async function getGeometry(key) {
   return state.geometry[key];
 }
 
-// Rozbija (V, 3) na x, y, z; T (4x4) = przekształcenie albo null.
+/**
+ * Rozbija pozycje (V, 3) na osobne tablice x, y, z (format plotly), opcjonalnie przekształcone.
+ * @param {Float32Array} pos  pozycje x0, y0, z0, x1, ...
+ * @param {number[][]|null} T  macierz 4x4 (obrót + przesunięcie) albo null = bez zmian
+ * @returns {{x: Float32Array, y: Float32Array, z: Float32Array}}
+ */
 function xyz(pos, T) {
   const n = pos.length / 3;
   const x = new Float32Array(n), y = new Float32Array(n), z = new Float32Array(n);
@@ -199,6 +275,15 @@ function xyz(pos, T) {
   return { x, y, z };
 }
 
+/**
+ * Ślad plotly mesh3d jednej siatki.
+ * @param {Float32Array} pos     pozycje wierzchołków (V, 3)
+ * @param {Uint32Array} idx      trójkąty (T, 3)
+ * @param {number[][]|null} T    przekształcenie 4x4 (kość A) albo null (kość B)
+ * @param {string} color         kolor "#rrggbb"
+ * @param {string} name          nazwa w podpowiedzi po najechaniu
+ * @returns {object} ślad dla Plotly.react
+ */
 function meshTrace(pos, idx, T, color, name) {
   const n = idx.length / 3;
   const i = new Uint32Array(n), j = new Uint32Array(n), k = new Uint32Array(n);
@@ -208,6 +293,12 @@ function meshTrace(pos, idx, T, color, name) {
            hovertemplate: `<b>${name}</b><extra></extra>` };
 }
 
+/**
+ * Rysuje pokazaną parę: kość B w swoim układzie, kość A przeniesiona przekształceniem T
+ * z obecnego wyniku (shown), obie z nakładkami powierzchni. Kamera zostaje przy
+ * przeliczaniu tej samej pary (uirevision).
+ * @returns {Promise<void>}
+ */
 async function draw() {
   const k = state.current;
   const p = state.pairs[k];
@@ -228,11 +319,17 @@ async function draw() {
 
 // ---------- wynik ----------
 
+/**
+ * Karta wyniku pokazanej pary (wynik, styk, pokrycie, RMSE, kolizja) z poprzednimi
+ * wartościami z matching.json, gdy się zmieniły, i tytuł pary. Pokazuje ramkę
+ * "Przelicz z obecnymi", gdy suwaki różnią się od ustawień pokazanego wyniku.
+ */
 function renderResult() {
   const k = state.current;
   const p = state.pairs[k];
   const { result: r, params } = shown(k);
   const c = state.computed[pairKey(p)];
+  // "było X" - tylko dla przeliczonej pary i tylko gdy zmianę widać po zaokrągleniu do `d` miejsc
   const was = (now, old, d = 0, unit = "") =>
     c && Math.abs((now ?? 0) - (old ?? 0)) >= 0.5 * 10 ** -d
       ? `<span class="was">było ${fmt(old, d)}${unit}</span>` : "";
@@ -256,13 +353,24 @@ function renderResult() {
 
 // ---------- przeliczanie ----------
 
-// force = dopasowanie od nowa nawet bez zmiany ustawień szukania (RANSAC jest losowy).
+/**
+ * Zleca przeliczenie pokazanej pary. Gdy trwa inne liczenie, zapamiętywane jest tylko
+ * ostatnie żądanie (force z wcześniejszego żądania tej samej pary nie ginie).
+ * @param {boolean} force  dopasowanie od nowa nawet bez zmiany ustawień szukania (RANSAC jest losowy)
+ */
 function requestCompute(force) {
   const prev = state.pending;
   state.pending = { k: state.current, force: force || (prev && prev.k === state.current && prev.force) };
   if (!state.busy) runPending();
 }
 
+/**
+ * Wykonuje czekające żądanie (POST /api/match), potem kolejne, jeśli przyszło w trakcie.
+ * Tryb "full" (dopasowanie od nowa), gdy force albo zmieniły się ustawienia szukania
+ * względem pokazanego wyniku; inaczej "score" - ocena obecnego T z nowymi ustawieniami oceny.
+ * Błąd jest pokazywany w dymku, a stary wynik zostaje.
+ * @returns {Promise<void>}
+ */
 async function runPending() {
   const job = state.pending;
   state.pending = null;
@@ -291,6 +399,11 @@ async function runPending() {
   }
 }
 
+/**
+ * Włącza / wyłącza stan "liczę…" (nakładka na wykresie, status, zablokowany "Przelicz od nowa").
+ * @param {boolean} on
+ * @param {string} text  opis na nakładce, np. "Oceniam…"
+ */
 function setBusy(on, text = "") {
   state.busy = on;
   $("busy").hidden = !on;
@@ -301,6 +414,11 @@ function setBusy(on, text = "") {
   if (on) $("stale").hidden = true;
 }
 
+/**
+ * Pokazuje parę k: lista, karta wyniku i wykres 3D (błąd wczytania -> dymek).
+ * @param {number} k  indeks pary w state.pairs
+ * @returns {Promise<void>}
+ */
 async function selectPair(k) {
   state.current = k;
   renderList();
@@ -314,11 +432,19 @@ async function selectPair(k) {
 
 // ---------- start ----------
 
+/**
+ * Start strony: pobiera pary i ustawienia, buduje suwaki, podpina przyciski
+ * (Przelicz od nowa, Przywróć ustawienia, Kopiuj) i strzałki góra / dół, pokazuje pierwszą parę.
+ * @returns {Promise<void>}
+ */
 async function main() {
   const data = await api("/api/pairs");
   state.pairs = data.pairs;
   state.base = data.params;
   $("pairCount").textContent = `(${state.pairs.length})`;
+  const warnings = data.warnings || [];                 // matching.json nieaktualny (MatchState.warnings)
+  $("warnings").hidden = !warnings.length;
+  $("warnings").textContent = warnings.map((w) => "⚠ " + w).join("\n");
   buildSliders();
   $("pairSearch").addEventListener("input", renderList);
   $("recompute").addEventListener("click", () => requestCompute(true));

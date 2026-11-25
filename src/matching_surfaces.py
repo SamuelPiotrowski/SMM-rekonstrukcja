@@ -36,8 +36,9 @@ DLA KAŻDEJ PARY POWIERZCHNI (A z jednej kości, B z innej):
                     prawdziwe dopasowanie przełomów nie może wbijać jednej kości w drugą,
    - WYNIK = styk - kolizja [mm²]; pary są sortowane od najlepszego wyniku.
 
-Użycie: scripts/match_surfaces.py (wyniki: out/3d/matching.json, out/3d/matching.html),
-podgląd z suwakami ustawień i przeliczaniem jednej pary: scripts/tune_matching.py (src/match_tool.py).
+Użycie: scripts/match_surfaces.py liczy i zapisuje out/3d/matching.json,
+scripts/tune_matching.py (src/match_tool.py) go pokazuje: suwaki ustawień z przeliczaniem
+jednej pary albo (--html) statyczna strona out/3d/matching.html.
 W kodzie:
     surfaces, info = extract_surfaces(load_bones(features=True), params, contact_params)
     results = match_all(surfaces, params)     # [{"a", "b", "score", "contact_mm2", "T", ...}, ...]
@@ -63,6 +64,9 @@ log = logging.getLogger(__name__)
 reg = o3d.pipelines.registration
 
 SOURCES = ("manual", "auto", "manual-auto")
+# Opisy trybów "source" do komunikatów i stron (match_surfaces.py, match_tool).
+SOURCE_NAMES = {"manual": "tylko ręczne", "auto": "tylko z algorytmu",
+                "manual-auto": "ręczne, a gdy brak - z algorytmu"}
 
 
 @dataclass(frozen=True)
@@ -149,7 +153,11 @@ class Surface:
         return self._cache[key]
 
     def tree(self) -> cKDTree:
-        """KD-drzewo punktów powierzchni (szukanie najbliższych sąsiadów) - liczone raz."""
+        """KD-drzewo punktów powierzchni (szukanie najbliższych sąsiadów) - liczone raz.
+
+        Returns:
+            cKDTree z `points` (te same indeksy co points i normals).
+        """
         if "tree" not in self._cache:
             self._cache["tree"] = cKDTree(self.points)
         return self._cache["tree"]
@@ -305,7 +313,16 @@ def collision_area(a: Surface, b: Surface, T: np.ndarray, p: SurfaceMatchParams)
         Suma pól z obu kierunków [mm²].
     """
     def one_way(src: Surface, dst: Surface, M: np.ndarray) -> float:
-        """Pole kości src (przeniesionej M) wbite w kość dst [mm²]."""
+        """Pole kości src (przeniesionej M) wbite w kość dst [mm²].
+
+        Args:
+            src: powierzchnia, której kość jest przenoszona.
+            dst: powierzchnia kości, w którą src może się wbijać.
+            M:   przekształcenie 4x4 z układu kości src do układu kości dst.
+
+        Returns:
+            Pole punktów chmury src leżących głębiej niż p.collision_mm pod powierzchnią dst.
+        """
         ps = transform_points(M, np.asarray(src.bone.cloud.points))
         pd, nd = np.asarray(dst.bone.cloud.points), np.asarray(dst.bone.cloud.normals)
         d, idx = dst.bone_tree.query(ps, distance_upper_bound=p.collision_search_mm)
@@ -322,6 +339,11 @@ def evaluate(a: Surface, b: Surface, T: np.ndarray, p: SurfaceMatchParams) -> di
 
     Bez szukania ustawienia - szybkie, więc nadaje się do sprawdzenia, jak wynik
     zmienia się z ustawieniami oceny (tolerance_mm, normal_angle_deg, collision_*).
+
+    Args:
+        a, b: powierzchnie (każda w układzie swojej kości).
+        T:    przekształcenie 4x4 z układu kości a do układu kości b.
+        p:    ustawienia oceny (tolerance_mm, normal_angle_deg, collision_mm, collision_search_mm).
 
     Returns:
         {"cover_a", "cover_b", "contact_mm2", "rmse_mm", "collision_mm2",
@@ -419,6 +441,12 @@ def match_all(surfaces: list[Surface], p: SurfaceMatchParams, progress=print) ->
 def report(surfaces: list[Surface], results: list[dict], p: SurfaceMatchParams,
            contact_params: ContactParams = ContactParams()) -> dict:
     """Słownik do zapisu w matching.json (i do visualization_3d.match_matrix_figure).
+
+    Args:
+        surfaces:       powierzchnie z extract_surfaces.
+        results:        wyniki match_all dla tych powierzchni.
+        p:              ustawienia dopasowania, z którymi liczono wyniki.
+        contact_params: ustawienia wykrywania (ważne w trybach "auto" i "manual-auto").
 
     Returns:
         {"params": ustawienia dopasowania, "contact_params": ustawienia wykrywania,

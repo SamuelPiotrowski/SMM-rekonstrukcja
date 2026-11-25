@@ -7,11 +7,11 @@ Mając fragmenty kości, należy je zeskanować skanerem świetlnym, który twor
 ## Podproblemy:
 
 1. Skanowanie kości, przede wszystkim ich powierzchni złamania. Rozwiązanie problemów z niedokładnym skanem. Skany mają formaty: (obj. ply, stl).
-2. Ręczne dopasowywanie fragmentów w programie 3d. Zbaczenie czy skala się zgadza pomiędzy osobno zeskanowanymi fragmentami.
-3. Za pomocą bibliotek w pythonie przekonwertować na format, na którym można pracować
-4. Oczyszczenie i przygotowanie danych (w tym łączenie wielu skanów tej samej kości)
-5. Wstępna selekcja kości po wielkości powierzchni złamania, jej średnicy lub innych wspólnych cechach końcówek.
-6. Dopasowywanie bardziej szczegółowe algorytmem dopasowywania punktów. Chyba to co robi Kasia z tymi klockami może się nadać.
+2. Przerobienie mesh na chmury puntków oraz punkty z deskryptorem fpfh
+4. Oczyszczenie i przygotowanie danych (w tym łączenie wielu skanów tej samej kości, usunięcie dziwnych fragmentów daleko)
+5. Wyznaczenie powierzchni styku na kościach
+6. Wyznaczenie macierzy obrotu i translacji, które najlepiej dopasowują do siebie pary (obecnie RANSAC i ICP)
+7. Policzenie wyniku dopasowania
 
 # Projekt Python
 
@@ -78,12 +78,12 @@ Wszystko uruchamiamy z głównego folderu projektu, przy aktywnym `.venv`. Skryp
 | 2 | `python scripts/show_merging.py` | pokazuje, jak połączyły się skany | `out/3d/merging.html` |
 | 3 | `python scripts/mark_contacts.py` | **ręczne oznaczanie powierzchni styku** w przeglądarce | `contacts/*.json` |
 | 4 | `python scripts/show_bones.py` | wszystkie kości + oznaczone powierzchnie styku | `out/3d/bones.html` |
-| 5 | `python scripts/match_surfaces.py` | **dopasowanie fragmentów po powierzchniach styku** (RANSAC + ICP) | `out/3d/matching.html` |
-| 6 | `python scripts/tune_matching.py` | **podgląd dopasowania z suwakami** - zmiana ustawienia przelicza pokazaną parę | – (nic nie zapisuje) |
+| 5 | `python scripts/match_surfaces.py` | **dopasowanie fragmentów po powierzchniach styku** (RANSAC + ICP) - tylko liczy i zapisuje | `out/3d/matching.json` |
+| 6 | `python scripts/tune_matching.py` | **podgląd dopasowania** (jak krok 4 dla kroku 1): suwaki przeliczają pokazaną parę; `--html` = plik do wysłania | `out/3d/matching.html` (z `--html`) |
 | – | `python scripts/detect_contacts.py` | algorytm wykrywania powierzchni styku + porównanie z ręcznymi | `contacts/auto/*.json` |
 | – | `python tests/test_pipeline.py` | test całości na sztucznych skanach (~20 s) | – |
 
-Wizualizacje (krok 2 i 4) to pojedyncze pliki HTML - otwierają się same, działają bez internetu i można je komuś wysłać.
+Wizualizacje (krok 2, 4 i 6 z `--html`) to pojedyncze pliki HTML - otwierają się same, działają bez internetu i można je komuś wysłać.
 
 ### 1. Przygotowanie danych: `scripts/prepare_data.py`
 
@@ -120,14 +120,15 @@ Jeśli coś jest źle połączone (albo nie połączone), w `settings.json` zmie
 
 ### 3. Oznaczanie powierzchni styku: `scripts/mark_contacts.py`
 
-Otwiera w przeglądarce narzędzie do malowania powierzchni styku (przełomów) na kościach. Lista kości jest po lewej (zielona kropka = oznaczona), narzędzia po prawej.
+Otwiera w przeglądarce narzędzie do malowania powierzchni styku (przełomów) na kościach. Lista kości jest po lewej (zielona kropka = oznaczona ręcznie, fioletowa = ustawienie automatyczne), narzędzia po prawej.
 
+- **Ustawienie automatyczne**: kość bez ręcznych oznaczeń otwiera się od razu z wynikiem algorytmu (sekcja `"contacts"` w `settings.json`; z `contacts/auto/`, a gdy brak albo nieaktualny - liczony). Strona pisze wtedy „ustawienie automatyczne”. Popraw je narzędziami poniżej i zapisz (`Ctrl+S`) - dopiero wtedy staje się ręcznym oznaczeniem w `contacts/<id kości>.json`. Nieruszone i niezapisane zostaje automatyczne (nie trafia do ręcznych).
 - **Różdżka** (`W`): kliknij przełom - zaznacza obszar aż do ostrej krawędzi. Za dużo? `Ctrl+Z` i zmniejsz tolerancję.
 - **Pędzel** (`B`) / **Gumka** (`E`): poprawki lewym przyciskiem, rozmiar `[` `]`.
 - Kilka przełomów na jednej kości = **Nowa powierzchnia** (`N`), każda ma swój kolor i nazwę (dwuklik zmienia nazwę).
-- **Propozycja algorytmu**: wczytuje wynik algorytmu jako punkt wyjścia do poprawek.
+- **Propozycja algorytmu**: zastępuje obecne oznaczenia wynikiem algorytmu (np. żeby zacząć od nowa).
 - Obracanie **prawym** przyciskiem, przesuwanie środkowym, zoom kółkiem. `H` - pomoc.
-- `Ctrl+S` zapisuje do `contacts/<id kości>.json`; przy zmianie kości zapis jest automatyczny.
+- `Ctrl+S` zapisuje do `contacts/<id kości>.json`; przy zmianie kości zmiany zapisują się same.
 
 Folder `contacts/` **jest w repozytorium** - to ręczna praca, warto ją commitować i dzielić się nią (poza podfolderem `contacts/auto/` z wynikami algorytmu, który jest generowany). Jeśli siatka kości się zmieni (np. po zmianie ustawień i ponownym `prepare_data.py`), oznaczenia są automatycznie przenoszone na nową siatkę po położeniu punktów.
 
@@ -141,20 +142,25 @@ Wszystkie kości ułożone płasko „na stole”, ponumerowane, z oznaczonymi p
 python scripts/show_bones.py                    # kolory skanera
 python scripts/show_bones.py --colors fragment  # każda kość w innym kolorze
 python scripts/show_bones.py --colors fpfh      # kolor wg lokalnego kształtu (FPFH), porównywalny między kośćmi
-python scripts/show_bones.py --auto             # powierzchnie z algorytmu zamiast ręcznych
+python scripts/show_bones.py --source auto      # powierzchnie z algorytmu zamiast ręcznych (krócej: --auto)
+python scripts/show_bones.py --source manual-auto  # ręczne, a dla kości bez ręcznych - z algorytmu
 python scripts/show_bones.py 3 strzalkowa       # tylko kość nr 3 i kości z "strzalkowa" w nazwie (pełna rozdzielczość)
 ```
+
+Które powierzchnie styku są pokazywane domyślnie, ustawia `settings.json`, sekcja `"visualization_3d"`, klucz `"source"`: `"manual"` / `"auto"` / `"manual-auto"` (tak samo jak `"source"` w sekcji `"matching"`). `--source` / `--auto` zmienia to jednorazowo. W trybach `auto` i `manual-auto` brakujący albo nieaktualny wynik algorytmu jest liczony i zapisywany w `contacts/auto/`.
 
 ### Algorytm wykrywania powierzchni styku (na przyszłość): `scripts/detect_contacts.py`
 
 Wszystko jest przygotowane pod algorytm, który zastąpi ręczne oznaczanie:
 - algorytm to funkcja `(kość, parametry) -> etykiety wierzchołków` zarejestrowana dekoratorem `@detector("nazwa")` w `src/contacts.py`,
-- wynik ma **ten sam format** co ręczne oznaczenia i leży obok nich: `contacts/auto/<id kości>.json` (pole `source` = `auto:<nazwa>`, pole `detector` = algorytm i jego ustawienia). Działa z wizualizacją (`show_bones.py --auto`), narzędziem („Propozycja algorytmu”) i dopasowaniem (`match_surfaces.py --source auto`),
+- wynik ma **ten sam format** co ręczne oznaczenia i leży obok nich: `contacts/auto/<id kości>.json` (pole `source` = `auto:<nazwa>`, pole `detector` = algorytm i jego ustawienia). Działa z wizualizacją (`show_bones.py --auto` albo `"source"` w sekcji `"visualization_3d"`), narzędziem („Propozycja algorytmu”) i dopasowaniem (`match_surfaces.py --source auto`),
 - który algorytm jest używany: `settings.json`, sekcja `contacts`, klucz `method` (jednorazowo: `--method`),
 - `detect_contacts.py` liczy zawsze od nowa; dopasowanie bierze zapisany wynik i liczy sam tylko wtedy, gdy go brak albo zmienił się algorytm, jego ustawienia lub siatka kości,
 - `detect_contacts.py` od razu **porównuje wynik z ręcznymi oznaczeniami** (IoU, precyzja, czułość) - ręczne oznaczenia są „prawdą” do oceny algorytmu.
 
-Teraz jest tylko prosty algorytm bazowy `roughness` (przełom = szorstka powierzchnia, kora = gładka): punkt wyjścia, nie rozwiązanie.
+Algorytmy:
+- `roughness` - bazowy: przełom = szorstka powierzchnia, kora = gładka. Punkt wyjścia, nie rozwiązanie.
+- `features` - **szorstkość + rozrzut normalnych + gęstość siatki naraz, bez żadnych oznaczeń**. Każda cecha jest porównywana z typową wartością na tej samej kości (mediana = kora, bo kory jest najwięcej): przełom jest bardziej szorstki, ma większy rozrzut normalnych i gęstszą siatkę. Wynik = średnia tych odchyleń, potem wygładzenie, próg i podział na obszary. Nie zależy od skali skanera. Na naszych 6 ręcznie oznaczonych kościach IoU 0.47 (`roughness` 0.43); opis cech: [raporty/przelom_vs_kora.md](raporty/przelom_vs_kora.md). Ustawienia: `feature_keys`, `feature_threshold`, `feature_smooth_mm`, `feature_open_mm` w sekcji `contacts`.
 
 ```python
 # src/contacts.py
@@ -185,7 +191,7 @@ Algorytm bazowy `roughness` jest słaby: na jego powierzchniach para kości strz
 
 Jak działa:
 1. Normalne powierzchni A są **odwracane**: dwa przełomy stykają się twarzą w twarz (wypukłość na A = wklęsłość na B), więc po odwróceniu A „wygląda jak” B i działa ta sama rejestracja co przy łączeniu skanów.
-2. **RANSAC** na deskryptorach FPFH (zgrubnie) + **ICP** (dokładnie) → przekształcenie A → B. RANSAC w open3d jest losowy (wielowątkowy), dlatego zawsze przechodzi wszystkie 1 mln iteracji - przy 50 tys. dobre ustawienie wychodziło tylko w ~40% prób.
+2. **RANSAC** na deskryptorach FPFH (zgrubnie) + **ICP** (dokładnie) → przekształcenie A → B. RANSAC w open3d jest losowy (wielowątkowy), dlatego zawsze przechodzi wszystkie 1 mln iteracji - przy 50 tys. dobre ustawienie wychodziło tylko w ~40% prób. Większość złych opcji jest odrzucana od razu, bo są sprawdzane proste warunki. 
 3. Ocena: **styk** = pole, na którym powierzchnie leżą bliżej niż `tolerance_mm` (0.5 mm) z przeciwnymi normalnymi; **kolizja** = pole, na którym całe kości wchodzą w siebie głębiej niż `collision_mm` (1 mm). **Wynik = styk − kolizja** [mm²].
 
 Wszystkie ustawienia z opisami: `settings.json`, sekcja `matching`.
@@ -196,9 +202,20 @@ python scripts/match_surfaces.py first_test 3         # tylko wybrane kości
 python scripts/match_surfaces.py --source manual-auto # jednorazowo inny tryb
 ```
 
-Strona `out/3d/matching.html`: najlepsze pary w 3D (kość A ustawiona na B, lista wybiera parę) + macierz wyników wszystkich par. Wszystkie pary z przekształceniami: `out/3d/matching.json`.
+Wynik: `out/3d/matching.json` - wszystkie pary z wynikami, przekształceniami i użytymi ustawieniami. Skrypt **tylko liczy i zapisuje**; oglądanie to krok 6.
 
-**Podgląd z suwakami: `python scripts/tune_matching.py`** (po `match_surfaces.py`). Lokalna strona w przeglądarce (jak narzędzie do oznaczania, działa bez internetu): lista par z `matching.json`, para w 3D i suwaki ustawień z sekcji `matching`. Po puszczeniu suwaka przeliczana jest **tylko pokazana para**:
+### 6. Podgląd dopasowania: `scripts/tune_matching.py`
+
+Pokazuje zapisany `matching.json` (tak jak `show_bones.py` pokazuje wynik `prepare_data.py`). Ostrzega w konsoli i na stronie, gdy wynik jest nieaktualny: inne ustawienia w `settings.json` niż te, z którymi liczono, albo zmienione oznaczenia - wtedy uruchom ponownie `match_surfaces.py`.
+
+```powershell
+python scripts/tune_matching.py          # strona z suwakami (lokalny serwer)
+python scripts/tune_matching.py --html   # statyczna strona out/3d/matching.html
+```
+
+`--html`: najlepsze pary w 3D (kość A ustawiona na B, lista wybiera parę) + macierz wyników wszystkich par; jeden plik, można go wysłać.
+
+**Suwaki** (domyślnie): lokalna strona w przeglądarce (jak narzędzie do oznaczania, działa bez internetu): lista par z `matching.json`, para w 3D i suwaki ustawień z sekcji `matching`. Po puszczeniu suwaka przeliczana jest **tylko pokazana para**:
 - suwaki „Szukanie ustawienia” (odstęp punktów, FPFH, RANSAC, ICP) - dopasowanie od nowa (~2-3 s przy 1 mln iteracji × 2 próby),
 - suwaki „Ocena” (styk, kolizja) - tylko nowa ocena obecnego ustawienia (ułamek sekundy).
 
@@ -284,44 +301,65 @@ out/             wyniki (generowane, nie ma w repo)
 
 ## 1. Skanowanie
 
+### Problem skanu
+
+Skany, które wykonywaliśmy skanerem miały błędy. Nie dało się dobrze zeskanować gładkiej powierzchni kości. W podejściu 3D zakładamy, że 
+
 ### Surowe dane ze skanów, prosto z pliku
 - Wierzchołki: współrzędne (x, y, z) każdego punktu na powierzchni.
 - Ściany: trójkąty, czyli które wierzchołki są ze sobą połączone.
 - Normalne: kierunek „na zewnątrz” w każdym punkcie. Jeśli ich nie ma, można je policzyć.
-- Kolor na wierzchołek: tylko jeśli skaner go zapisał.
+- Kolor na wierzchołek.
+
+### Sposób zapisu skanów
+
+Na razie skany są zapisane surowo i nie da się do końca wywnisokować, które to są kości. W przyszłości przy wielu skanach tego samego fragmentu trzeba podać w nazwie taki sam fragment (nazwa lub kod fragmentu). Przy podejściu ze skalowaniem jedynie końcówek fragmentów, (z powodu niedokładnego skanowania płaskich boków kości przez skaner) należy 
 
 ### Co wiemy o naszych skanach (23.11.2026)
 - Każdy skan to **otwarta, częściowa** powierzchnia fragmentu (skaner łapie tylko część), krawędzie trójkątów ~0.22 mm.
 - 15 skanów (+ 1 occlusion) to **12 różnych kości**: `first_test/lowerjaw` = `modelowanie matematyczne_(6)` lowerjaw + upperjaw, `first_test/upperjaw` = `modelowanie matematyczne_(5)/upperjaw`. Pozostałe skany nie pokrywają się z niczym (nakładanie ≤ 0.20).
 - Sloty Medita (upperjaw / lowerjaw) **nie oznaczają** konkretnej kości.
-- `first_test/occlusionfirst` (skan zgryzu) pasuje do obu fragmentów kości strzałkowej naraz - to prawdopodobnie **oba fragmenty złożone razem**, czyli gotowa „prawda” do sprawdzania algorytmu dopasowania.
+- `first_test/occlusionfirst` to **oba fragmenty złożone razem**, czyli gotowa kość do sprawdzania algorytmu dopasowania.
 
-## 2. Ręczne dopasowywanie
+## 2. Przerobienie mesh na chmury puntków oraz punkty z deskryptorem fpfh
 
-### Ustalić czy skany zachowują skalę.
+Tu 
 
-    Spróbować dopasować zeskanowane fragmenty ręcznie w programie.
+## 6. Wyznaczenie macierzy obrotu i translacji, które najlepiej dopasowują do siebie pary (obecnie RANSAC i ICP)
 
-## 5. Wstępna selekcja
+Mamy kości i ich powierzchnie styku. Wszystkie powierzchnie styku łączymy w pary każda z każdą. Żeby sprawdzić, które pary pasuja najpierw musimy jak najlepiej je dopasować do siebie i mając jak najlepsze dopasowanie ocenić czy jest dobre.
 
-### Jak wstępnie ustalić, które kości będą kandydatami na dopasowanie
+Można wyznaczyć co najmniej dwa podejścia:
+1. **roszerzoną wersję algorytmu niedzieli**, która aproksymuje punkty na krawędzi za pomocą krzywej i dopasowuje krzywe do siebie patrząc na ich korelację, żeby zawęzić kandydatów a potem dopasowanie iteracyjne
+2. **Dopasowywanie za pomocą RANSAC i ICP** tę metodę wprowadziłam
 
-    Można jako kryterium dopasowania wybrać największą długość dwóch punktów leżących na powierzchni 2d złamania (średnicę półosi wielkiej tak jakby).
-    Jeśli dwa fragmenty mają ją podobną to jest szansa, że będą pasować.
+** Przygotowanie danych**
 
-    -> liczone już dla oznaczonych powierzchni: surface_stats() w src/contacts.py
-       ("max_diameter_mm", "area_mm2", "extent_mm", "normal").
+Liczenie trzech rodzajów chmur dla punktów o różnej precyzji
 
-### Jak znaleźć front kości? Jak znaleźć powierzchnię złamania.
+| indeks | co                                | do czego              |
+|:------:|-----------------------------------|-----------------------|
+| `[0]`  | gęsta chmura (punkty co `sample_mm`) | ostatni etap ICP      |
+| `[1]`  | średnia (co 2 × `sample_mm`)      | pierwsze etapy ICP    |
+| `[2]`  | zgrubna (co `coarse_voxel_mm`)    | RANSAC                |
+| `[3]`  | FPFH zgrubnej                     | RANSAC                |
 
-    Najpierw trzeba znaleźć oś kości i tak, żeby patrzeć prostopadle na przekrój poprzeczny.
+Dodatkowo dla powierzchni A robimy odwrócenie normalnych, aby zgadzały się z parowanym kawałkiem B. (FPFH użyte w algo zależy od normalnych).
 
-    Pomysł: zeskanować dłuższy fragment poza końcówką i uznać linie wzdłuż kości jako równoległe i zrobić prostopadłą linie łączącą te dwie równoległe.
+**RANSAC**
+Dla każdego punktu z A znajduje punkty B o najardziej podobnym FPFH. Jest to tylko jeden punkt przez cały algorytm. W wersji z mutual_filter=True prawdza czy dla punktu z B, także A jest najlepszym dopasowaniem, jesli nie porzuca parę.
 
-    Widokiem z boku uwzględniamy takie rzeczy jak:
-    - kąt nachylenia do podstawy (rysujemy linie od najnizszego punktu do najwyzszego)
-    -
+W iteracji:
+- Losuje trójkę par (3 punkty jednoznacznie wyznaczą obrót i przesunięcie w 3D)
+- Wylicza przekształcenie T (obrót + przesunięcie)
+- Odrzuca złe przekształcenia za pomocą szybkich do sprawdzenia warunków opierających się o punkty i T
+- Gdy T nie odrzucono, to liczy dopasowanie czyli ile odległości punktów przekształconcyh T(a) leży dostatecznie blisko B
 
-## Sposób dopasowania fragmentów kości za pomocą pełnych skanów
+Jest to metoda niedokładna służąca do dopasowania wstępnego
 
-    Pomysły: mamy deskryptory FPFH
+**ICP**
+
+ALgorytm, który znajduje lokalne minimum odległości punktów.
+
+- Każdy punkt A przesuwa się T i szuka najbliższego punktu z B
+- Szuka się małej poprawki do T, która minimalizuje dystans punktu `T(a)` do płaszczyzny stycznej w b.

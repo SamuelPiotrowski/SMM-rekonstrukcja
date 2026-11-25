@@ -12,6 +12,7 @@
     <div class="brand"><span class="logo">◐</span> Powierzchnie styku</div>
     <div class="bone-title" id="boneTitle">Wczytywanie…</div>
     <div class="top-actions">
+      <span class="auto-badge" id="autoBadge" hidden title="Oznaczenia z algorytmu, jeszcze nie zapisane jako ręczne">ustawienie automatyczne</span>
       <span class="dirty" id="dirtyBadge" hidden>niezapisane zmiany</span>
       <button class="ghost" id="helpBtn" title="Pomoc (H)">? Pomoc</button>
     </div>
@@ -23,8 +24,8 @@
       <input class="search" id="boneSearch" placeholder="Szukaj…" autocomplete="off">
       <ul class="bone-list" id="boneList"></ul>
       <div class="legend-mini">
-        <span><i class="dot done"></i>oznaczona</span>
-        <span><i class="dot"></i>bez oznaczeń</span>
+        <span><i class="dot done"></i>oznaczona ręcznie</span>
+        <span><i class="dot auto"></i>ustawienie automatyczne</span>
       </div>
     </aside>
 
@@ -56,6 +57,7 @@
 
       <div class="section">
         <div class="section-title">Powierzchnie styku</div>
+        <div class="auto-note" id="autoNote" hidden></div>
         <ul class="surface-list" id="surfaceList"></ul>
         <button class="ghost wide" id="newSurface" title="Nowa powierzchnia (N)">+ Nowa powierzchnia <kbd>N</kbd></button>
       </div>
@@ -75,7 +77,7 @@
           <button class="ghost" id="redoBtn" title="Ponów (Ctrl+Y)">↷ Ponów</button>
           <button class="ghost danger" id="clearBtn" title="Usuń wszystkie oznaczenia tej kości">Wyczyść</button>
         </div>
-        <button class="ghost wide" id="detectBtn" title="Wczytaj propozycję algorytmu jako punkt wyjścia">✨ Propozycja algorytmu</button>
+        <button class="ghost wide" id="detectBtn" title="Zastąp oznaczenia propozycją algorytmu (np. żeby zacząć od nowa)">✨ Propozycja algorytmu</button>
         <button class="primary wide" id="saveBtn" title="Zapisz (Ctrl+S)">Zapisz <kbd>Ctrl+S</kbd></button>
       </div>
     </aside>
@@ -88,12 +90,15 @@
       <h2>Jak oznaczać powierzchnie styku</h2>
       <ol>
         <li>Wybierz kość z listy po lewej (albo <kbd>PgUp</kbd> / <kbd>PgDn</kbd>).</li>
+        <li>Kość bez ręcznych oznaczeń otwiera się z <b>ustawieniem automatycznym</b> (propozycja
+          algorytmu) - wystarczy je poprawić i zapisać. Dopóki nie zapiszesz, zostaje automatyczne.</li>
         <li>Obracaj <b>prawym</b> przyciskiem myszy i znajdź przełom.</li>
         <li><b>Różdżka</b>: kliknij przełom - zaznaczy obszar aż do ostrej krawędzi.
           Za dużo? <kbd>Ctrl+Z</kbd> i zmniejsz tolerancję.</li>
         <li><b>Pędzel</b> / <b>Gumka</b>: popraw brzegi lewym przyciskiem.</li>
         <li>Drugi przełom na tej samej kości = <b>Nowa powierzchnia</b> (każda ma swój kolor).</li>
-        <li><kbd>Ctrl+S</kbd> zapisuje do <code>contacts/&lt;kość&gt;.json</code>. Przy zmianie kości zapis jest automatyczny.</li>
+        <li><kbd>Ctrl+S</kbd> zapisuje do <code>contacts/&lt;kość&gt;.json</code>. Przy zmianie kości zmiany zapisują się same
+          (nieruszone ustawienie automatyczne - nie, zapisz je <kbd>Ctrl+S</kbd>, jeśli jest dobre).</li>
       </ol>
       <table class="keys">
         <tr><td>Lewy przycisk</td><td>maluj / zaznacz</td></tr>

@@ -93,6 +93,12 @@ def slugify(text: str) -> str:
     Potrzebne, bo open3d na Windowsie nie umie zapisywać/czytać plików ze ścieżek
     z polskimi znakami. Zostają tylko litery ASCII, cyfry i znaki ". _ -". Przykład:
         '23.11.2026-kośc strzałkowa 3-lowerjaw' -> '23.11.2026-kosc_strzalkowa_3-lowerjaw'
+
+    Args:
+        text: dowolna nazwa (folderu, pliku, części skanu).
+
+    Returns:
+        Nazwa ASCII; może być pusta, jeśli w `text` nie było żadnego dozwolonego znaku.
     """
     text = text.replace("ł", "l").replace("Ł", "L")
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
@@ -307,6 +313,9 @@ def submesh(mesh: o3d.geometry.TriangleMesh, keep_triangles: np.ndarray) -> o3d.
 def mesh_stats(mesh: o3d.geometry.TriangleMesh) -> dict:
     """Podstawowe statystyki siatki (zapisywane w meta.json i summary.csv).
 
+    Args:
+        mesh: siatka (może być pusta - wymiary są wtedy zerami).
+
     Returns:
         {"vertices", "triangles", "area_mm2", "extent_mm": [x, y, z]} - wymiary pudełka
         równoległego do osi układu [mm], zaokrąglone do 0.01.
@@ -407,6 +416,9 @@ def to_cloud(points: np.ndarray, normals: np.ndarray | None = None,
         points:  (N, 3) punkty.
         normals: (N, 3) normalne albo None.
         colors:  (N, 3) kolory w [0, 1] (wartości spoza są przycinane) albo None.
+
+    Returns:
+        Nowa chmura open3d (dane skopiowane jako float64).
     """
     cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float64)))
     if normals is not None:
