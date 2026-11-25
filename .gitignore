@@ -13,6 +13,7 @@ out/
 
 # wyniki algorytmu wykrywania powierzchni styku (generowane); ręczne contacts/*.json SĄ w repo
 contacts/auto/
+contacts/
 
 # sources
 articles/
