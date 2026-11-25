@@ -32,6 +32,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import numpy as np  # noqa: E402
 import trimesh  # noqa: E402
 
+import config  # noqa: E402
 import contacts as ct  # noqa: E402
 import matching_surfaces as ms  # noqa: E402
 import surface_features as sf  # noqa: E402
@@ -311,6 +312,20 @@ def main() -> None:
               "ostrzeżenie, gdy settings.json różni się od matching.json")
         page = matching_page(tool, out_dir / "matching.html")
         check(page.stat().st_size > 1000, "strona HTML z zapisanego matching.json (tune_matching.py --html)")
+
+        print("Zestawy danych i zmiana nazwy kości")
+        check(config.dataset_dirs("x")[0] == config.SCANS_ROOT / "x"
+              and config.dataset_dirs("x")[2] == config.CONTACTS_ROOT / "x", "foldery zestawu = podfoldery")
+        try:
+            config.use_dataset("nie_ma_takiego_zestawu_123")
+            check(False, "nieistniejący zestaw -> błąd")
+        except SystemExit as e:
+            check("Nie ma zestawu" in str(e), "nieistniejący zestaw -> czytelny błąd z listą zestawów")
+        check(config.DATASET != "nie_ma_takiego_zestawu_123", "po błędzie zestaw bez zmian")
+        check(any(f.id == "01.01.2026-test_1" and f.label == "test_(1)" for f in files),
+              "jedyny skan w folderze: nazwa kości = nazwa folderu")
+        check(all(np.abs(np.asarray(x.mesh.vertices).mean(axis=0)).max() < 1e-6 for x in loaded),
+              "kości wyśrodkowane (także z jednego skanu)")
     print(f"Wszystkie testy OK ({time.perf_counter() - start:.0f} s)")
 
 

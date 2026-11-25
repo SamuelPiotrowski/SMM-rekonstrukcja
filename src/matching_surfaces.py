@@ -5,9 +5,9 @@ Bierze tylko punkty powierzchni styku (przełomów), każdą powierzchnię osobn
 mieć kilka), i dopasowuje każdą do każdej powierzchni INNEJ kości.
 
 SKĄD POWIERZCHNIE (SurfaceMatchParams.source, settings.json "matching" -> "source"):
-    "manual"      - tylko ręczne oznaczenia contacts/<id>.json; kości bez nich są pomijane,
+    "manual"      - tylko ręczne oznaczenia contacts/<zestaw>/<id>.json; kości bez nich są pomijane,
     "auto"        - tylko wynik algorytmu (settings.json "contacts" -> "method" i jego ustawienia):
-                    z contacts/auto/<id>.json, a gdy pliku brak albo jest nieaktualny (inny
+                    z contacts/<zestaw>/auto/<id>.json, a gdy pliku brak albo jest nieaktualny (inny
                     algorytm, inne ustawienia, zmieniona siatka) - liczony i zapisywany
                     (contacts.auto_contacts),
     "manual-auto" - ręczne, a dla kości bez ręcznych - z algorytmu jak w "auto".
@@ -36,9 +36,9 @@ DLA KAŻDEJ PARY POWIERZCHNI (A z jednej kości, B z innej):
                     prawdziwe dopasowanie przełomów nie może wbijać jednej kości w drugą,
    - WYNIK = styk - kolizja [mm²]; pary są sortowane od najlepszego wyniku.
 
-Użycie: scripts/match_surfaces.py liczy i zapisuje out/3d/matching.json,
+Użycie: scripts/match_surfaces.py liczy i zapisuje out/3d/<zestaw>/matching.json,
 scripts/tune_matching.py (src/match_tool.py) go pokazuje: suwaki ustawień z przeliczaniem
-jednej pary albo (--html) statyczna strona out/3d/matching.html.
+jednej pary albo (--html) statyczna strona out/3d/<zestaw>/matching.html.
 W kodzie:
     surfaces, info = extract_surfaces(load_bones(features=True), params, contact_params)
     results = match_all(surfaces, params)     # [{"a", "b", "score", "contact_mm2", "T", ...}, ...]
@@ -98,7 +98,7 @@ class SurfaceMatchParams:
 
 @dataclass
 class Surface:
-    """Jedna powierzchnia styku jednej kości, w układzie tej kości (jak out/3d/bones/<id>/mesh.ply).
+    """Jedna powierzchnia styku jednej kości, w układzie tej kości (jak out/3d/<zestaw>/bones/<id>/mesh.ply).
 
     Tworzona przez extract_surfaces. Punkty są równomierną próbką samej powierzchni
     styku (co sample_mm), a bone_tree - punktami całej kości (do liczenia kolizji).
@@ -168,7 +168,7 @@ def bone_contacts(bone: Bone, source: str, contact_params: ContactParams = Conta
     """Powierzchnie styku kości wg trybu `source` (opis trybów: docstring modułu).
 
     W trybach "auto" i "manual-auto" może uruchomić algorytm wykrywania i zapisać jego
-    wynik w contacts/auto/ (contacts.auto_contacts) - za pierwszym razem trwa to dłużej.
+    wynik w contacts/<zestaw>/auto/ (contacts.auto_contacts) - za pierwszym razem trwa to dłużej.
 
     Args:
         bone:           kość.

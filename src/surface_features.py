@@ -25,7 +25,7 @@ Na koniec regresja logistyczna na wszystkich cechach naraz, sprawdzana "zostaw j
 uczona na pozostałych kościach, oceniana na tej jednej - tyle mniej więcej dałby prosty
 algorytm łączący cechy na nowej kości.
 
-Użycie: scripts/compare_surfaces.py (strona out/3d/surface_features.html + CSV).
+Użycie: scripts/compare_surfaces.py (strona out/3d/<zestaw>/surface_features.html + CSV).
 """
 
 from __future__ import annotations

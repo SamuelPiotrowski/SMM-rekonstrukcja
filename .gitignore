@@ -11,8 +11,8 @@ scanned_bones/
 bone_photos/
 out/
 
-# wyniki algorytmu wykrywania powierzchni styku (generowane); ręczne contacts/*.json SĄ w repo
-contacts/auto/
+# wyniki algorytmu wykrywania powierzchni styku (generowane); ręczne contacts/<zestaw>/*.json SĄ w repo
+contacts/**/auto/
 
 # sources
 articles/

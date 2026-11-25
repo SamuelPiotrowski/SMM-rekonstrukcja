@@ -5,10 +5,20 @@
 
 {
   // -----------------
-  // Foldery (względem głównego folderu projektu)
+  // Zestaw danych - każdy zestaw to podfolder o tej samej nazwie w trzech folderach z "paths":
+  //   scanned_bones/<zestaw>/  skany,   out/3d/<zestaw>/  wyniki,   contacts/<zestaw>/  oznaczenia styku.
+  // Nowy zestaw = nowy folder w scanned_bones/ ze skanami. Lista zestawów: python scripts/datasets.py
+  // Jednorazowo inny zestaw w każdym skrypcie: --dataset <nazwa> (krócej: -d <nazwa>).
+  // Zestaw może mieć własne ustawienia: scanned_bones/<zestaw>/settings.json - te same sekcje co tu,
+  // nadpisują tylko podane klucze (np. {"merging": {"enabled": false}}).
+  // -----------------
+  "dataset": "first_scans",
+
+  // -----------------
+  // Foldery (względem głównego folderu projektu) - w każdym z nich podfoldery zestawów
   // -----------------
   "paths": {
-    "data_in": "scanned_bones",   // surowe skany (.ply/.obj/.stl), mogą być w podfolderach
+    "data_in": "scanned_bones",   // surowe skany (.ply/.obj/.stl): <zestaw>/<kość>/<plik skanu>
     "data_out": "out/3d",         // wyniki - generowane, można je usunąć i policzyć od nowa
     "contacts": "contacts"        // powierzchnie styku: ręczne (commituj!) + podfolder auto/ (generowane)
   },
@@ -35,11 +45,12 @@
   // Po zmianie uruchom ponownie prepare_data.py (wyniki par są w cache, więc szybko).
   // -----------------
   "merging": {
-    "enabled": false,           // false = każdy skan to osobna kość
+    "enabled": true,            // false = każdy skan to osobna kość
 
     // Dwa skany = ta sama kość, gdy co najmniej taka część mniejszego leży na drugim
     // (bliżej niż tolerance_mm, normalne w tę samą stronę). Różne fragmenty: ~0.05-0.16,
     // ten sam fragment: ~0.35-0.6.
+    // należy to zmienić jeśli zestaw kości ma inne przełomy (inną skalę)
     "min_overlap": 0.25,
     "tolerance_mm": 0.15,
 
@@ -57,7 +68,8 @@
     "ransac_iterations": 50000,
 
     // null = grupy automatyczne. Ręcznie: {"nazwa kości": ["fragment nazwy skanu", ...]},
-    // np. {"strzalkowa_A": ["first_test-lowerjaw", "matematyczne_6"]}.
+    // np. {"strzalkowa_A": ["whole_scan-lowerjaw", "whole_lower_rescan"]}.
+    // Osobno dla zestawów: {"first_scans": {"strzalkowa_A": [...]}, "inny_zestaw": {...}}.
     // Nazwy skanów wypisuje prepare_data.py. Skany spoza listy są grupowane automatycznie.
     "groups": null
   },
@@ -74,8 +86,8 @@
 
   // -----------------
   // Powierzchnie styku (przełomy) - src/contacts.py
-  //   ręcznie:   scripts/mark_contacts.py   -> contacts/<id kości>.json       (w repozytorium)
-  //   algorytm:  scripts/detect_contacts.py -> contacts/auto/<id kości>.json  (generowane)
+  //   ręcznie:   scripts/mark_contacts.py   -> contacts/<zestaw>/<id kości>.json       (w repozytorium)
+  //   algorytm:  scripts/detect_contacts.py -> contacts/<zestaw>/auto/<id kości>.json  (generowane)
   // -----------------
   "contacts": {
     // Narzędzie do ręcznego oznaczania
@@ -110,8 +122,8 @@
   // -----------------
   "matching": {
     // Skąd powierzchnie styku:
-    //   "manual"      = tylko ręczne (contacts/<id>.json); kości bez nich są pomijane,
-    //   "auto"        = tylko z algorytmu (sekcja "contacts"): z contacts/auto/, a gdy brak
+    //   "manual"      = tylko ręczne (contacts/<zestaw>/<id>.json); kości bez nich są pomijane,
+    //   "auto"        = tylko z algorytmu (sekcja "contacts"): z contacts/<zestaw>/auto/, a gdy brak
     //                   albo nieaktualne - liczone i zapisywane; bazowy "roughness" jest słaby,
     //   "manual-auto" = ręczne, a dla kości bez ręcznych - z algorytmu.
     // Jednorazowo: python scripts/match_surfaces.py --source auto
@@ -145,7 +157,7 @@
   },
 
   // -----------------
-  // Porównanie cech przełomu i kory - scripts/compare_surfaces.py -> out/3d/surface_features.html
+  // Porównanie cech przełomu i kory - scripts/compare_surfaces.py -> out/3d/<zestaw>/surface_features.html
   // Ręcznie oznaczone powierzchnie styku vs reszta kości (kora): szorstkość, kształt, kolor, ...
   // -----------------
   "surface_features": {
@@ -163,8 +175,8 @@
     "open_browser": true,       // otwórz wynik w przeglądarce
 
     // Które powierzchnie styku pokazuje show_bones.py (tak jak "source" w sekcji "matching"):
-    //   "manual"      = ręczne (contacts/<id>.json),
-    //   "auto"        = z algorytmu (contacts/auto/; gdy brak albo nieaktualne - liczone i zapisywane),
+    //   "manual"      = ręczne (contacts/<zestaw>/<id>.json),
+    //   "auto"        = z algorytmu (contacts/<zestaw>/auto/; gdy brak albo nieaktualne - liczone i zapisywane),
     //   "manual-auto" = ręczne, a dla kości bez ręcznych - z algorytmu.
     // Jednorazowo: python scripts/show_bones.py --source auto   (albo krócej: --auto)
     "source": "manual"

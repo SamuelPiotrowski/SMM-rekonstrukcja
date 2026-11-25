@@ -342,7 +342,7 @@ def pairwise(scans: list[PreparedScan], p: MergeParams, cache_file: Path | None 
     Args:
         scans:      wszystkie skany.
         p:          ustawienia łączenia.
-        cache_file: plik JSON z wynikami (np. out/3d/cache/pairs.json); None = bez cache.
+        cache_file: plik JSON z wynikami (np. out/3d/<zestaw>/cache/pairs.json); None = bez cache.
         progress:   funkcja do wypisywania postępu (np. print).
 
     Returns:

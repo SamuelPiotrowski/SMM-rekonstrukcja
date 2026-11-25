@@ -1,14 +1,14 @@
 """
-Podgląd wyników dopasowania (out/3d/matching.json) - jak show_bones dla prepare_data.
+Podgląd wyników dopasowania (out/3d/<zestaw>/matching.json) - jak show_bones dla prepare_data.
 
 scripts/match_surfaces.py liczy i zapisuje matching.json, a ten moduł go pokazuje:
-    - write_html(): statyczna strona out/3d/matching.html (najlepsze pary w 3D + macierz
+    - write_html(): statyczna strona out/3d/<zestaw>/matching.html (najlepsze pary w 3D + macierz
       wyników wszystkich par) - jeden plik, można go komuś wysłać,
     - serve():      strona z suwakami ustawień (opis niżej).
 Oba sprawdzają, czy matching.json jest aktualny (MatchState.warnings).
 
 Strona z suwakami: uruchamia mały serwer HTTP (tylko na tym komputerze, 127.0.0.1) i otwiera stronę
-src/web/match_tool.html. Strona pokazuje pary z out/3d/matching.json (wynik
+src/web/match_tool.html. Strona pokazuje pary z out/3d/<zestaw>/matching.json (wynik
 scripts/match_surfaces.py) w 3D: kość A ustawiona na kości B. Suwaki zmieniają
 ustawienia dopasowania, a po każdej zmianie serwer przelicza TYLKO pokazaną parę:
     - ustawienia szukania (próbkowanie, FPFH, RANSAC, ICP) -> pełne dopasowanie od nowa
@@ -19,7 +19,7 @@ Nic nie jest zapisywane - matching.json zostaje bez zmian. Strona pokazuje zmien
 ustawienia gotowe do wklejenia w settings.json.
 
     from match_tool import serve, write_html
-    write_html()                  # out/3d/matching.html
+    write_html()                  # out/3d/<zestaw>/matching.html
     serve()                       # Ctrl+C w konsoli kończy
 
 API (używa go strona):
@@ -81,9 +81,12 @@ class MatchState:
         Raises:
             SystemExit: brak matching.json albo kości z niego (komunikat mówi, co zrobić).
         """
+        import config
+
         path = Path(out_dir) / "matching.json"
+        run = f"python scripts/match_surfaces.py{config.dataset_flag()}"
         if not path.exists():
-            raise SystemExit("Brak out/3d/matching.json - uruchom najpierw: python scripts/match_surfaces.py")
+            raise SystemExit(f"Brak {path} - uruchom najpierw: {run}")
         self.report = json.loads(path.read_text(encoding="utf-8"))
         self.params = ms.SurfaceMatchParams(**{k: v for k, v in self.report["params"].items() if k in PARAM_NAMES})
         self.view = view
@@ -93,13 +96,13 @@ class MatchState:
         missing = needed - set(self.bones)
         if missing:
             raise SystemExit(f"Kości z matching.json nie ma w {out_dir}/bones: {sorted(missing)} - "
-                             "uruchom ponownie: python scripts/match_surfaces.py")
+                             f"uruchom ponownie: {run}")
         self.contacts, self.tri_labels, self.trees = {}, {}, {}
         for bid, b in self.bones.items():
             c, _ = ms.bone_contacts(b, self.params.source, contact_params, root)
             if c is None:
                 raise SystemExit(f"{b.label}: brak powierzchni styku (tryb {self.params.source!r}) - "
-                                 "uruchom ponownie: python scripts/match_surfaces.py")
+                                 f"uruchom ponownie: {run}")
             self.contacts[bid] = c
         self._surfaces: dict[tuple[str, float], ms.Surface] = {}
         self._geometry: dict[str, dict] = {}
@@ -363,7 +366,7 @@ def matching_page(state: MatchState, path: Path, open_browser: bool = False) -> 
 
     Args:
         state:        wczytany matching.json (MatchState).
-        path:         plik wynikowy, np. out/3d/matching.html.
+        path:         plik wynikowy, np. out/3d/<zestaw>/matching.html.
         open_browser: otwórz stronę po zapisie.
 
     Returns:
@@ -386,7 +389,7 @@ def matching_page(state: MatchState, path: Path, open_browser: bool = False) -> 
 
 
 def write_html(out_dir: Path | None = None, open_browser: bool = True) -> Path:
-    """tune_matching.py --html: wczytuje matching.json i zapisuje out/3d/matching.html (matching_page).
+    """tune_matching.py --html: wczytuje matching.json i zapisuje out/3d/<zestaw>/matching.html (matching_page).
 
     Args:
         out_dir:      folder wyników z matching.json i kośćmi (None = DATA_OUT); strona trafia tam.

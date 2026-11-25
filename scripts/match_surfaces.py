@@ -1,15 +1,15 @@
 """
 KROK 5: dopasowanie fragmentów kości po POWIERZCHNIACH STYKU (przełomach): RANSAC + ICP na samych przełomach.
 
-Tylko liczy i zapisuje wynik (out/3d/matching.json). Oglądanie - jak show_bones.py dla prepare_data.py:
+Tylko liczy i zapisuje wynik (out/3d/<zestaw>/matching.json). Oglądanie - jak show_bones.py dla prepare_data.py:
     python scripts/tune_matching.py          # podgląd z suwakami ustawień
-    python scripts/tune_matching.py --html   # statyczna strona out/3d/matching.html
+    python scripts/tune_matching.py --html   # statyczna strona out/3d/<zestaw>/matching.html
 
 SKĄD DANE - trzy tryby:
-    manual (domyślny) - tylko RĘCZNIE oznaczone powierzchnie z contacts/<id kości>.json
+    manual (domyślny) - tylko RĘCZNIE oznaczone powierzchnie z contacts/<zestaw>/<id kości>.json
                         (narzędzie: python scripts/mark_contacts.py). Kości bez nich są pomijane.
     auto              - tylko powierzchnie wykryte przez ALGORYTM (settings.json, "contacts" -> "method").
-                        Brane z contacts/auto/<id kości>.json (cache), a gdy pliku nie ma albo jest
+                        Brane z contacts/<zestaw>/auto/<id kości>.json (cache), a gdy pliku nie ma albo jest
                         nieaktualny (inny algorytm, inne ustawienia, zmieniona siatka kości) -
                         liczone i zapisywane tam od razu. Uwaga: bazowy "roughness" jest słaby
                         i jego powierzchnie dają głównie przypadkowe pary.
@@ -47,11 +47,11 @@ JAK CZYTAĆ WYNIK
 
 Użycie (z głównego folderu projektu, po scripts/prepare_data.py i mark_contacts.py):
     python scripts/match_surfaces.py                      # wszystkie kości, tryb z settings.json
-    python scripts/match_surfaces.py first_test 3         # tylko wybrane kości (numer albo fragment nazwy)
+    python scripts/match_surfaces.py whole_scan 3         # tylko wybrane kości (numer albo fragment nazwy)
     python scripts/match_surfaces.py --source manual-auto # jednorazowo inny tryb
 
-Wynik: out/3d/matching.json - wszystkie pary: wynik, styk, kolizja, RMSE, macierz przekształcenia T
-       (4x4, układ kości A -> układ kości B, jak w out/3d/bones/<id>/mesh.ply), użyte ustawienia.
+Wynik: out/3d/<zestaw>/matching.json - wszystkie pary: wynik, styk, kolizja, RMSE, macierz przekształcenia T
+       (4x4, układ kości A -> układ kości B, jak w out/3d/<zestaw>/bones/<id>/mesh.ply), użyte ustawienia.
 Kod: src/matching_surfaces.py.
 """
 
@@ -82,7 +82,9 @@ def main() -> None:
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--source", choices=ms.SOURCES, default=None,
                         help="skąd powierzchnie styku (domyślnie z settings.json, \"matching\" -> \"source\")")
+    config.add_dataset_argument(parser)
     args = parser.parse_args()
+    config.use_dataset(args.dataset)
 
     params = config.matching_params()
     if args.source:
@@ -93,7 +95,7 @@ def main() -> None:
     contact_params = config.contact_params()
     all_bones = load_bones(features=True)
     if not all_bones:
-        raise SystemExit("Brak przygotowanych kości - uruchom najpierw: python scripts/prepare_data.py")
+        raise SystemExit(config.no_bones_message())
     try:
         bones = select_bones(all_bones, args.only)
     except ValueError as e:

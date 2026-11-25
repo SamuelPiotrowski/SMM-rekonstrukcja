@@ -3,7 +3,7 @@ Interaktywne wizualizacje 3D kości - pliki HTML otwierane w przeglądarce (plot
 
 Trzy wizualizacje:
 
-1. KOŚCI (bones_figure; scripts/show_bones.py -> out/3d/bones.html) - wszystkie kości
+1. KOŚCI (bones_figure; scripts/show_bones.py -> out/3d/<zestaw>/bones.html) - wszystkie kości
    ułożone "na stole", każda leży płasko (najdłuższa oś poziomo). Powierzchnie styku
    (jeśli oznaczone) są zaznaczone kolorem.
        - lista "Pokaż" - wszystkie kości albo jedna, z przybliżeniem,
@@ -15,12 +15,12 @@ Trzy wizualizacje:
    porównywalny między kośćmi).
 
 2. ŁĄCZENIE SKANÓW (merging_figure + overlap_figure; scripts/show_merging.py
-   -> out/3d/merging.html) - jak skany połączyły się w kości: każdy skan w innym
+   -> out/3d/<zestaw>/merging.html) - jak skany połączyły się w kości: każdy skan w innym
    kolorze (drobne "paski" dwóch kolorów = skany dobrze się pokrywają), usunięty szum
    na czerwono, macierz nakładania wszystkich par skanów.
 
 3. DOPASOWANIE POWIERZCHNI STYKU (matching_figure + match_matrix_figure;
-   scripts/tune_matching.py --html -> out/3d/matching.html) - najlepsze pary: kość A
+   scripts/tune_matching.py --html -> out/3d/<zestaw>/matching.html) - najlepsze pary: kość A
    ustawiona na kości B znalezionym przekształceniem, obie powierzchnie styku
    w kolorze; macierz wyników wszystkich par powierzchni.
 
@@ -28,7 +28,7 @@ Zapis: save_figure (jedna figura na całe okno) albo write_page (kilka figur w s
 z nagłówkami). Przy embed_plotly = True plik HTML działa bez internetu i można go
 po prostu komuś wysłać.
 
-Wizualizacja nie zmienia wyników - czyta tylko out/3d/ i contacts/.
+Wizualizacja nie zmienia wyników - czyta tylko out/3d/<zestaw>/ i contacts/.
 """
 
 from __future__ import annotations

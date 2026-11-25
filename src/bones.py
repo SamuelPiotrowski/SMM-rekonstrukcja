@@ -143,7 +143,8 @@ def finalize_bone(merged, params: FeatureParams = FeatureParams()) -> Bone:
     shift[:3, 3] = -center
     mesh.transform(shift)
     for m in (*merged.scan_meshes.values(), *merged.noise_meshes.values()):
-        m.transform(shift)
+        if m is not mesh:           # kość z jednego skanu: siatka kości = siatka skanu, bez podwójnego przesunięcia
+            m.transform(shift)
 
     s = sample_surface(mesh, params.voxel_size, params.sampling_density)
     cloud = to_cloud(s.points, s.normals, s.colors)

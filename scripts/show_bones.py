@@ -12,9 +12,9 @@ Użycie (z głównego folderu projektu, po scripts/prepare_data.py):
 Które powierzchnie styku (domyślnie): settings.json, sekcja "visualization_3d", klucz "source"
 ("manual" / "auto" / "manual-auto"); --source / --auto zmienia to jednorazowo.
 W trybach "auto" i "manual-auto" brakujący albo nieaktualny wynik algorytmu jest liczony
-i zapisywany w contacts/auto/ (jak w match_surfaces.py).
+i zapisywany w contacts/<zestaw>/auto/ (jak w match_surfaces.py).
 
-Wynik: out/3d/bones.html (otwiera się sam; wygląd: settings.json, sekcja "visualization_3d").
+Wynik: out/3d/<zestaw>/bones.html (otwiera się sam; wygląd: settings.json, sekcja "visualization_3d").
 """
 
 import argparse
@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # polskie znaki także przy przekierowaniu do pliku
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # ... i w komunikatach błędów (SystemExit)
 
 import config  # noqa: E402
 from bones import load_bones, select_bones  # noqa: E402
@@ -31,7 +32,7 @@ from visualization_3d import COLOR_MODES, bones_figure, save_figure  # noqa: E40
 
 
 def main() -> None:
-    """Wczytuje wybrane kości i ich oznaczenia, buduje figurę i zapisuje HTML (domyślnie out/3d/bones.html).
+    """Wczytuje wybrane kości i ich oznaczenia, buduje figurę i zapisuje HTML (domyślnie out/3d/<zestaw>/bones.html).
 
     Raises:
         SystemExit: zły "source" w settings.json, brak przygotowanych kości albo wzorzec
@@ -43,9 +44,11 @@ def main() -> None:
     parser.add_argument("--source", choices=SOURCES, default=None,
                         help="skąd powierzchnie styku (domyślnie z settings.json, \"visualization_3d\" -> \"source\")")
     parser.add_argument("--auto", action="store_true", help="to samo co --source auto")
-    parser.add_argument("--out", default=None, help="plik wynikowy (domyślnie out/3d/bones.html)")
+    parser.add_argument("--out", default=None, help="plik wynikowy (domyślnie out/3d/<zestaw>/bones.html)")
     parser.add_argument("--no-open", action="store_true", help="nie otwieraj przeglądarki")
+    config.add_dataset_argument(parser)
     args = parser.parse_args()
+    config.use_dataset(args.dataset)
 
     params = config.view3d_params()
     source = "auto" if args.auto else args.source or params.source
@@ -55,7 +58,7 @@ def main() -> None:
 
     all_bones = load_bones(features=args.colors == "fpfh")
     if not all_bones:
-        raise SystemExit("Brak przygotowanych kości - uruchom najpierw: python scripts/prepare_data.py")
+        raise SystemExit(config.no_bones_message())
     try:
         bones = select_bones(all_bones, args.only)
     except ValueError as e:

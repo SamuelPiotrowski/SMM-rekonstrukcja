@@ -13,7 +13,9 @@ głębokości. Skaner Medit zapisuje każdą sesję jako folder, np.
         ...                                                        ale INNY skan
 
 Dlatego skan = (folder, nazwa pliku bez rozszerzenia). Ten sam skan zapisany
-w kilku formatach (ply / obj / stl) jest wczytywany tylko raz.
+w kilku formatach (ply / obj / stl) jest wczytywany tylko raz. Najwygodniej: jeden
+skan = jeden folder nazwany jak kość (np. first_scans/bone_01/...) - nazwa kości
+to wtedy nazwa folderu (szczegóły: find_scans).
 
 Zawartość:
     nazwy           - slugify, parse_name,
@@ -138,8 +140,11 @@ def find_scans(data_dir: Path, params: ScanParams = ScanParams()) -> tuple[list[
     `params.preferred_formats`. Te same nazwy w RÓŻNYCH folderach to różne skany.
 
     Nazwy skanów (ScanFile.id i ScanFile.label):
-        - skan w podfolderze: id = folder (ze ścieżką, "/" -> "-") + "-" + część,
-          label = "<nazwa folderu bez daty> / <część>",
+        - JEDYNY skan w podfolderze (np. bone_01/<cokolwiek>.ply): id = folder (ze ścieżką,
+          "/" -> "-"), label = nazwa folderu bez daty - zmiana nazwy kości = zmiana nazwy folderu,
+        - kilka skanów w podfolderze: id = folder + "-" + część (u Medita lowerjaw / upperjaw...),
+          label = "<nazwa folderu bez daty> / <część>"; liczą się też skany pominięte (exclude),
+          żeby zmiana "exclude" nie zmieniała nazw,
         - skan bezpośrednio w `data_dir`: id = nazwa pliku, label = nazwa pliku bez daty.
     Jeśli dwa id wyjdą takie same (bardzo nietypowe nazwy), drugie dostaje "_2" itd.
 
@@ -168,6 +173,10 @@ def find_scans(data_dir: Path, params: ScanParams = ScanParams()) -> tuple[list[
         if current is None or rank[ext] < rank[current.suffix.lower().lstrip(".")]:
             best[key] = path
 
+    per_folder: dict[Path, int] = {}         # ile skanów w folderze (razem z pominiętymi)
+    for parent, _ in best:
+        per_folder[parent] = per_folder.get(parent, 0) + 1
+
     scans, excluded, used_ids = [], [], set()
     for (parent, stem), path in sorted(best.items(), key=lambda kv: str(kv[1]).lower()):
         rel = path.relative_to(data_dir)
@@ -176,7 +185,10 @@ def find_scans(data_dir: Path, params: ScanParams = ScanParams()) -> tuple[list[
             continue
         folder = "" if parent == data_dir else parent.relative_to(data_dir).as_posix()
         part = parse_name(stem)["part"]
-        if folder:
+        if folder and per_folder[parent] == 1:       # jedyny skan w folderze: nazwa = nazwa folderu
+            scan_id = slugify(folder.replace("/", "-"))
+            label = DATE_PREFIX.sub("", folder.split("/")[-1])
+        elif folder:
             scan_id = slugify(folder.replace("/", "-")) + "-" + slugify(part)
             label = f"{DATE_PREFIX.sub('', folder.split('/')[-1])} / {part}"
         else:

@@ -20,7 +20,7 @@ const MIX = 0.78;                      // jak mocno kolor powierzchni przykrywa 
  * - cur: wczytana kość (loadBone) - {id, label, nV: liczba wierzchołków, P: pozycje (3*nV),
  *   N: normalne, Ns: wygładzone normalne (do różdżki), I: trójkąty (3*T), C: kolory skanera
  *   uint8, adj: sąsiedztwo (buildAdjacency), area: pole na wierzchołek [mm²],
- *   labels: Uint8Array etykiet, names: {k: nazwa}, origin: 'manual' (z contacts/<id>.json)
+ *   labels: Uint8Array etykiet, names: {k: nazwa}, origin: 'manual' (z contacts/<zestaw>/<id>.json)
  *   albo 'auto' (ustawienie automatyczne - wynik algorytmu, jeszcze niezapisany jako ręczny),
  *   method: algorytm ustawienia automatycznego, autoError: błąd algorytmu albo null},
  * - tool / brush [mm] / wand [stopnie] / active (malowana powierzchnia) / scanColors,
@@ -600,7 +600,7 @@ $('helpClose').onclick = () => { $('help').hidden = true; try { localStorage.set
 $('help').onclick = (e) => { if (e.target.id === 'help') $('help').hidden = true; };
 
 /**
- * Zapisuje etykiety i nazwy niepustych powierzchni na serwerze (contacts/<id>.json).
+ * Zapisuje etykiety i nazwy niepustych powierzchni na serwerze (contacts/<zestaw>/<id>.json).
  * @param {boolean} silent  true = przy błędzie rzuca wyjątek (np. przy zmianie kości)
  */
 async function save(silent) {

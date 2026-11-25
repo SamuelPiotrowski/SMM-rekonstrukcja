@@ -1,15 +1,15 @@
 """
 Powierzchnie styku (przełomy) na kościach: format zapisu, statystyki, algorytmy wykrywania.
 
-Etykiety są przypisane do WIERZCHOŁKÓW siatki kości (out/3d/bones/<id>/mesh.ply):
+Etykiety są przypisane do WIERZCHOŁKÓW siatki kości (out/3d/<zestaw>/bones/<id>/mesh.ply):
     labels[i] = 0  -> wierzchołek nie należy do żadnej powierzchni styku,
     labels[i] = k  -> wierzchołek należy do powierzchni styku nr k (1, 2, ...).
 Jedna kość może mieć kilka powierzchni styku (np. przełom na każdym końcu).
 
 Skąd się biorą etykiety (oba rodzaje w jednym folderze contacts/, ten sam format):
-    - RĘCZNIE: scripts/mark_contacts.py (przeglądarka) -> contacts/<id_kości>.json
+    - RĘCZNIE: scripts/mark_contacts.py (przeglądarka) -> contacts/<zestaw>/<id_kości>.json
       To ręczna praca - jest w repozytorium, warto ją commitować.
-    - ALGORYTM: scripts/detect_contacts.py -> contacts/auto/<id_kości>.json
+    - ALGORYTM: scripts/detect_contacts.py -> contacts/<zestaw>/auto/<id_kości>.json
       Pole "source" = "auto:<nazwa algorytmu>", pole "detector" = algorytm i jego ustawienia.
       Generowane (nie ma ich w repozytorium) - auto_contacts() liczy je na nowo, gdy brakuje
       pliku albo zmienił się algorytm, jego ustawienia lub siatka kości.
@@ -372,7 +372,7 @@ def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "
 
     Args:
         bone_id: id kości.
-        mesh:    aktualna siatka kości (out/3d/bones/<id>/mesh.ply).
+        mesh:    aktualna siatka kości (out/3d/<zestaw>/bones/<id>/mesh.ply).
         source:  "manual" albo "auto" - który plik czytać (gdy nie podano `path`).
         path:    konkretny plik zamiast contacts_path(bone_id, source, root).
         root:    folder oznaczeń zamiast CONTACTS_DIR.
@@ -741,7 +741,7 @@ def detect_contacts(bone, method: str | None = None, params: ContactParams = Con
 
 def auto_contacts(bone, params: ContactParams = ContactParams(),
                   root: Path | None = None) -> tuple[Contacts, bool]:
-    """Wynik algorytmu params.method dla kości: z cache (contacts/auto/) albo policzony i zapisany.
+    """Wynik algorytmu params.method dla kości: z cache (contacts/<zestaw>/auto/) albo policzony i zapisany.
 
     Liczy na nowo, gdy pliku nie ma albo powstał innym algorytmem, z innymi ustawieniami,
     na innej siatce kości lub (algorytmy z data_key, np. "features") z innymi danymi spoza sekcji.

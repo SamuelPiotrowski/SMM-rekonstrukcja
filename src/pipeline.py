@@ -71,7 +71,8 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
     if not files:
         raise FileNotFoundError(f"Brak skanów ({', '.join(scan.preferred_formats)}) w {data_in} "
                                 "(szukane także w podfolderach)")
-    log(f"Znaleziono {len(files)} skanów w {data_in}")
+    log(f"Zestaw \"{config.DATASET}\": znaleziono {len(files)} skanów w {data_in}" if data_in == config.DATA_IN
+        else f"Znaleziono {len(files)} skanów w {data_in}")
     for p in excluded:
         log(f"  pominięty (pasuje do scans.exclude): {p.relative_to(data_in)}")
 

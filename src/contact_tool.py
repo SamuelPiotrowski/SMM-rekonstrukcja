@@ -3,12 +3,12 @@ Narzędzie do ręcznego oznaczania powierzchni styku - lokalna strona w przeglą
 
 Uruchamia mały serwer HTTP (tylko na tym komputerze, 127.0.0.1) i otwiera stronę
 src/web/contact_tool.html. Strona pokazuje kość w 3D (three.js), a malowanie
-zapisuje się przez serwer do contacts/<id_kości>.json (contacts.py).
+zapisuje się przez serwer do contacts/<zestaw>/<id_kości>.json (contacts.py).
 
 Kość bez ręcznych oznaczeń otwiera się z USTAWIENIEM AUTOMATYCZNYM: wynikiem algorytmu
-(contacts.auto_contacts - z contacts/auto/, a gdy brak albo nieaktualny - liczony).
+(contacts.auto_contacts - z contacts/<zestaw>/auto/, a gdy brak albo nieaktualny - liczony).
 Strona pisze wtedy "ustawienie automatyczne"; dopiero zapis (Ctrl+S) robi z niego ręczne
-oznaczenie w contacts/<id>.json. Bez zapisu kość dalej nie ma ręcznych oznaczeń.
+oznaczenie w contacts/<zestaw>/<id>.json. Bez zapisu kość dalej nie ma ręcznych oznaczeń.
 
     from contact_tool import serve
     serve()                       # Ctrl+C w konsoli kończy
@@ -23,7 +23,7 @@ API (używa go strona):
 Oprócz tego serwer podaje pliki strony (STATIC) i three.js (VENDOR). Błędy wracają
 jako JSON {"error": "..."} i są pokazywane na stronie.
 
-three.js jest pobierany raz z CDN i zapisywany w DATA_OUT/.cache/web, potem działa bez internetu.
+three.js jest pobierany raz z CDN i zapisywany w out/3d/.cache/web (wspólny dla zestawów), potem działa bez internetu.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ class ToolState:
 
     Metody odpowiadają zapytaniom API (opis w docstringu modułu). Serwer obsługuje
     zapytania w osobnych wątkach, dlatego zapis ręcznych oznaczeń jest chroniony blokadą
-    `lock`, a liczenie i zapis wyniku algorytmu (contacts/auto/) - blokadą `auto_lock`.
+    `lock`, a liczenie i zapis wyniku algorytmu (contacts/<zestaw>/auto/) - blokadą `auto_lock`.
     """
 
     def __init__(self, out_dir: Path | None, params: ct.ContactParams):
@@ -160,7 +160,7 @@ class ToolState:
     def start_contacts(self, b: Bone) -> tuple[ct.Contacts | None, str, str | None, bool]:
         """Etykiety, od których kość startuje w narzędziu: ręczne, a gdy ich nie ma - automatyczne.
 
-        Automatyczne = contacts.auto_contacts (wynik algorytmu params.method z contacts/auto/,
+        Automatyczne = contacts.auto_contacts (wynik algorytmu params.method z contacts/<zestaw>/auto/,
         liczony i zapisywany tam, gdy brak albo nieaktualny). Ręcznych plików nie zmienia.
         Ręczny plik, z którego po zmianie siatki nic nie dało się przenieść (load_contacts:
         remapped, same zera), traktowany jest jak brak ręcznych - tak jak w summary.
@@ -186,7 +186,7 @@ class ToolState:
     def bone_payload(self, bone_id: str) -> dict:
         """GET /api/bones/<id>: siatka kości i jej etykiety dla three.js.
 
-        Etykiety ręczne (contacts/<id>.json), a gdy ich nie ma - ustawienie automatyczne
+        Etykiety ręczne (contacts/<zestaw>/<id>.json), a gdy ich nie ma - ustawienie automatyczne
         (start_contacts); pole "origin" mówi, które.
 
         Args:
@@ -226,7 +226,7 @@ class ToolState:
         }
 
     def save(self, bone_id: str, body: dict) -> dict:
-        """PUT /api/bones/<id>/contacts: zapisuje ręczne etykiety do contacts/<id>.json.
+        """PUT /api/bones/<id>/contacts: zapisuje ręczne etykiety do contacts/<zestaw>/<id>.json.
 
         Args:
             bone_id: id kości.
@@ -279,7 +279,7 @@ def fetch_vendor(path: str, cache_dir: Path) -> bytes:
 
     Args:
         path:      ścieżka URL z VENDOR, np. "/vendor/three.module.js".
-        cache_dir: folder cache (DATA_OUT/.cache/web).
+        cache_dir: folder cache (out/3d/.cache/web).
 
     Returns:
         Zawartość pliku.
@@ -452,8 +452,8 @@ def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | No
     port = port or config.CONTACT_TOOL_PORT
     state = ToolState(out_dir, params)
     if not state.bones:
-        raise SystemExit("Brak przygotowanych kości - uruchom najpierw: python scripts/prepare_data.py")
-    cache_dir = Path(out_dir or config.DATA_OUT) / ".cache" / "web"
+        raise SystemExit(config.no_bones_message())
+    cache_dir = config.OUT_ROOT / ".cache" / "web"      # wspólny dla wszystkich zestawów
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state, cache_dir))
     except OSError:
@@ -461,7 +461,7 @@ def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | No
                          f"Inny port: python scripts/mark_contacts.py --port {port + 1}") from None
     url = f"http://127.0.0.1:{port}/"
     print(f"Narzędzie do oznaczania powierzchni styku: {url}")
-    print(f"Kości: {len(state.bones)}. Oznaczenia zapisują się do: {config.CONTACTS_DIR}")
+    print(f"Zestaw \"{config.DATASET}\", kości: {len(state.bones)}. Oznaczenia zapisują się do: {config.CONTACTS_DIR}")
     print("Zamknij to okno albo naciśnij Ctrl+C, żeby zakończyć.")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

@@ -1,16 +1,16 @@
 """
 Porównanie cech: ręcznie oznaczone powierzchnie styku (przełomy) vs reszta kości (kora).
 
-Dla każdej kości z ręcznymi oznaczeniami (contacts/<id>.json) liczy w każdym punkcie
+Dla każdej kości z ręcznymi oznaczeniami (contacts/<zestaw>/<id>.json) liczy w każdym punkcie
 szorstkość, rozrzut normalnych, wypukłość, gęstość siatki, kolor i ułożenie względem osi kości,
 a potem sprawdza, jak dobrze każda cecha odróżnia przełom od kory (AUC) - i ile daje
 połączenie wszystkich cech naraz. Podpowiedź do pisania algorytmu wykrywania (src/contacts.py).
 
 Użycie (z głównego folderu projektu, po scripts/prepare_data.py i mark_contacts.py):
     python scripts/compare_surfaces.py              # wszystkie kości z ręcznymi oznaczeniami
-    python scripts/compare_surfaces.py first_test   # tylko wybrane kości
+    python scripts/compare_surfaces.py whole_scan   # tylko wybrane kości
 
-Wynik: out/3d/surface_features.html (otwiera się sam) + out/3d/surface_features.csv (Excel).
+Wynik: out/3d/<zestaw>/surface_features.html (otwiera się sam) + out/3d/<zestaw>/surface_features.csv (Excel).
 Ustawienia: settings.json, sekcja "surface_features".
 """
 
@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # polskie znaki także przy przekierowaniu do pliku
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # ... i w komunikatach błędów (SystemExit)
 
 import config  # noqa: E402
 import surface_features as sf  # noqa: E402
@@ -38,11 +39,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--no-open", action="store_true", help="nie otwieraj przeglądarki")
+    config.add_dataset_argument(parser)
     args = parser.parse_args()
+    config.use_dataset(args.dataset)
 
     all_bones = load_bones()
     if not all_bones:
-        raise SystemExit("Brak przygotowanych kości - uruchom najpierw: python scripts/prepare_data.py")
+        raise SystemExit(config.no_bones_message())
     try:
         bones = select_bones(all_bones, args.only)
     except ValueError as e:
