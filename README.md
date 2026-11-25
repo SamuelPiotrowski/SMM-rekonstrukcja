@@ -173,7 +173,15 @@ python scripts/show_bones.py --colors fpfh      # kolor wg lokalnego kształtu (
 python scripts/show_bones.py --source auto      # powierzchnie z algorytmu zamiast ręcznych (krócej: --auto)
 python scripts/show_bones.py --source manual-auto  # ręczne, a dla kości bez ręcznych - z algorytmu
 python scripts/show_bones.py 3 strzalkowa       # tylko kość nr 3 i kości z "strzalkowa" w nazwie (pełna rozdzielczość)
+python scripts/show_bones.py --compare          # porównanie: ręczne oznaczenia vs algorytm
 ```
+
+**Porównanie ręczne vs algorytm** (`--compare`, wynik `out/3d/<zestaw>/bones_compare.html`): na każdej kości zielone = zgodne, pomarańczowe = tylko algorytm (fałszywy alarm), niebieskie = tylko ręczne (algorytm przeoczył), szare = wynik algorytmu na kości bez ręcznych oznaczeń. Najechanie na kość pokazuje jej IoU / precyzję / czułość (jak w `detect_contacts.py`), ramka na dole - średnią i objaśnienie miar:
+- **IoU** - pokrycie wykrytego z ręcznym (część wspólna / suma obu),
+- **precyzja** - ile z tego, co wykrył algorytm, to naprawdę styk (niska = fałszywe alarmy),
+- **czułość** - ile prawdziwego styku algorytm wykrył (niska = przeoczenia).
+
+Wszystkie od 0 do 1 (1.00 = idealnie), liczone na polu powierzchni, tylko dla kości z tego uruchomienia.
 
 Które powierzchnie styku są pokazywane domyślnie, ustawia `settings.json`, sekcja `"visualization_3d"`, klucz `"source"`: `"manual"` / `"auto"` / `"manual-auto"` (tak samo jak `"source"` w sekcji `"matching"`). `--source` / `--auto` zmienia to jednorazowo. W trybach `auto` i `manual-auto` brakujący albo nieaktualny wynik algorytmu jest liczony i zapisywany w `contacts/<zestaw>/auto/`.
 

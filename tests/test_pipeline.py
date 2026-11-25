@@ -42,7 +42,7 @@ from data_parsing import ScanParams, find_scans  # noqa: E402
 from match_tool import MatchState, matching_page  # noqa: E402
 from merging import MergeParams  # noqa: E402
 from pipeline import prepare_all  # noqa: E402
-from visualization_3d import (View3DParams, bones_figure, match_matrix_figure, matching_figure,  # noqa: E402
+from visualization_3d import (View3DParams, bones_figure, compare_layers,match_matrix_figure, matching_figure,  # noqa: E402
                               merging_figure)
 
 
@@ -267,6 +267,12 @@ def main() -> None:
         print("Wizualizacje")
         fig = bones_figure(loaded, {bone.id: back}, "fpfh", View3DParams())
         check(len(fig.data) > 4, "figura kości (FPFH + powierzchnie styku)")
+        half = ct.Contacts(bone.id, np.where(np.arange(len(back.labels)) % 2 == 0, back.labels, 0).astype(np.uint8))
+        masks, score = compare_layers(bone, half, back)
+        check(set(masks) == {"both", "manual_only"} and score is not None and score["precision"] > 0.99
+              and 0.2 < score["recall"] < 0.8, f"porównanie ręczne vs algorytm (czułość {score['recall']:.2f})")
+        fig = bones_figure(loaded, {bone.id: half}, "scan", View3DParams(), reference={bone.id: back})
+        check(len(fig.data) > 4 and "ręczne vs algorytm" in fig.layout.title.text, "figura porównania")
         fig = merging_figure(loaded, View3DParams())
         check(len(fig.data) >= 4, "figura łączenia skanów (3 skany + szum)")
         surfs, _ = ms.extract_surfaces(loaded, replace(mp, source="manual-auto", ransac_seeds=1), cp, root)

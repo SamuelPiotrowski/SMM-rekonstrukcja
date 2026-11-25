@@ -14,7 +14,13 @@ Użycie (z głównego folderu projektu, po scripts/prepare_data.py):
 Algorytm i jego ustawienia: settings.json, sekcja "contacts" ("method", "rough_threshold", ...).
 Wyniki: contacts/<zestaw>/auto/<id>.json - zawsze liczone od nowa (ręczne oznaczenia contacts/<zestaw>/<id>.json
 NIE są ruszane). Te same pliki czyta dopasowanie (match_surfaces.py w trybie auto / manual-auto).
-Jeśli kość ma ręczne oznaczenia, wypisuje IoU / precyzję / czułość algorytmu względem nich.
+Jeśli kość ma ręczne oznaczenia, wypisuje IoU / precyzję / czułość algorytmu względem nich
+(liczone na polu powierzchni, tylko podział styk / nie-styk; 1.00 = idealnie, 0.00 = zupełnie źle):
+    IoU       - wspólna część wykrytego i ręcznego / suma obu. Jedna liczba "jak bardzo się pokrywają".
+    precyzja  - jaka część tego, co wykrył algorytm, to naprawdę styk (niska = dużo fałszywych alarmów).
+    czułość   - jaka część prawdziwego (ręcznego) styku została wykryta (niska = algorytm dużo przeoczył).
+Każde uruchomienie liczy wszystko od nowa, tylko dla kości z tego uruchomienia; "Średnio" to średnia
+z tych kości (nic nie jest pamiętane między uruchomieniami).
 Podgląd: python scripts/show_bones.py --auto
 """
 
@@ -80,6 +86,10 @@ def main() -> None:
         mean = {k: sum(s[k] for s in scores) / len(scores) for k in ("iou", "precision", "recall")}
         print(f"Średnio na {len(scores)} kościach z ręcznymi oznaczeniami: IoU {mean['iou']:.2f}, "
               f"precyzja {mean['precision']:.2f}, czułość {mean['recall']:.2f}")
+        print("  (tylko kości z tego uruchomienia; 1.00 = idealnie)\n"
+              "  IoU      = pokrycie wykrytego z ręcznym (wspólne / suma obu)\n"
+              "  precyzja = ile z wykrytego to naprawdę styk (niska -> fałszywe alarmy)\n"
+              "  czułość  = ile prawdziwego styku wykryto (niska -> przeoczenia)")
     else:
         print("Brak ręcznych oznaczeń do porównania (python scripts/mark_contacts.py).")
     print("Podgląd: python scripts/show_bones.py --auto")
