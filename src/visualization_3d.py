@@ -245,6 +245,11 @@ def _bone_hover(nr: int, bone: Bone, stats: list[dict], contacts: Contacts | Non
              f"pole: {st.get('area_au2', 0):.0f} a.u.²   wymiary: {ext} a.u."]
     if m.get("noise_removed_au2"):
         lines.append(f"usunięty szum: {m['noise_removed_au2']:.0f} a.u.²")
+    atl = (contacts.info or {}).get("atlas") if contacts is not None else None
+    if atl:                             # wynik algorytmu "atlas": z której kości z bazy pochodzi fragment
+        top = atl.get("ranking", [])[:1]
+        lines.append("atlas: " + (f"{top[0]['label']} {top[0]['p']:.0%}, " if top else "")
+                     + f"żadna z bazy {atl.get('p_unknown', 1.0):.0%}")
     if compare_lines is not None:
         lines += compare_lines
     elif stats:

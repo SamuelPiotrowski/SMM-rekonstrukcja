@@ -14,11 +14,14 @@ Skąd się biorą etykiety (oba rodzaje w jednym folderze contacts/, ten sam for
       Generowane (nie ma ich w repozytorium) - auto_contacts() liczy je na nowo, gdy brakuje
       pliku albo zmienił się algorytm, jego ustawienia lub siatka kości.
 
+Algorytmy (DETECTORS): "roughness" (bazowy), "features" (kilka cech lokalnych naraz),
+"atlas" (kontekst anatomiczny z bazy modeli kompletnych kości + cechy lokalne - src/atlas.py).
+
 Jak dodać własny algorytm:
     @detector("moja_metoda")
     def moja_metoda(bone: Bone, params: ContactParams) -> np.ndarray:
         ...  # zwróć labels (V,) jak wyżej
-        return labels
+        return labels       # albo (labels, info) - słownik info trafia do pliku wyniku ("info")
     potem: python scripts/detect_contacts.py --method moja_metoda
     Jeśli wynik zależy od czegoś poza sekcją "contacts" (np. od ustawień innej sekcji),
     podaj @detector("nazwa", data_key=funkcja) - zmiana jej wyniku = auto_contacts liczy od nowa.
@@ -32,6 +35,7 @@ Format pliku JSON:
       "mesh": {"vertices": V, "fingerprint": "..."},    # do wykrycia zmiany siatki
       "scans": {"<suma kontrolna pliku skanu>": T, ...}, # T 4x4: układ skanu -> układ kości (scan_frames)
       "detector": {"method": "...", "params": {...}},   # tylko wynik algorytmu
+      "info": {...},                     # tylko wynik algorytmu, jeśli coś zwrócił (np. "atlas": ranking kości)
       "labels_zlib_b64": "...",          # labels (V,) uint8 skompresowane zlib + base64
       "surfaces": [
         {"id": 1, "name": "...", "area_au2": ..., "centroid": [x, y, z], "normal": [...],
@@ -88,6 +92,7 @@ class ContactParams:
     feature_threshold: float = 0.15   # "features": o ile wynik ponad typowy dla tej kości (w odchyleniach) = przełom
     feature_smooth_au: float = 1.0    # "features": uśrednianie wyniku w tym promieniu przed progiem
     feature_open_au: float = 1.0      # "features": otwarcie morfologiczne (rozcina wąskie mostki między obszarami)
+    exclude: tuple = ()               # kości (fragment id / nazwy), dla których algorytm nic nie liczy (np. całe kości)
 
 
 @dataclass
@@ -105,6 +110,7 @@ class Contacts:
     updated: str = ""                           # data i czas zapisu (ISO), "" = jeszcze niezapisane
     remapped: bool = False                      # True = przeniesione ze starej wersji siatki
     detector: dict = field(default_factory=dict)  # wynik algorytmu: {"method", "params"}
+    info: dict = field(default_factory=dict)    # dodatkowy wynik algorytmu (np. "atlas": ranking kości z bazy)
 
     @property
     def surface_ids(self) -> list[int]:
@@ -368,6 +374,7 @@ def save_contacts(mesh: o3d.geometry.TriangleMesh, contacts: Contacts, path: Pat
             "mesh": {"vertices": len(v), "fingerprint": mesh_fingerprint(mesh)},
             **({"scans": frames} if frames else {}),
             **({"detector": contacts.detector} if contacts.detector else {}),
+            **({"info": contacts.info} if contacts.info else {}),
             "labels_zlib_b64": base64.b64encode(zlib.compress(labels.tobytes(), 9)).decode("ascii"),
             "surfaces": surfaces}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -449,7 +456,8 @@ def load_contacts(bone_id: str, mesh: o3d.geometry.TriangleMesh, source: str = "
                 ok = np.isfinite(d)
                 labels[ok] = ids[idx[ok]]
     return Contacts(bone_id=bone_id, labels=labels, names=names, source=data.get("source", source),
-                    updated=data.get("updated", ""), remapped=not same, detector=data.get("detector", {}))
+                    updated=data.get("updated", ""), remapped=not same, detector=data.get("detector", {}),
+                    info=data.get("info", {}))
 
 
 # -----------------
@@ -809,18 +817,74 @@ def detect_features(bone, params: ContactParams) -> np.ndarray:
     import surface_features as sf
 
     sfp = config.surface_feature_params()
-    mesh = bone.mesh
+    score = bone_scores(sf.cached_features(bone, sfp), vertex_areas(bone.mesh), params.feature_keys)
+    return regions_from_score(bone.mesh, score, params.feature_threshold, params, sfp.boundary_margin_au)
+
+
+def regions_from_score(mesh: o3d.geometry.TriangleMesh, score: np.ndarray, threshold: float,
+                       params: ContactParams, boundary_margin_au: float) -> np.ndarray:
+    """Wynik "jak bardzo to przełom" wierzchołków -> etykiety powierzchni (wspólny koniec "features" i "atlas").
+
+    1. Uśrednienie wyniku w promieniu feature_smooth_au (ważone polem; 0 = bez).
+    2. Przełom = wynik > threshold, z pominięciem pasa boundary_margin_au przy otwartym brzegu skanu.
+    3. Otwarcie morfologiczne o feature_open_au (rozcina wąskie mostki, usuwa cienkie linie).
+    4. Spójne obszary >= min_surface_au2, od największego (split_regions).
+
+    Args:
+        mesh:               siatka kości.
+        score:              (V,) wynik wierzchołków (większy = bardziej przełom).
+        threshold:          próg wyniku.
+        params:             feature_smooth_au, feature_open_au, min_surface_au2.
+        boundary_margin_au: szerokość pomijanego pasa przy brzegu skanu [a.u.].
+
+    Returns:
+        (V,) uint8 etykiety wierzchołków.
+    """
+    import surface_features as sf
+
     v, va = np.asarray(mesh.vertices), vertex_areas(mesh)
-    score = bone_scores(sf.cached_features(bone, sfp), va, params.feature_keys)
     if params.feature_smooth_au > 0:
         W, _ = sf._neighbours(v, v, params.feature_smooth_au)
         score = (W @ (score * va)) / np.maximum(W @ va, 1e-12)
-    mask = score > params.feature_threshold
-    mask &= sf._distance_to(v, boundary_vertices(mesh)) > sfp.boundary_margin_au
+    mask = score > threshold
+    mask &= sf._distance_to(v, boundary_vertices(mesh)) > boundary_margin_au
     if params.feature_open_au > 0:
         r = params.feature_open_au
         mask = morph(mesh, morph(mesh, mask, r, grow=False), r, grow=True)
     return split_regions(mesh, mask, params.min_surface_au2)
+
+
+def _atlas_data_key(bone, params: ContactParams) -> str:
+    """Od czego poza sekcją "contacts" zależy wynik "atlas": modele w bazie, sekcje "atlas" i "surface_features"."""
+    import atlas
+
+    return atlas.data_key()
+
+
+@detector("atlas", data_key=_atlas_data_key)
+def detect_atlas(bone, params: ContactParams):
+    """ATLAS ANATOMICZNY: kontekst z bazy modeli kompletnych kości + analiza lokalna jak w "features".
+
+    Szuka w bazie (settings.json "paths" -> "atlas") kości, z której pochodzi fragment (z inną
+    skalą, odbiciem lustrzanym, tylko częściowo), liczy rozkład prawdopodobieństwa modeli
+    (z "żadna z bazy") i na najbardziej prawdopodobnych modelach rozstrzyga, co jest korą
+    (leży na powierzchni modelu), a co przełomem (wnętrze kości). Łączy to z wynikiem "features",
+    więc naturalnie szorstka kora (nasady, przyczepy mięśni) nie jest brana za przełom.
+    Opis: src/atlas.py, ustawienia: settings.json -> "atlas".
+
+    Args:
+        bone:   kość (fragment).
+        params: ustawienia analizy lokalnej (feature_*) i obszarów (min_surface_au2).
+
+    Returns:
+        ((V,) uint8 etykiety, {"atlas": ranking modeli z prawdopodobieństwami}).
+
+    Raises:
+        ValueError: pusta baza modeli albo zła nazwa cechy w feature_keys.
+    """
+    import atlas
+
+    return atlas.detect(bone, params)
 
 
 def boundary_vertices(mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
@@ -853,10 +917,33 @@ def detection_params(params: ContactParams) -> dict:
         params: wszystkie ustawienia sekcji "contacts".
 
     Returns:
-        {nazwa: wartość} bez method, brush_au i wand_angle_deg (krotki jako listy - jak po odczycie JSON).
+        {nazwa: wartość} bez method, brush_au, wand_angle_deg i exclude (krotki jako listy - jak po odczycie JSON).
     """
     return {k: list(v) if isinstance(v, tuple) else v for k, v in asdict(params).items()
-            if k not in ("method", "brush_au", "wand_angle_deg")}
+            if k not in ("method", "brush_au", "wand_angle_deg", "exclude")}
+
+
+def _fold(text: str) -> str:
+    """Tekst do porównywania nazw: bez polskich znaków i wielkości liter, spacje = "_" (jak id kości)."""
+    from data_parsing import slugify
+    return slugify(text).lower()
+
+
+def is_excluded(bone, params: ContactParams) -> bool:
+    """Czy kość jest na liście "exclude" sekcji "contacts" (algorytm jej nie liczy).
+
+    Pasuje, gdy id albo nazwa kości zawiera któryś z tekstów - bez wielkości liter
+    i polskich znaków, spacja = "_" (więc "cała kość" pasuje do id "Test_cala_kosc_strzalkowa").
+
+    Args:
+        bone:   kość (id, label).
+        params: ustawienia sekcji "contacts".
+
+    Returns:
+        True = pominąć.
+    """
+    names = (_fold(bone.id), _fold(bone.label))
+    return any(p and any(p in n for n in names) for p in map(_fold, params.exclude))
 
 
 def detector_info(bone, method: str, params: ContactParams) -> dict:
@@ -887,7 +974,8 @@ def detect_contacts(bone, method: str | None = None, params: ContactParams = Con
 
     Returns:
         Contacts z source = "auto:<method>", nazwami "Wykryta k" i opisem algorytmu
-        w `detector` (żeby auto_contacts mógł sprawdzić aktualność).
+        w `detector` (żeby auto_contacts mógł sprawdzić aktualność). Algorytm może zwrócić
+        (labels, info) - wtedy `info` (słownik JSON, np. ranking kości z atlasu) trafia do Contacts.info.
 
     Raises:
         ValueError: nieznany algorytm.
@@ -895,10 +983,12 @@ def detect_contacts(bone, method: str | None = None, params: ContactParams = Con
     method = method or params.method
     if method not in DETECTORS:
         raise ValueError(f"Nieznany algorytm {method!r}, dostępne: {', '.join(DETECTORS)}")
-    labels = np.asarray(DETECTORS[method](bone, params), dtype=np.uint8)
+    result = DETECTORS[method](bone, params)
+    labels, info = result if isinstance(result, tuple) else (result, {})
+    labels = np.asarray(labels, dtype=np.uint8)
     names = {int(k): f"Wykryta {k}" for k in np.unique(labels) if k > 0}
     return Contacts(bone_id=bone.id, labels=labels, names=names, source=f"auto:{method}",
-                    detector=detector_info(bone, method, params))
+                    detector=detector_info(bone, method, params), info=dict(info or {}))
 
 
 def auto_contacts(bone, params: ContactParams = ContactParams(),
@@ -913,9 +1003,13 @@ def auto_contacts(bone, params: ContactParams = ContactParams(),
         params: algorytm (params.method) i jego ustawienia.
         root:   folder oznaczeń zamiast CONTACTS_DIR (wynik w <root>/auto/).
 
+    Kość z listy "exclude" (is_excluded): puste etykiety, nic nie liczy ani nie zapisuje.
+
     Returns:
         (etykiety - puste, gdy algorytm nic nie znalazł; True = właśnie policzone, False = z cache).
     """
+    if is_excluded(bone, params):
+        return Contacts(bone.id, np.zeros(len(bone.mesh.vertices), np.uint8), source=f"auto:{params.method}"), False
     want = detector_info(bone, params.method, params)
     cached = load_contacts(bone.id, bone.mesh, "auto", root=root, frames=scan_frames(bone))
     if cached is not None and not cached.remapped and cached.detector == want:

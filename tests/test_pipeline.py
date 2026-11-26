@@ -212,7 +212,7 @@ def main() -> None:
         check(abs(r["iou"] - 1) < 1e-9, "ocena: te same etykiety -> IoU = 1")
         root = tmp / "contacts"
         other = [x for x in loaded if x.id != bone.id][0]
-        for name in ct.DETECTORS:
+        for name in [d for d in ct.DETECTORS if d != "atlas"]:     # "atlas" potrzebuje bazy: tests/test_atlas.py
             found = ct.detect_contacts(bone, name, ct.ContactParams())
             check(len(found.labels) == len(v), f"algorytm \"{name}\" działa ({len(found.surface_ids)} pow.)")
         n = 1000
@@ -387,6 +387,14 @@ def main() -> None:
         d = cKDTree(np.asarray(a.mesh.vertices)[la == p["surface_a"]]).query(pb)[0]
         check(np.median(d) < 0.3, f"prawdziwe przełomy na przygotowanych kościach nakładają się "
                                   f"(true_transform, mediana {np.median(d):.2f} a.u.)")
+        one = sb.SyntheticParams(n_bones=1, fragments=(2, 2), edge_au=0.5, seed=1)
+        solid = [trimesh.Trimesh(f.vertices, f.faces, process=False) for f in sb.generate(one).fragments]
+        hollow = [trimesh.Trimesh(f.vertices, f.faces, process=False)
+                  for f in sb.generate(replace(one, marrow=0.5)).fragments]
+        check(all(m.is_watertight and m.volume > 0 for m in hollow)
+              and sum(m.volume for m in hollow) < sum(m.volume for m in solid) - 20,
+              f"kanał szpikowy (marrow): wklęsły dół na przełomie, siatki szczelne "
+              f"({sum(m.volume for m in solid) - sum(m.volume for m in hollow):.0f} a.u.³ mniej)")
         chip = sb.generate(replace(sb.SyntheticParams(edge_au=0.5), **sb.PRESETS["chip"]))
         thin = [f for f in chip.fragments if f.index == 2][0]
         tm = trimesh.Trimesh(thin.vertices, thin.faces, process=False)

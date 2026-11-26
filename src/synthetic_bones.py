@@ -98,6 +98,9 @@ class SyntheticParams:
     hole_au: tuple = (1.5, 3.0)         # promień dziury (od, do)
     colors: bool = True                 # kolory wierzchołków (kora jasna, przełom ciemniejszy)
     chip_au: tuple = (2.0, 4.0)         # grubość płaskiego odłamka (cięcie "chip") (od, do)
+    marrow: float = 0.0                 # kanał szpikowy: promień jako część promienia kości (0 = lita kość, np. 0.5);
+                                        # na przełomie skaner widzi go jako wklęsły dół, nie dziurę
+    marrow_depth_au: float = 3.0        # głębokość tego dołu (najwyżej 30% długości fragmentu)
     # Ręczny układ cięć: jedna lista na kość, cięcia od dołu do góry: "fracture" = zwykły przełom,
     # "chip" = płaski odłamek (dwa bliskie, prawie równoległe przełomy). () = losowo wg n_bones
     # i fragments; podany układ wyznacza liczbę kości i fragmentów.
@@ -350,12 +353,16 @@ def _ring_strip(a_idx, a_ang, b_idx, b_ang) -> list[tuple[int, int, int]]:
 
 
 def build_fragment(shape: BoneShape, lower: CutSurface, upper: CutSurface, edge: float,
-                   theta0: float = 0.0, lower_id: int = 0, upper_id: int = 0):
+                   theta0: float = 0.0, lower_id: int = 0, upper_id: int = 0,
+                   marrow: float = 0.0, marrow_depth: float = 0.0):
     """Zamknięta siatka fragmentu kości między powierzchniami `lower` i `upper` (układ kości).
 
     Kora z boku: siatka (kąt x wysokość), na dole i na górze "zatyczki" - pierścienie od środka
     przekroju do krawędzi kory, z liczbą wierzchołków rosnącą z promieniem. Zatyczka i kora
     mają wspólne wierzchołki na krawędzi, więc siatka jest szczelna.
+    Kanał szpikowy (marrow > 0): na zatyczce-przełomie (nie na końcu kości) środek do marrow x promień
+    jest wklęsłym dołem w głąb fragmentu (gładki profil (1 - (r / r_kanału)²)², głębokość
+    marrow_depth, najwyżej 30% długości fragmentu) - tak skaner widzi otwarty kanał.
 
     Args:
         shape:    kształt kory.
@@ -387,12 +394,19 @@ def build_fragment(shape: BoneShape, lower: CutSurface, upper: CutSurface, edge:
     c, d = np.roll(lat[1:], -1, axis=1), lat[1:]
     faces = [np.concatenate([np.stack([a, b, c], -1).reshape(-1, 3), np.stack([a, c, d], -1).reshape(-1, 3)])]
     count = Z.size
+    depth = min(marrow_depth, 0.3 * float((z_hi - z_lo).min())) if marrow > 0 else 0.0
+
+    def pit(frac: float, surface: CutSurface, up: bool) -> float:
+        """Przesunięcie z zatyczki w odległości frac (0 = środek, 1 = kora) - dół kanału szpikowego w głąb fragmentu."""
+        if depth <= 0 or surface.kind != "fracture" or frac >= marrow:
+            return 0.0
+        return (-1.0 if up else 1.0) * depth * (1 - (frac / marrow) ** 2) ** 2
 
     for surface, boundary, sid, up in ((lower, lat[0], lower_id, False), (upper, lat[-1], upper_id, True)):
         bxy = shape.lateral_xy(theta, z_lo if not up else z_hi)
         center = bxy.mean(axis=0)
         n_s = max(2, int(np.ceil(np.linalg.norm(bxy - center, axis=1).max() / edge)))
-        cap_v = [np.append(center, surface.height(center))[None, :]]
+        cap_v = [np.append(center, surface.height(center) + pit(0.0, surface, up))[None, :]]
         rings = [(np.array([count]), None)]
         count += 1
         for m in range(1, n_s):
@@ -400,7 +414,7 @@ def build_fragment(shape: BoneShape, lower: CutSurface, upper: CutSurface, edge:
             ang = theta0 + 2 * np.pi * np.arange(n_m) / n_m
             rxy = shape.lateral_xy(ang, _boundary_z(shape, surface, ang))
             xy = center + (m / n_s) * (rxy - center)
-            cap_v.append(np.column_stack([xy, surface.height(xy)]))
+            cap_v.append(np.column_stack([xy, surface.height(xy) + pit(m / n_s, surface, up)]))
             rings.append((count + np.arange(n_m), ang))
             count += n_m
         rings.append((boundary, theta))
@@ -558,9 +572,10 @@ def generate(params: SyntheticParams = SyntheticParams()) -> SyntheticSet:
             lower_id = 1 if cuts[k].kind == "fracture" else 0
             upper_id = (lower_id + 1) if cuts[k + 1].kind == "fracture" else 0
             theta0 = rng.uniform(0, 2 * np.pi)
-            mesh = build_fragment(shape, cuts[k], cuts[k + 1], params.edge_au, theta0, lower_id, upper_id)
+            marrow = (params.marrow, params.marrow_depth_au)
+            mesh = build_fragment(shape, cuts[k], cuts[k + 1], params.edge_au, theta0, lower_id, upper_id, *marrow)
             preview = build_fragment(shape, cuts[k], cuts[k + 1], max(PREVIEW_EDGE_AU, params.edge_au),
-                                     theta0, lower_id, upper_id)
+                                     theta0, lower_id, upper_id, *marrow)
             raw.append((bone_id, k, lower_id, upper_id, mesh, preview))
 
     order = rng.permutation(len(raw))                    # numery fragmentów wymieszane między kośćmi

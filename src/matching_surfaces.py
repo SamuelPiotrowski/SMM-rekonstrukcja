@@ -57,7 +57,8 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 from bones import Bone
-from contacts import ContactParams, Contacts, auto_contacts, load_contacts, scan_frames, triangle_labels
+from contacts import (ContactParams, Contacts, auto_contacts, is_excluded, load_contacts, scan_frames,
+                      triangle_labels)
 from data_parsing import compute_fpfh, sample_surface, submesh, to_cloud, voxel_keep
 from merging import covered, transform_points
 
@@ -191,6 +192,8 @@ def bone_contacts(bone: Bone, source: str, contact_params: ContactParams = Conta
             return c, "ręczne"
         if source == "manual":
             return None, "brak ręcznych oznaczeń"
+    if is_excluded(bone, contact_params):
+        return None, "pominięta (contacts -> exclude)"
     c, computed = auto_contacts(bone, contact_params, root)
     if not c.labels.any():
         return None, "brak (algorytm nic nie znalazł)"

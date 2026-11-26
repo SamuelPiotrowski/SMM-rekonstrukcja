@@ -12,7 +12,7 @@
   // Zestaw może mieć własne ustawienia: scanned_bones/<zestaw>/settings.json - te same sekcje co tu,
   // nadpisują tylko podane klucze (np. {"merging": {"enabled": false}}).
   // -----------------
-  "dataset": "first_scans",
+  "dataset": "grzesiu",
 
   // -----------------
   // Foldery (względem głównego folderu projektu) - w każdym z nich podfoldery zestawów
@@ -20,7 +20,10 @@
   "paths": {
     "data_in": "scanned_bones",   // surowe skany (.ply/.obj/.stl): <zestaw>/<kość>/<plik skanu>
     "data_out": "out/3d",         // wyniki - generowane, można je usunąć i policzyć od nowa
-    "contacts": "contacts"        // powierzchnie styku: ręczne (commituj!) + podfolder auto/ (generowane)
+    "contacts": "contacts",       // powierzchnie styku: ręczne (commituj!) + podfolder auto/ (generowane)
+    // Atlas anatomiczny (sekcja "atlas") - wspólny dla wszystkich zestawów:
+    "atlas": "atlas",             // pliki modeli KOMPLETNYCH kości (.ply/.obj/.stl) - potrzebne tylko do zindeksowania
+    "atlas_index": "atlas_index"  // zindeksowana baza (~1 MB na kość) - z niej korzysta wykrywanie; oryginały można usunąć
   },
 
   // -----------------
@@ -99,7 +102,8 @@
     // startuje od jego wyniku = "ustawienie automatyczne"; przycisk "Propozycja algorytmu")
     // i dopasowanie w trybie "auto" / "manual-auto". Po zmianie któregokolwiek
     // ustawienia poniżej dopasowanie samo policzy wyniki algorytmu od nowa.
-    "method": "features",      // nazwa algorytmu (@detector w src/contacts.py): "roughness" albo "features"
+    "method": "atlas",      // nazwa algorytmu (@detector w src/contacts.py): "roughness", "features" albo "atlas"
+                               // ("atlas" = "features" + baza kompletnych kości, sekcja "atlas" niżej)
     "min_surface_au2": 15.0,    // oba algorytmy: mniejsze wykryte obszary są pomijane [a.u.²]
 
     // "roughness" = algorytm bazowy: przełom to szorstka powierzchnia, kora kości gładka (słaby!)
@@ -112,7 +116,57 @@
     "feature_keys": ["spread_2", "rough_1", "edge_au"],  // rozrzut normalnych 2 a.u., szorstkość 1 a.u., krawędź siatki
     "feature_threshold": 0.15,  // o ile ponad typową wartość tej kości (w odchyleniach) = przełom (wyżej = mniej, ale pewniej)
     "feature_smooth_au": 1.0,   // uśrednianie wyniku w tym promieniu przed progiem [a.u.] (0 = bez)
-    "feature_open_au": 1.0      // otwarcie morfologiczne [a.u.]: rozcina wąskie mostki między obszarami (więcej = więcej kawałków)
+    "feature_open_au": 1.0,     // otwarcie morfologiczne [a.u.]: rozcina wąskie mostki między obszarami (więcej = więcej kawałków)
+
+    // Kości, dla których algorytm NIE liczy powierzchni styku (np. całe, nieprzełamane kości):
+    // id albo nazwa zawiera któryś z tekstów (bez wielkości liter i polskich znaków, spacja = "_").
+    // Ręczne oznaczenia tych kości nadal działają. Osobno dla zestawu: scanned_bones/<zestaw>/settings.json.
+    "exclude": ["cała kość"]
+  },
+
+  // -----------------
+  // Atlas anatomiczny: baza modeli KOMPLETNYCH kości - src/atlas.py
+  //   python scripts/build_atlas.py       indeksuje pliki z "paths" -> "atlas" (robi się też samo)
+  //   python scripts/identify_bones.py    z której kości pochodzi każdy fragment (+ atlas.html)
+  //   algorytm "atlas" (sekcja "contacts" -> "method", albo detect_contacts.py --method atlas):
+  //   kora = leży na powierzchni dopasowanego modelu, przełom = wnętrze kości (też kanał szpikowy).
+  // Długości w a.u. skanu. Po zmianie dopasowania liczą się od nowa same (cache w out/3d/<zestaw>/cache/atlas/).
+  // -----------------
+  "atlas": {
+    // Skala: model może być w innych jednostkach i innej wielkości osobniczej niż skan
+    "reference_scale": 1.0,     // ile a.u. skanu to 1 jednostka modelu (model w mm, skan w a.u. ~ mm -> 1)
+    "scale_range": [0.75, 1.35],// dopuszczalna skala względem reference_scale (różnice osobnicze, kalibracja skanera)
+    "mirror": true,             // sprawdzaj też odbicie lustrzane modelu (kość z drugiej strony ciała)
+
+    // Sito własności - PRZED dopasowaniem wyklucza kości, które na pewno nie pasują (rozmiar, krzywizny)
+    "curvature_radius_au": 2.5, // promień liczenia krzywizn [a.u.] (zmiana = baza liczona od nowa)
+    "size_tolerance": 0.15,     // zapas na różnice osobnicze w długości i polu (0.15 = 15%)
+    "max_unexplained": 0.2,     // wyklucz kość, gdy taka część kory fragmentu nie ma odpowiednika na żadnym jej kawałku
+    "max_models": 5,            // najwięcej kości po sicie do dokładnego dopasowania
+    "scale_candidates": 2,      // ile najlepszych skal z sita sprawdzać na kość
+
+    // Dopasowanie (RANSAC na FPFH + ICP ze skalą)
+    "voxel_au": 1.0,            // odstęp punktów zgrubnego ustawienia [a.u.] (zmiana = baza liczona od nowa)
+    "fpfh_radius_au": 5.0,      // promień deskryptora kształtu FPFH [a.u.]
+    "ransac_iterations": 200000,// iteracji RANSAC na skalę i odbicie
+    "ransac_seeds": 1,          // niezależnych prób RANSAC (wygrywa najlepsza)
+    "icp_iterations": 30,       // kroków ICP ze skalą
+
+    // Ocena i prawdopodobieństwa
+    "tolerance_au": 1.0,        // KORA = fragment bliżej powierzchni modelu niż to [a.u.] ...
+    "normal_angle_deg": 40.0,   // ... z normalnymi zgodnymi z dokładnością do tego kąta
+    "outside_penalty": 1.0,     // kara za część fragmentu wystającą NA ZEWNĄTRZ modelu (dobra kość: nic nie wystaje)
+    "min_fit": 0.55,            // ocena "żadna z bazy": kości dopasowane gorzej są mniej prawdopodobne niż brak dopasowania
+    "temperature": 0.05,        // rozmycie prawdopodobieństw (mniej = ostrzej, więcej = ostrożniej)
+    "top_k": 3,                 // ile najbardziej prawdopodobnych kości rozstrzyga, co jest korą, a co przełomem
+
+    // Łączenie z analizą lokalną (szorstkość, rozrzut normalnych, gęstość siatki - jak "features")
+    "atlas_weight": 2.0,        // waga atlasu względem analizy lokalnej (więcej = atlas ważniejszy)
+    "local_scale": 0.3,         // tyle wyniku "features" ponad feature_threshold = 1 jednostka log-szans
+    "min_confidence": 0.8,      // pewność atlasu (suma p najlepszych kości) poniżej tego = sama analiza lokalna
+    "cavity_weight": 3.0,       // wgłębienie (kanał szpikowy - na skanie wklęsły dół) = przełom z tą siłą; 0 = bez
+    "cavity_occlusion": 0.55,   // od takiej części zasłoniętych promieni punkt leży we wgłębieniu
+    "cavity_depth_au": 15.0     // promień trafiający w siatkę dalej niż to nie zasłania [a.u.]
   },
 
   // -----------------
@@ -189,6 +243,9 @@
     "hole_au": [1.5, 3.0],      // promień dziury
     "colors": true,             // kolory: kora jasna, przełom ciemniejszy (false = bez kolorów)
     "chip_au": [2, 4],          // grubość płaskiego odłamka (cięcie "chip")
+    "marrow": 0.0,              // kanał szpikowy: promień jako część promienia kości (0 = lita kość, np. 0.5);
+                                // na przełomie skaner widzi go jako WKLĘSŁY dół, nie dziurę
+    "marrow_depth_au": 3.0,     // głębokość tego dołu
     // Ręczny układ cięć zamiast losowego: lista na każdą kość, cięcia od dołu do góry -
     // "fracture" = zwykły przełom, "chip" = płaski odłamek między dwoma bliskimi przełomami.
     // Np. [["fracture", "chip"], ["fracture"]] = 2 kości (4 i 2 części). [] = losowo wg n_bones / fragments.
@@ -210,6 +267,6 @@
     //   "auto"        = z algorytmu (contacts/<zestaw>/auto/; gdy brak albo nieaktualne - liczone i zapisywane),
     //   "manual-auto" = ręczne, a dla kości bez ręcznych - z algorytmu.
     // Jednorazowo: python scripts/show_bones.py --source auto   (albo krócej: --auto)
-    "source": "manual"
+    "source": "auto"
   }
 }

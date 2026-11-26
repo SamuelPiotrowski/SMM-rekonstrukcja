@@ -4,12 +4,17 @@ Automatyczne wykrywanie powierzchni styku (algorytm) + porównanie z ręcznymi o
 Algorytmy (src/contacts.py, nowe dodaje się dekoratorem @detector):
     roughness - bazowy: przełom = szorstka powierzchnia (słaby),
     features  - szorstkość + rozrzut normalnych + gęstość siatki naraz, bez żadnych oznaczeń:
-                przełom = wyraźnie ponad typową wartość tej samej kości (lepszy od roughness).
+                przełom = wyraźnie ponad typową wartość tej samej kości (lepszy od roughness),
+    atlas     - kontekst anatomiczny: szuka w bazie modeli kompletnych kości (scripts/build_atlas.py),
+                z której kości pochodzi fragment; kora = leży na powierzchni modelu, przełom = wnętrze
+                kości (też kanał szpikowy) + analiza lokalna jak w features. Wypisuje też ranking kości
+                z prawdopodobieństwami (szczegóły i strona HTML: scripts/identify_bones.py).
 
 Użycie (z głównego folderu projektu, po scripts/prepare_data.py):
     python scripts/detect_contacts.py                      # wszystkie kości, algorytm z settings.json
     python scripts/detect_contacts.py --method features    # wybrany algorytm
     python scripts/detect_contacts.py 3 5                  # tylko kości nr 3 i 5
+    python scripts/detect_contacts.py --method atlas       # z bazą kości (--atlas FOLDER = inne pliki modeli)
 
 Algorytm i jego ustawienia: settings.json, sekcja "contacts" ("method", "rough_threshold", ...).
 Wyniki: contacts/<zestaw>/auto/<id>.json - zawsze liczone od nowa (ręczne oznaczenia contacts/<zestaw>/<id>.json
@@ -50,8 +55,10 @@ def main() -> None:
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--method", choices=list(ct.DETECTORS), default=None, help="algorytm")
     config.add_dataset_argument(parser)
+    config.add_atlas_argument(parser)
     args = parser.parse_args()
     config.use_dataset(args.dataset)
+    config.use_atlas(args.atlas, args.atlas_index)
 
     all_bones = load_bones()
     if not all_bones:
@@ -67,6 +74,9 @@ def main() -> None:
     scores = []
     for b in bones:
         nr = all_bones.index(b) + 1
+        if ct.is_excluded(b, params):
+            print(f"  {nr:2d}. {b.label}: pominięta (settings.json, \"contacts\" -> \"exclude\")")
+            continue
         start = time.perf_counter()
         try:
             found = ct.detect_contacts(b, method, params)
@@ -82,6 +92,10 @@ def main() -> None:
             scores.append(r)
             line += f"  | vs ręczne: IoU {r['iou']:.2f}, precyzja {r['precision']:.2f}, czułość {r['recall']:.2f}"
         print(line)
+        if found.info.get("atlas"):     # algorytm "atlas": z której kości z bazy pochodzi fragment
+            import atlas
+            for text in atlas.summary_lines(found.info["atlas"]):
+                print(f"      {text}")
     if scores:
         mean = {k: sum(s[k] for s in scores) / len(scores) for k in ("iou", "precision", "recall")}
         print(f"Średnio na {len(scores)} kościach z ręcznymi oznaczeniami: IoU {mean['iou']:.2f}, "

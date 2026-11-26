@@ -26,9 +26,12 @@ Co udostępnia:
     DATA_IN, DATA_OUT, CONTACTS_DIR - foldery bieżącego zestawu (zmienia je use_dataset),
     use_dataset(), list_datasets(), dataset_dirs(), add_dataset_argument()
                                     - wybór i lista zestawów,
+    ATLAS_DIR, ATLAS_INDEX, use_atlas(), add_atlas_argument()
+                                    - baza modeli kompletnych kości (atlas anatomiczny, src/atlas.py):
+                                      pliki modeli i zindeksowana baza,
     scan_params(), merge_params(), feature_params(), contact_params(),
-    matching_params(), surface_feature_params(), view3d_params(), synthetic_params()
-                                    - obiekty parametrów modułów (po jednym na sekcję),
+    matching_params(), surface_feature_params(), view3d_params(), synthetic_params(),
+    atlas_params()                  - obiekty parametrów modułów (po jednym na sekcję),
     DATASET_SETTINGS                - ustawienia bieżącego zestawu (jego settings.json, {} = brak),
     OPEN_BROWSER, CONTACT_TOOL_PORT, MATCH_TOOL_PORT
                                     - pojedyncze ustawienia skryptów.
@@ -246,6 +249,54 @@ use_dataset(check=False)
 
 
 # -----------------
+# ATLAS ANATOMICZNY (baza modeli kompletnych kości) - src/atlas.py
+# -----------------
+
+# Dwa foldery (wspólne dla wszystkich zestawów), zmienia je use_atlas():
+#   ATLAS_DIR   - pliki modeli 3D kompletnych kości (.ply/.obj/.stl), potrzebne tylko do zindeksowania,
+#   ATLAS_INDEX - zindeksowana baza (~1 MB na model) - TYLKO z niej korzysta wykrywanie; oryginały
+#                 można potem usunąć albo trzymać gdzie indziej.
+ATLAS_DIR: Path = ROOT / _paths.get("atlas", "atlas")
+ATLAS_INDEX: Path = ROOT / _paths.get("atlas_index", "atlas_index")
+
+
+def _project_path(path: str | Path) -> Path:
+    """Ścieżka względna = względem głównego folderu projektu."""
+    p = Path(path)
+    return p if p.is_absolute() else ROOT / p
+
+
+def use_atlas(source: str | Path | None = None, index: str | Path | None = None) -> tuple[Path, Path]:
+    """Ustawia foldery atlasu (ATLAS_DIR, ATLAS_INDEX) - np. z opcji --atlas / --atlas-index skryptu.
+
+    Args:
+        source: folder z plikami modeli; None / "" = z settings.json ("paths" -> "atlas").
+        index:  folder zindeksowanej bazy; None / "" = z settings.json ("paths" -> "atlas_index").
+
+    Returns:
+        (ATLAS_DIR, ATLAS_INDEX) - foldery nie muszą istnieć.
+    """
+    global ATLAS_DIR, ATLAS_INDEX
+    ATLAS_DIR = _project_path(source or _paths.get("atlas", "atlas"))
+    ATLAS_INDEX = _project_path(index or _paths.get("atlas_index", "atlas_index"))
+    return ATLAS_DIR, ATLAS_INDEX
+
+
+def add_atlas_argument(parser) -> None:
+    """Dodaje do skryptu opcje --atlas i --atlas-index (inne foldery atlasu niż w settings.json).
+
+    Po parser.parse_args() skrypt wywołuje config.use_atlas(args.atlas, args.atlas_index).
+
+    Args:
+        parser: argparse.ArgumentParser skryptu.
+    """
+    parser.add_argument("--atlas", default=None, metavar="FOLDER",
+                        help=f"folder z plikami modeli kompletnych kości (domyślnie z settings.json: {_rel(ATLAS_DIR)})")
+    parser.add_argument("--atlas-index", default=None, metavar="FOLDER",
+                        help=f"folder zindeksowanej bazy modeli (domyślnie z settings.json: {_rel(ATLAS_INDEX)})")
+
+
+# -----------------
 # PARAMETRY MODUŁÓW
 # -----------------
 
@@ -385,6 +436,19 @@ def synthetic_params():
     """
     from synthetic_bones import SyntheticParams
     return _section("synthetic", SyntheticParams)
+
+
+def atlas_params():
+    """Atlas anatomiczny (rozpoznawanie kości, algorytm "atlas"): sekcja "atlas" settings.json.
+
+    Returns:
+        atlas.AtlasParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
+    """
+    from atlas import AtlasParams
+    return _section("atlas", AtlasParams)
 
 
 def view3d_params():

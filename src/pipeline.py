@@ -4,6 +4,8 @@ Cały etap przygotowania danych: skany -> kości.
     from pipeline import prepare_all
     bones = prepare_all()
 
+Z konsoli: python src/pipeline.py [--dataset NAZWA]  (to samo co scripts/prepare_data.py).
+
 Kroki: wyszukanie skanów (z podfolderami) -> wczytanie i naprawa -> rejestracja par
 (cache w DATA_OUT/cache/) -> grupowanie skanów tej samej kości -> łączenie i usuwanie
 szumu -> chmura punktów i FPFH -> zapis do DATA_OUT/bones/<id>/, merging.json, summary.csv.
@@ -205,5 +207,19 @@ def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path) 
 
 
 if __name__ == "__main__":
+    # python src/pipeline.py [--dataset NAZWA] - to samo co scripts/prepare_data.py
+    import argparse
+    import sys
+
+    import config
+
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    parser = argparse.ArgumentParser(description="Przygotowanie danych: skany zestawu -> kości.")
+    config.add_dataset_argument(parser)
+    args = parser.parse_args()
+    config.use_dataset(args.dataset)
+    if not config.DATA_IN.is_dir():
+        raise SystemExit(f"Brak folderu ze skanami zestawu \"{config.DATASET}\": {config.DATA_IN}")
     np.set_printoptions(precision=3, suppress=True)
     prepare_all()

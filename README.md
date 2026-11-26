@@ -106,8 +106,11 @@ Wszystko uruchamiamy z głównego folderu projektu, przy aktywnym `.venv`. Skryp
 | 5 | `python scripts/match_surfaces.py` | **dopasowanie fragmentów po powierzchniach styku** (RANSAC + ICP) - tylko liczy i zapisuje | `out/3d/<zestaw>/matching.json` |
 | 6 | `python scripts/tune_matching.py` | **podgląd dopasowania** (jak krok 4 dla kroku 1): suwaki przeliczają pokazaną parę; `--html` = plik do wysłania | `out/3d/<zestaw>/matching.html` (z `--html`) |
 | – | `python scripts/detect_contacts.py` | algorytm wykrywania powierzchni styku + porównanie z ręcznymi | `contacts/<zestaw>/auto/*.json` |
+| – | `python scripts/build_atlas.py` | **baza kompletnych kości (atlas)**: indeksuje modele z `atlas/` | `atlas_index/` |
+| – | `python scripts/identify_bones.py` | **z której kości z bazy pochodzi każdy fragment** (prawdopodobieństwa) + kora / przełom | `out/3d/<zestaw>/atlas.html`, `atlas.json`, `atlas.csv` |
 | – | `python scripts/datasets.py` | lista zestawów danych i ich stan | – |
 | – | `python tests/test_pipeline.py` | test całości na sztucznych skanach (~20 s) | – |
+| – | `python tests/test_atlas.py` | test atlasu na sztucznych kościach (~1 min) | – |
 
 Wizualizacje (krok 2, 4 i 6 z `--html`) to pojedyncze pliki HTML - otwierają się same, działają bez internetu i można je komuś wysłać.
 
@@ -197,6 +200,7 @@ Wszystko jest przygotowane pod algorytm, który zastąpi ręczne oznaczanie:
 Algorytmy:
 - `roughness` - bazowy: przełom = szorstka powierzchnia, kora = gładka. Punkt wyjścia, nie rozwiązanie.
 - `features` - **szorstkość + rozrzut normalnych + gęstość siatki naraz, bez żadnych oznaczeń**. Każda cecha jest porównywana z typową wartością na tej samej kości (mediana = kora, bo kory jest najwięcej): przełom jest bardziej szorstki, ma większy rozrzut normalnych i gęstszą siatkę. Wynik = średnia tych odchyleń, potem wygładzenie, próg i podział na obszary. Nie zależy od skali skanera. Na naszych 6 ręcznie oznaczonych kościach IoU 0.47 (`roughness` 0.43); opis cech: [raporty/przelom_vs_kora.md](raporty/przelom_vs_kora.md). Ustawienia: `feature_keys`, `feature_threshold`, `feature_smooth_au`, `feature_open_au` w sekcji `contacts`.
+- `atlas` - **`features` + kontekst anatomiczny z bazy kompletnych kości**: rozpoznaje, z której kości pochodzi fragment, i na tej podstawie rozstrzyga, co jest korą (leży na powierzchni kości), a co przełomem (wnętrze kości, też kanał szpikowy). Dzięki temu naturalnie szorstka kora (nasady, przyczepy mięśni) nie jest brana za przełom, a gładki przełom nie jest przeoczony. Opis niżej: „Atlas anatomiczny”. Na naszych 6 ręcznie oznaczonych kościach, z bazą z jednej całej kości strzałkowej (`grzesiu/Test cała kość strzałkowa`): IoU 0.51 (`features` 0.47), na fragmentach kości strzałkowej do +0.10; na sztucznych kościach (`tests/test_atlas.py`) IoU 0.80 (`features` 0.36).
 
 ```python
 # src/contacts.py
@@ -210,6 +214,42 @@ def moja_metoda(bone, params):
 ```powershell
 python scripts/detect_contacts.py --method moja_metoda
 ```
+
+### Atlas anatomiczny: `scripts/build_atlas.py`, `scripts/identify_bones.py`, algorytm `atlas`
+
+Baza modeli 3D **kompletnych** kości ludzkich daje algorytmowi kontekst: fragment to wycinek jakiejś kości, jego **kora** leży na zewnętrznej powierzchni tej kości, a **przełom** nie - odsłonięte wnętrze jest pod powierzchnią zdrowej kości. Kość długa ma w środku **kanał szpikowy**: na skanie przełomu to nie dziura, tylko wklęsły dół (skaner widzi ściany kanału) - on też jest wnętrzem kości, więc należy do przełomu.
+
+**Baza.** Pliki modeli (`.ply` / `.obj` / `.stl`, jeden plik = jedna kość, nazwa pliku = nazwa kości, podfolder = typ kości) wrzuca się do `atlas/` (`settings.json` → `paths` → `atlas`, folder nie jest w repo). `python scripts/build_atlas.py` zamienia każdy model w mały wpis bazy w `atlas_index/` (**~1 MB na kość** zamiast dziesiątek MB - prawdziwy skan całej kości strzałkowej: 99 MB → 0.6 MB):
+- tylko **zewnętrzna** powierzchnia (punkt, z którego żaden promień nie ucieka na zewnątrz, leży w środku - np. ściana kanału szpikowego w modelu z tomografii),
+- jej punkty (skwantyzowane), własności do sita (długość, pole, histogramy krzywizn kawałków kości) i mała siatka podglądu.
+
+Wykrywanie korzysta **tylko z bazy** - oryginalne pliki modeli można po zindeksowaniu usunąć albo trzymać gdzie indziej (`atlas_index/` jest mały, można go wrzucić do repo albo wysłać). Kolejne uruchomienia czytają gotowy indeks; liczone są tylko nowe i zmienione pliki (suma kontrolna), plik o zmienionej nazwie jest rozpoznawany po zawartości, model bez pliku zostaje w bazie (usunięcie: `--prune`). Nowe pliki w `atlas/` są doliczane same przy wykrywaniu. Deskryptory FPFH nie są zapisywane - liczą się w locie, tylko dla kości, które przejdą sito, i tylko w potrzebnej skali.
+
+**Jak fragment jest porównywany z bazą** (`src/atlas.py`):
+1. **Analiza lokalna** fragmentu: wynik `features` + **wgłębienia** (kanał szpikowy - z wnętrza wklęsłego dołu promienie trafiają w jego ściany; pas przy brzegu skanu jest pomijany, bo postrzępione brzegi też zasłaniają promienie).
+2. **Sito własności - bez dopasowywania**: fragment nie może być dłuższy (ani mieć więcej kory) niż kość przy największej skali, a krzywizny jego kory (indeks kształtu - nie zależy od skali; krzywizna ogólna - skala tylko przesuwa histogram) muszą występować na jakimś kawałku tej kości. Kości, które nie pasują, są **wykluczane przed RANSAC**; przy okazji wychodzą prawdopodobne skale.
+3. **Dopasowanie** pozostałych (najwyżej `max_models`): RANSAC na FPFH + ICP ze **skalą** (skan może mieć inną skalę i proporcje niż model), także dla **odbicia lustrzanego** (kość z drugiej strony ciała). Przełom i kanał szpikowy nie psują ustawienia (leżą w środku modelu, więc mają wagę ~0).
+4. **Ocena**: jaka część kory fragmentu leży na powierzchni modelu, minus część fragmentu wystająca na zewnątrz → **rozkład prawdopodobieństwa** kości z bazy z możliwością **„żadna z bazy”** (gdy nic nie pasuje dość dobrze = niska pewność).
+5. **Kora vs przełom** z najbardziej prawdopodobnych kości (ważone prawdopodobieństwem): na powierzchni modelu = kora, pod powierzchnią (wnętrze, kanał) = przełom, na zewnątrz = brak zdania (decyduje analiza lokalna). Połączone z analizą lokalną, dalej jak `features` (wygładzenie, próg, obszary). Przy niskiej pewności (`min_confidence`) - sama analiza lokalna, czyli praktycznie wynik `features`.
+
+```powershell
+python scripts/build_atlas.py                    # zindeksuj nowe modele z atlas/, pokaż bazę
+python scripts/identify_bones.py                 # ranking kości dla każdego fragmentu + atlas.html
+python scripts/detect_contacts.py --method atlas # powierzchnie styku z atlasu (contacts/<zestaw>/auto/, z rankingiem)
+python scripts/identify_bones.py --atlas D:/modele --atlas-index D:/baza   # inne foldery bazy
+```
+
+Konsola, np.:
+```
+   4. bone_04: 1. Test cała kość strzałkowa-upperjaw (odbicie lustrzane) 99% (skala ×1.28, dopasowanie 0.90) · ... · żadna z bazy 0%
+      sito: dopasowywane 1 z 1 modeli
+```
+
+`atlas.html`: mapa prawdopodobieństw (fragmenty × kości z bazy) i każdy fragment ustawiony na najbardziej prawdopodobnym modelu (szary, półprzezroczysty), z kolorami do wyboru: **decyzja** (pomarańczowe = szorstka kora, którą sama analiza lokalna wzięłaby za przełom; fioletowe = przełom, którego sama analiza lokalna by nie zaznaczyła), dowód z atlasu, analiza lokalna, razem. Ranking jest też w pliku wyniku algorytmu (`"info"` → `"atlas"`), w podpowiedzi `show_bones.py --auto` i w `atlas.json` / `atlas.csv` (do Excela).
+
+Najważniejsze ustawienia (`settings.json`, sekcja `atlas`): `reference_scale` (ile a.u. skanu to 1 jednostka modelu - model w mm, skan ~mm → 1), `scale_range` (różnice osobnicze), `mirror`, `max_unexplained` (siła sita), `tolerance_au` (jak blisko powierzchni modelu musi leżeć kora), `min_fit` / `temperature` (kiedy „żadna z bazy”), `atlas_weight`, `min_confidence`, `cavity_weight` (kanał szpikowy).
+
+Generator syntetycznych kości ma kanał szpikowy: `settings.json` → `synthetic` → `marrow` (np. 0.5 = kanał o połowie promienia kości; na przełomie wklęsły dół głęboki na `marrow_depth_au`).
 
 ### 5. Dopasowanie po powierzchniach styku: `scripts/match_surfaces.py`
 
@@ -270,11 +310,12 @@ Składnia JSON: `true` / `false` / `null` małymi literami, tekst w `"..."`, lic
 | sekcja | najważniejsze klucze | do czego |
 |---|---|---|
 | `dataset` | (pojedyncza wartość) | domyślny zestaw danych (podfolder w każdym z folderów `paths`) |
-| `paths` | `data_in`, `data_out`, `contacts` | foldery główne: skany, wyniki (`out/3d`), powierzchnie styku |
+| `paths` | `data_in`, `data_out`, `contacts`, `atlas`, `atlas_index` | foldery główne: skany, wyniki (`out/3d`), powierzchnie styku, pliki modeli i baza atlasu |
 | `scans` | `exclude`, `min_component_area_ratio`, `max_component_gap_au` | które skany pominąć; kiedy oderwany kawałek to szum |
 | `merging` | `min_overlap`, `tolerance_au`, `min_support`, `fuse_method`, `groups` | kiedy skany to ta sama kość; jak skleić; ręczne grupy |
 | `features` | `voxel_size`, `fpfh_radius_factor` | chmura punktów i FPFH do dopasowania |
 | `contacts` | `method`, `rough_threshold`, `port`, `brush_au`, ... | algorytm wykrywania i narzędzie do oznaczania |
+| `atlas` | `reference_scale`, `scale_range`, `max_unexplained`, `tolerance_au`, `min_fit`, ... | atlas anatomiczny: rozpoznawanie kości i algorytm `atlas` |
 | `matching` | `source`, `tolerance_au`, `collision_au`, `ransac_iterations`, ... | dopasowanie po powierzchniach styku |
 | `visualization_3d` | `triangles_total`, `embed_plotly`, `open_browser` | wizualizacje HTML |
 
@@ -291,8 +332,10 @@ out/3d/<zestaw>/
         scans/*.ply         każdy skan w układzie kości (*_noise.ply = usunięty szum)
     merging.json            nakładania wszystkich par skanów i przydział do kości
     matching.json           dopasowanie powierzchni styku: wszystkie pary, wyniki, przekształcenia
+    atlas.json, atlas.csv   rozpoznawanie kości z bazy (identify_bones.py): rankingi, skale, ustawienia na modelach
+    cache/atlas/            cache dopasowań fragmentów do bazy
     summary.csv             tabela kości (separator ";", otwiera się w Excelu)
-    bones.html, merging.html, matching.html
+    bones.html, merging.html, matching.html, atlas.html
     cache/pairs.json        cache rejestracji par skanów
 contacts/<zestaw>/<id kości>.json         RĘCZNE oznaczenia powierzchni styku (w repozytorium!)
 contacts/<zestaw>/auto/<id kości>.json    wynik algorytmu wykrywania (generowany, nie ma w repo)
@@ -328,12 +371,15 @@ src/
     bones.py             kość (siatka, chmura, FPFH, meta): zapis / odczyt
     pipeline.py          cały krok 1 (prepare_all)
     contacts.py          powierzchnie styku: format, statystyki, algorytmy, ocena
+    atlas.py             atlas anatomiczny: baza kompletnych kości, sito, dopasowanie ze skalą, algorytm "atlas"
     matching_surfaces.py dopasowanie fragmentów po powierzchniach styku (RANSAC + ICP)
     contact_tool.py      serwer narzędzia do oznaczania
     web/                 strona narzędzia (HTML, CSS, JS - three.js)
     visualization_3d.py  wizualizacje plotly (HTML)
 scripts/         skrypty uruchamiające (patrz „Jak używać”)
-tests/           test_pipeline.py - test na sztucznych skanach
+tests/           test_pipeline.py - test na sztucznych skanach, test_atlas.py - test atlasu
+atlas/           pliki modeli kompletnych kości (nie ma w repo) - potrzebne tylko do zindeksowania
+atlas_index/     zindeksowana baza atlasu (~1 MB na kość) - generowana przez build_atlas.py
 contacts/        ręczne oznaczenia powierzchni styku, folder na każdy zestaw (+ auto/ - wyniki algorytmu, generowane)
 settings.json    wszystkie ustawienia
 out/             wyniki (generowane, nie ma w repo)
