@@ -26,7 +26,8 @@ const ITERATIONS = [10000, 25000, 50000, 100000, 250000, 500000, 1000000, 200000
 //   group: "search" = zmiana wymaga dopasowania od nowa, "score" = wystarczy nowa ocena,
 //   min / max / step - zakres suwaka (rozszerzany, gdy wartość z matching.json jest poza nim),
 //   values - zamiast min/max: lista dozwolonych wartości (suwak wybiera indeks),
-//   unit, help - opis pod suwakiem. buildSliders dopisuje: input (element <input>), out (pole wartości).
+//   unit, help - opis pod suwakiem, atlas: true = ustawienie atlasu (suwak ukryty bez "use_atlas": true).
+//   buildSliders dopisuje: input (element <input>), out (pole wartości).
 const SLIDERS = [
   { group: "search", key: "sample_au", label: "Odstęp punktów powierzchni", unit: "a.u.", min: 0.15, max: 1, step: 0.05,
     help: "Mniej = dokładniej i wolniej. Wpływa też na ocenę." },
@@ -42,6 +43,9 @@ const SLIDERS = [
     min: 5, max: 90, step: 1, help: "Odrzuca ustawienia z bardziej rozbieżnymi normalnymi." },
   { group: "search", key: "icp_start_au", label: "ICP: promień startowy", unit: "a.u.", min: 0.5, max: 6, step: 0.1,
     help: "Do jakiej odległości ICP szuka par punktów (potem połowa, na koniec 2 × odstęp)." },
+  { group: "search", key: "atlas_icp_start_au", label: "Atlas: promień ICP ze startu z atlasu", unit: "a.u.",
+    min: 1, max: 15, step: 0.5, atlas: true,
+    help: "Start z ustawień obu fragmentów na modelu kości jest przybliżony - pierwszy krok ICP szuka dalej." },
   { group: "score", key: "tolerance_au", label: "Styk: maks. odległość", unit: "a.u.", min: 0.1, max: 2, step: 0.05,
     help: "Punkty bliżej niż to liczą się do styku…" },
   { group: "score", key: "normal_angle_deg", label: "Styk: tolerancja kąta normalnych", unit: "°",
@@ -50,6 +54,8 @@ const SLIDERS = [
     help: "Punkt kości głębiej pod powierzchnią drugiej = kolizja." },
   { group: "score", key: "collision_search_au", label: "Kolizja: zasięg szukania", unit: "a.u.", min: 1, max: 10,
     step: 0.5, help: "Sprawdzane tylko tak blisko drugiej kości." },
+  { group: "score", key: "atlas_boost", label: "Atlas: premia za tę samą kość", min: 0, max: 1, step: 0.05, atlas: true,
+    help: "Styk liczy się o tyle mocniej, gdy atlas mówi, że oba fragmenty są z tej samej kości." },
 ];
 const SEARCH = SLIDERS.filter((s) => s.group === "search").map((s) => s.key);   // ustawienia szukania
 const ALL = SLIDERS.map((s) => s.key);                                          // wszystkie ustawienia z suwaków
@@ -158,6 +164,7 @@ function buildSliders() {
     box.innerHTML = `<div class="row"><label for="${input.id}">${s.label}</label><span class="v"></span></div>`;
     box.appendChild(input);
     box.insertAdjacentHTML("beforeend", `<div class="help">${s.help}</div>`);
+    box.hidden = Boolean(s.atlas && !state.base.use_atlas);     // suwaki atlasu tylko przy "use_atlas": true
     // obecna wartość suwaka (z listy `values` albo zaokrąglona do kroku)
     const value = () => (s.values ? s.values[Number(input.value)] : Number(Number(input.value).toFixed(decimals(s.step))));
     input.addEventListener("input", () => showValue(s, value()));
@@ -339,16 +346,21 @@ function renderResult() {
       ? `<span class="was">było ${fmt(old, d)}${unit}</span>` : "";
   const row = (lbl, val) => `<span class="lbl">${lbl}</span><span class="val">${val}</span>`;
   $("resultCard").innerHTML = [
-    row("wynik = styk − kolizja", `<span class="big">${fmt(r.score)}</span> a.u.²${was(r.score, p.score)}`),
+    row(r.atlas_same !== undefined ? "wynik = styk − kolizja + premia" : "wynik = styk − kolizja",
+        `<span class="big">${fmt(r.score)}</span> a.u.²${was(r.score, p.score)}`),
     row("styk", `${fmt(r.contact_au2)} a.u.²${was(r.contact_au2, p.contact_au2)}`),
     row("pokrycie A / B", `${fmt(100 * r.cover_a)}% / ${fmt(100 * r.cover_b)}%`),
     row("RMSE w styku", `${fmt(r.rmse_au, 2)} a.u.${was(r.rmse_au, p.rmse_au, 2)}`),
     row("kolizja kości", `${fmt(r.collision_au2)} a.u.²${was(r.collision_au2, p.collision_au2)}`),
     row("pola powierzchni A / B", `${fmt(p.a_area_au2)} / ${fmt(p.b_area_au2)} a.u.²`),
+    ...(r.atlas_same !== undefined ? [
+      row("atlas: ta sama kość", `${fmt(100 * r.atlas_same)}% (różne ${fmt(100 * r.atlas_diff)}%)`),
+      row("premia z atlasu", `+${fmt(r.atlas_bonus_au2)} a.u.²`),
+      row("start", `${r.start ?? "RANSAC"}${r.ransac === false ? " (bez RANSAC)" : ""}`)] : []),
     `<span class="foot">${c
       ? (c.result.mode === "full" ? "Dopasowane od nowa" : "Nowa ocena tego samego ustawienia")
         + ` w ${fmt(c.result.seconds, 1)} s` + (c.result.seed !== null && c.result.seed !== undefined
-          ? `, wygrała próba ${c.result.seed + 1}` : "")
+          ? `, wygrała próba ${c.result.seed + 1}` + (c.result.start ? ` (${c.result.start})` : "") : "")
       : "Wynik z matching.json."}</span>`,
   ].join("");
   $("stale").hidden = sameParams(params, state.params, ALL) || state.busy;
@@ -384,7 +396,7 @@ async function runPending() {
   const params = { ...state.params };
   const full = job.force || !sameParams(cur.params, params, SEARCH);
   const body = { a: p.a, b: p.b, params, mode: full ? "full" : "score" };
-  if (!full) Object.assign(body, { T: cur.result.T, seed: cur.result.seed });
+  if (!full) Object.assign(body, { T: cur.result.T, seed: cur.result.seed, start: cur.result.start });
   setBusy(true, full
     ? `Dopasowuję od nowa… (RANSAC ${params.ransac_iterations.toLocaleString("pl-PL")} × ${params.ransac_seeds})`
     : "Oceniam…");

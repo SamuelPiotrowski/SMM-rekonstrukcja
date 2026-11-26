@@ -773,7 +773,9 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
             f"styk: {r['contact_au2']:.0f} a.u.²  (A pokryte w {r['cover_a']:.0%}, B w {r['cover_b']:.0%})",
             f"RMSE w styku: {r['rmse_au']:.2f} a.u." if r.get("rmse_au") is not None else "RMSE w styku: –",
             f"kolizja kości: {r['collision_au2']:.0f} a.u.²",
-            "", "<i>wynik = styk - kolizja</i>"]))
+            *([f"atlas: ta sama kość {r['atlas_same']:.0%}, premia +{r['atlas_bonus_au2']:.0f} a.u.², "
+               f"start: {r.get('start', 'RANSAC')}"] if "atlas_same" in r else []),
+            "", "<i>wynik = styk - kolizja" + (" + premia z atlasu" if "atlas_same" in r else "") + "</i>"]))
 
     def layout_for(k):
         """Zmiany układu (sześcienne osie wokół pary, opis) po wybraniu k-tej pary z listy.
@@ -816,7 +818,7 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
 
 
 def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> go.Figure:
-    """Macierz wyników wszystkich par powierzchni (puste = ta sama kość).
+    """Macierz wyników wszystkich par powierzchni (puste = ta sama kość, × = pominięta przez atlas).
 
     Args:
         report: słownik z matching_surfaces.report (to samo, co w matching.json).
@@ -835,12 +837,18 @@ def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> 
         m[i, j] = m[j, i] = p["score"]
     labels = [f"{s['bone_label']} · {s['surface']}{'' if s['source'] == 'manual' else ' (algorytm)'}" for s in surfs]
     text = [["" if np.isnan(x) else f"{x:.0f}" for x in row] for row in m]
+    hover = [["–" if np.isnan(x) else f"wynik: {x:.0f} a.u.²" for x in row] for row in m]
+    for p in report.get("skipped", []):
+        if p["a"] in pos and p["b"] in pos:
+            i, j = pos[p["a"]], pos[p["b"]]
+            text[i][j] = text[j][i] = "×"
+            hover[i][j] = hover[j][i] = f"pominięta: atlas - różne kości ({p['atlas_diff']:.0%})"
     top = np.nanmax(m) if np.isfinite(m).any() else 1.0
     fig = go.Figure(go.Heatmap(
         z=m, x=labels, y=labels, text=text, texttemplate="%{text}", textfont=dict(size=9),
         colorscale=[[0, "#f4f6f8"], [0.5, "#8fb8de"], [1, "#1d4f91"]], zmin=0, zmax=max(top, 1.0),
-        colorbar=dict(title="wynik [a.u.²]"), xgap=1, ygap=1,
-        hovertemplate="%{y}<br>%{x}<br>wynik: %{z:.0f} a.u.²<extra></extra>"))
+        colorbar=dict(title="wynik [a.u.²]"), xgap=1, ygap=1, customdata=hover,
+        hovertemplate="%{y}<br>%{x}<br>%{customdata}<extra></extra>"))
     size = max(480, 22 * n + 260)
     fig.update_layout(paper_bgcolor=params.background, plot_bgcolor=params.background, font=FONT,
                       height=size, margin=dict(l=10, r=10, t=10, b=10),

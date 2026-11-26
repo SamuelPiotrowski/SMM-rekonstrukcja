@@ -264,6 +264,91 @@ def main() -> None:
                              - (a_s.points @ R[:3, :3].T + R[:3, 3]), axis=1).mean()
         check(err < 0.3, f"odnalezione przekształcenie drugiej strony przełomu: błąd {err:.3f} a.u.")
 
+        print("Dopasowanie z atlasem anatomicznym (rankingi i ustawienia na modelu podane wprost)")
+
+        def ctx(*cands, unknown=0.0):
+            """Kontekst jak z ms.atlas_context: (model, odbicie, p, T model -> fragment[, podfolder])."""
+            return {"p_unknown": unknown, "candidates": [
+                {"model": c[0], "group": c[4] if len(c) > 4 else "", "mirror": c[1], "label": c[0], "p": c[2],
+                 "rel_scale": 1.0, "T": np.asarray(c[3]).tolist()} for c in cands]}
+
+        def similarity(s, rot, t):
+            """Macierz 4x4 x -> s rot x + t."""
+            M = np.eye(4)
+            M[:3, :3], M[:3, 3] = s * rot, t
+            return M
+
+        def rot_deg(axis, deg):
+            """Obrót o `deg` stopni wokół osi `axis`."""
+            return trimesh.transformations.rotation_matrix(np.deg2rad(deg), axis)[:3, :3]
+
+        TA = similarity(1.1, rot_deg([1, 2, 0], 70), [5.0, -3.0, 2.0])
+        mid = np.linalg.inv(TA) @ np.append(a_s.points.mean(axis=0), 1)          # środek A w układzie modelu
+        stretch = similarity(1.15 / 1.1, np.eye(3), (1 - 1.15 / 1.1) * mid[:3])  # inna skala B na modelu
+        # B na modelu: prawda (R x A) z błędem dopasowania do modelu: inna skala, 4° obrotu wokół środka
+        # powierzchni, ~1 a.u. przesunięcia
+        c_true = R[:3, :3] @ a_s.points.mean(axis=0) + R[:3, 3]
+        err_B = similarity(1.0, rot_deg([0, 0, 1], 4), [0.7, -0.5, 0.5])
+        err_B[:3, 3] += c_true - err_B[:3, :3] @ c_true
+        TB = err_B @ R @ TA @ stretch
+        a_s.atlas = ctx(("kość 1", False, 0.9, TA), ("kość 2", False, 0.08, np.eye(4)), unknown=0.02)
+        b_s.atlas = ctx(("kość 1", False, 0.85, TB), ("kość 1", True, 0.1, np.eye(4)), unknown=0.05)
+        ap = replace(mp, collision_au=1e6, use_atlas=True, ransac_iterations=200)    # RANSAC praktycznie bez szans
+        starts = ms.atlas_starts(a_s, b_s, ap)
+        true_pts = a_s.points @ R[:3, :3].T + R[:3, 3]
+
+        def pose_err(T):
+            """Średni błąd położenia punktów A po przekształceniu T względem prawdy [a.u.]."""
+            T = np.asarray(T)
+            return float(np.linalg.norm(a_s.points @ T[:3, :3].T + T[:3, 3] - true_pts, axis=1).mean())
+
+        check(len(starts) == 1 and starts[0][0] == "kość 1" and abs(starts[0][1] - 0.765) < 1e-9
+              and 0.3 < pose_err(starts[0][2]) < 5,
+              f"start z atlasu tylko ze wspólnego modelu i strony (p 0.9 x 0.85), przybliżony: "
+              f"błąd {pose_err(starts[0][2]):.2f} a.u.")
+        t = time.perf_counter()
+        r = ms.match_pair(a_s, b_s, ap)
+        check(r["start"] == "atlas: kość 1" and r["ransac"] is False and pose_err(r["T"]) < 0.3,
+              f"ICP ze startu z atlasu, bez RANSAC: błąd {pose_err(r['T']):.3f} a.u. ({time.perf_counter() - t:.1f} s)")
+        same, diff = ms.atlas_relation(a_s, b_s)
+        check(abs(same - 0.9 * 0.85) < 1e-9 and abs(diff - (0.98 * 0.95 - same)) < 1e-9
+              and abs(r["score"] - (r["contact_au2"] * (1 + ap.atlas_boost * same) - r["collision_au2"])) < 1e-6,
+              f"P(ta sama kość) {same:.2f}, różne {diff:.2f}; premia +{r['atlas_bonus_au2']:.0f} a.u.² w wyniku")
+        r_off = ms.evaluate(a_s, b_s, np.asarray(r["T"]), replace(ap, use_atlas=False))
+        check("atlas_same" not in r_off and abs(r_off["score"] - (r["score"] - r["atlas_bonus_au2"])) < 1e-6,
+              "bez use_atlas: wynik bez premii i bez pól atlasu")
+        no_start = ms.match_pair(a_s, b_s, replace(ap, atlas_starts=0, ransac_seeds=1))
+        check(no_start["start"] == "RANSAC" and no_start["ransac"], "atlas_starts = 0 -> zwykły RANSAC")
+        c_s = ms.Surface(bone=other, contacts=a_s.contacts, sid=7, area_au2=a_s.area_au2, points=a_s.points,
+                         normals=a_s.normals, bone_tree=a_s.bone_tree)
+        b_other = ms.Surface(bone=other, contacts=b_s.contacts, sid=8, area_au2=b_s.area_au2, points=b_s.points,
+                             normals=b_s.normals, bone_tree=b_s.bone_tree)
+        b_other.atlas = b_s.atlas
+        kinds = {"inny model": ctx(("kość 2", False, 0.99, np.eye(4))),
+                 "druga strona": ctx(("kość 1", True, 0.99, np.eye(4))),
+                 "niepewny": ctx(("kość 2", False, 0.4, np.eye(4)), unknown=0.6),
+                 "podfolder": ctx(("kość 1b", True, 0.99, np.eye(4), "typ"))}
+        a_ref = ms.Surface(bone=a_s.bone, contacts=a_s.contacts, sid=9, area_au2=1.0, points=a_s.points,
+                           normals=a_s.normals, atlas=ctx(("kość 1", False, 0.99, np.eye(4))))
+        a_grp = ms.Surface(bone=a_s.bone, contacts=a_s.contacts, sid=9, area_au2=1.0, points=a_s.points,
+                           normals=a_s.normals, atlas=ctx(("kość 1a", False, 0.99, np.eye(4), "typ")))
+        skipped = {}
+        for name, k in kinds.items():
+            c_s.atlas = k
+            pairs, sk = ms.split_pairs([a_grp if name == "podfolder" else a_ref, c_s], ap)
+            skipped[name] = bool(sk) and not pairs
+        check(skipped == {"inny model": True, "druga strona": True, "niepewny": False, "podfolder": False},
+              "pomijane pary na pewno różnych kości: inny model, druga strona; nie: niepewny, ten sam podfolder")
+        c_s.atlas = kinds["inny model"]
+        check(not ms.split_pairs([a_ref, c_s], replace(ap, use_atlas=False))[1]
+              and not ms.split_pairs([a_ref, c_s], replace(ap, atlas_skip_different=1.01))[1],
+              "bez use_atlas albo atlas_skip_different > 1 - nic nie jest pomijane")
+        rep_atlas = ms.report([a_ref, c_s, b_other], [], ap)
+        check(set(rep_atlas["atlas"]) == {a_s.bone.id, other.id} and len(rep_atlas["skipped"]) == 1
+              and len(match_matrix_figure(rep_atlas).data) == 1,
+              "matching.json: konteksty atlasu i pominięte pary (× w macierzy)")
+        a_s.atlas = None
+
         print("Wizualizacje")
         fig = bones_figure(loaded, {bone.id: back}, "fpfh", View3DParams())
         check(len(fig.data) > 4, "figura kości (FPFH + powierzchnie styku)")
@@ -276,8 +361,13 @@ def main() -> None:
         fig = merging_figure(loaded, View3DParams())
         check(len(fig.data) >= 4, "figura łączenia skanów (3 skany + szum)")
         surfs, _ = ms.extract_surfaces(loaded, replace(mp, source="manual-auto", ransac_seeds=1), cp, root)
-        results = ms.match_all(surfs, replace(mp, source="manual-auto", ransac_seeds=1), progress=lambda _: None)
-        rep = ms.report(surfs, results, mp, cp)
+        for s in surfs:                     # obie kości "z tej samej kości z bazy" - premia, start z atlasu
+            s.atlas = ctx(("kość 1", False, 0.9, np.eye(4)), unknown=0.1)
+        mp_atlas = replace(mp, source="manual-auto", ransac_seeds=1, use_atlas=True)
+        results = ms.match_all(surfs, mp_atlas, progress=lambda _: None)
+        rep = ms.report(surfs, results, mp_atlas, cp)
+        check(all("atlas_same" in r and "start" in r for r in results) and len(rep["atlas"]) == 2,
+              "dopasowanie wszystkich par z atlasem (premia, start, konteksty w matching.json)")
         fig = matching_figure(results, {s.bone.id: s.bone for s in surfs}, {s.bone.id: s.contacts for s in surfs})
         check(len(results) > 0 and len(fig.data) >= 2 and len(match_matrix_figure(rep).data) == 1,
               f"figury dopasowania ({len(results)} par)")
@@ -306,7 +396,8 @@ def main() -> None:
         tool = MatchState(out_dir, cp, View3DParams(triangles_total=20000), root)
         top = rep["pairs"][0]
         same = tool.match({"a": top["a"], "b": top["b"], "params": {}, "mode": "score", "T": top["T"]})
-        check(abs(same["score"] - top["score"]) < 1e-3, "ta sama para i ustawienia -> ten sam wynik oceny")
+        check(abs(same["score"] - top["score"]) < 1e-3 and abs(same["atlas_bonus_au2"] - top["atlas_bonus_au2"]) < 1e-3,
+              "ta sama para i ustawienia -> ten sam wynik oceny (z premią z atlasu z matching.json)")
         looser = tool.match({"a": top["a"], "b": top["b"], "params": {"tolerance_au": 2.0}, "mode": "score",
                              "T": top["T"]})
         check(looser["contact_au2"] >= same["contact_au2"], "większa tolerancja styku -> styk nie mniejszy")

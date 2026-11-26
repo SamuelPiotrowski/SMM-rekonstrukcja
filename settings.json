@@ -181,7 +181,7 @@
     //                   albo nieaktualne - liczone i zapisywane; bazowy "roughness" jest słaby,
     //   "manual-auto" = ręczne, a dla kości bez ręcznych - z algorytmu.
     // Jednorazowo: python scripts/match_surfaces.py --source auto
-    "source": "manual-auto",
+    "source": "auto",
     "min_area_au2": 20.0,       // mniejsze powierzchnie styku są pomijane [a.u.²]
 
     // Punkty i deskryptory
@@ -203,6 +203,17 @@
     "normal_angle_deg": 45.0,   // ... i z normalnymi przeciwnymi z dokładnością do tego kąta [stopnie]
     "collision_au": 1.0,        // KOLIZJA: punkt jednej kości głębiej niż to pod powierzchnią drugiej [a.u.]
     "collision_search_au": 4.0, // ... szukane tylko w tej odległości od powierzchni drugiej kości [a.u.]
+
+    // Atlas anatomiczny (sekcja "atlas"): z której kompletnej kości z bazy pochodzi każdy fragment i jak
+    // na niej leży (ten sam cache co algorytm "atlas" i identify_bones.py). "Ta sama kość" = ten sam model
+    // i strona ciała; modele w jednym podfolderze bazy (typ kości) liczą się razem, bez strony.
+    // Jednorazowo: python scripts/match_surfaces.py --no-use-atlas  (albo --use-atlas)
+    "use_atlas": true,
+    "atlas_skip_different": 0.95, // POMIŃ parę, gdy atlas daje tyle szans, że to RÓŻNE kości (> 1 = nie pomijaj)
+    "atlas_starts": 2,          // START: najwięcej ustawień startowych z atlasu na parę (fragmenty na wspólnym modelu); 0 = bez
+    "atlas_icp_start_au": 6.0,  // ... ICP z takiego startu szuka najpierw tak daleko (start jest przybliżony) [a.u.]
+    "atlas_enough_cover": 0.35, // ... gdy start z atlasu pokrył OBIE powierzchnie co najmniej w tylu - bez RANSAC (> 1 = zawsze RANSAC)
+    "atlas_boost": 0.25,        // PREMIA: styk liczy się o tyle mocniej, gdy to na pewno ta sama kość (0 = bez premii)
 
     "max_shown": 15,            // ile najlepszych par pokazać w 3D (tune_matching.py --html -> matching.html)
 

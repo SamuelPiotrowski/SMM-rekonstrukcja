@@ -34,9 +34,20 @@ CO ROBI
                       normalnymi (mniejsze z pól obu stron) [a.u.²],
            kolizja  - pole, na którym CAŁE kości wchodzą w siebie głębiej niż collision_au [a.u.²],
            RMSE     - średnia kwadratowa odległość punktów w styku [a.u.],
-           WYNIK    = styk - kolizja; im więcej, tym lepiej.
+           WYNIK    = styk - kolizja (+ premia z atlasu); im więcej, tym lepiej.
     Wszystkie ustawienia (z opisami): settings.json, sekcja "matching"; algorytm wykrywania: "contacts".
     Liczba par rośnie kwadratowo: N powierzchni -> ~N²/2 par, każda ~1-3 s.
+
+ATLAS ANATOMICZNY (settings.json, "matching" -> "use_atlas": true; jednorazowo --use-atlas / --no-use-atlas)
+    Z bazy kompletnych kości (scripts/build_atlas.py) wiadomo, z której kości pochodzi każdy fragment
+    i jak na niej leży (to samo, co liczy identify_bones.py i algorytm "atlas" - wspólny cache).
+    To zawęża dopasowanie na trzy sposoby:
+      - pary fragmentów na pewno z RÓŻNYCH kości są pomijane (atlas_skip_different),
+      - fragmenty leżące na tym samym modelu dostają START z atlasu (ich położenie względem siebie
+        wynika z ustawień na modelu) - z niego ICP; gdy wyjdzie dobry styk (atlas_enough_cover),
+        RANSAC jest pomijany, więc para liczy się w ułamku sekundy,
+      - PREMIA: styk liczy się do atlas_boost (25%) mocniej, gdy to ta sama kość.
+    Konsola wypisuje najbardziej prawdopodobną kość każdego fragmentu i liczbę pominiętych par.
 
 JAK CZYTAĆ WYNIK
     - Dobra para: duży styk (dziesiątki-setki a.u.²), kolizja ~0, RMSE ~0.2 a.u., a w 3D
@@ -49,6 +60,7 @@ Użycie (z głównego folderu projektu, po scripts/prepare_data.py i mark_contac
     python scripts/match_surfaces.py                      # wszystkie kości, tryb z settings.json
     python scripts/match_surfaces.py whole_scan 3         # tylko wybrane kości (numer albo fragment nazwy)
     python scripts/match_surfaces.py --source manual-auto # jednorazowo inny tryb
+    python scripts/match_surfaces.py --no-use-atlas       # jednorazowo bez atlasu (porównanie)
 
 Wynik: out/3d/<zestaw>/matching.json - wszystkie pary: wynik, styk, kolizja, RMSE, macierz przekształcenia T
        (4x4, układ kości A -> układ kości B, jak w out/3d/<zestaw>/bones/<id>/mesh.ply), użyte ustawienia.
@@ -82,13 +94,19 @@ def main() -> None:
     parser.add_argument("only", nargs="*", help="numery albo fragmenty nazw kości (domyślnie wszystkie)")
     parser.add_argument("--source", choices=ms.SOURCES, default=None,
                         help="skąd powierzchnie styku (domyślnie z settings.json, \"matching\" -> \"source\")")
+    parser.add_argument("--use-atlas", action=argparse.BooleanOptionalAction, default=None,
+                        help="kontekst z atlasu anatomicznego (domyślnie z settings.json, \"matching\" -> \"use_atlas\")")
     config.add_dataset_argument(parser)
+    config.add_atlas_argument(parser)
     args = parser.parse_args()
     config.use_dataset(args.dataset)
+    config.use_atlas(args.atlas, args.atlas_index)
 
     params = config.matching_params()
     if args.source:
         params = replace(params, source=args.source)
+    if args.use_atlas is not None:
+        params = replace(params, use_atlas=args.use_atlas)
     if params.source not in ms.SOURCES:
         raise SystemExit(f"settings.json, \"matching\" -> \"source\": {params.source!r}, "
                          f"dostępne: {', '.join(ms.SOURCES)}")
@@ -102,7 +120,8 @@ def main() -> None:
         raise SystemExit(str(e)) from None
 
     algo = f" (algorytm: {contact_params.method})" if params.source != "manual" else ""
-    print(f"Powierzchnie styku: {ms.SOURCE_NAMES[params.source]}{algo}")
+    print(f"Powierzchnie styku: {ms.SOURCE_NAMES[params.source]}{algo}"
+          + (", z atlasem anatomicznym" if params.use_atlas else ""))
     start = time.perf_counter()
     surfaces, info = ms.extract_surfaces(bones, params, contact_params)
     for b in bones:
@@ -119,8 +138,13 @@ def main() -> None:
     results = ms.match_all(surfaces, params)
     print(f"Gotowe w {time.perf_counter() - start:.0f} s. Najlepsze pary (wynik = styk - kolizja, a.u.²):")
     for k, r in enumerate(results[:10], 1):
+        extra = (f", atlas: ta sama kość {r['atlas_same']:.0%}, start {r['start']}"
+                 if "atlas_same" in r else "")
         print(f"  {k:2d}. {r['score']:6.0f}  {r['a_name']}  <->  {r['b_name']}   "
-              f"styk {r['contact_au2']:.0f}, kolizja {r['collision_au2']:.0f}, RMSE {r['rmse_au']:.2f} a.u.")
+              f"styk {r['contact_au2']:.0f}, kolizja {r['collision_au2']:.0f}, RMSE {r['rmse_au']:.2f} a.u.{extra}")
+    if params.use_atlas and results:
+        quick = sum(not r.get("ransac", True) for r in results)
+        print(f"Atlas: {quick} z {len(results)} par bez RANSAC (wystarczył start z atlasu)")
 
     path = config.DATA_OUT / "matching.json"
     rep = ms.report(surfaces, results, params, contact_params)

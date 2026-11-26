@@ -134,6 +134,7 @@ class MatchState:
             s = ms.make_surface(b, c, int(sid), sample_au, self.tri_labels[bid], self.trees[bid])
             if s is None:
                 raise KeyError(f"{key} (powierzchni nie ma już w oznaczeniach)")
+            s.atlas = self.report.get("atlas", {}).get(bid)     # kontekst z atlasu (gdy liczono z use_atlas)
             self._surfaces[(key, sample_au)] = s
         return self._surfaces[(key, sample_au)]
 
@@ -211,11 +212,11 @@ class MatchState:
         Args:
             body: {"a", "b": klucze powierzchni, "params": {nazwa: wartość} - nadpisują
                    ustawienia z matching.json, "mode": "full" (dopasowanie od nowa)
-                   albo "score" (tylko ocena macierzy "T" 4x4)}.
+                   albo "score" (tylko ocena macierzy "T" 4x4; "seed", "start" - przepisywane)}.
 
         Returns:
             Wynik jak w matching.json (score, contact_au2, collision_au2, cover_a, cover_b,
-            rmse_au, T, seed) + "seconds" (czas liczenia) i "mode". Wartości nieskończone
+            rmse_au, T, seed, start; przy use_atlas pola atlasu) + "seconds" (czas liczenia) i "mode". Wartości nieskończone
             (np. rmse_au bez dopasowania) są zamieniane na None, bo JSON ich nie obsługuje.
 
         Raises:
@@ -236,7 +237,7 @@ class MatchState:
                 r = ms.match_pair(a, b, p)
             elif mode == "score":
                 T = np.asarray(body["T"], dtype=float).reshape(4, 4)
-                r = {**ms.evaluate(a, b, T, p), "T": T.tolist(), "seed": body.get("seed")}
+                r = {**ms.evaluate(a, b, T, p), "T": T.tolist(), "seed": body.get("seed"), "start": body.get("start")}
             else:
                 raise ValueError(f"mode = {mode!r}, dostępne: full, score")
             seconds = time.perf_counter() - start
@@ -377,16 +378,19 @@ def matching_page(state: MatchState, path: Path, open_browser: bool = False) -> 
     """
     p, rep = state.params, state.report
     algo = f" (algorytm: {rep['contact_params'].get('method')})" if p.source != "manual" else ""
+    atlas = (f" Atlas anatomiczny: start z ustawień obu fragmentów na wspólnym modelu kości, styk liczy się do "
+             f"{p.atlas_boost:.0%} mocniej, gdy to ta sama kość; pominięte pary na pewno różnych kości: "
+             f"{len(rep.get('skipped', []))}.") if p.use_atlas else ""
     return write_page(
         path, "Dopasowanie powierzchni styku",
         f"Powierzchnie styku: {ms.SOURCE_NAMES.get(p.source, p.source)}{algo}. Każda dopasowana (RANSAC + ICP) "
         "do każdej powierzchni innej kości, twarzą w twarz. Wynik = pole styku (powierzchnie bliżej niż "
-        f"{p.tolerance_au:g} a.u., normalne przeciwne) minus pole, na którym kości wchodzą w siebie.",
+        f"{p.tolerance_au:g} a.u., normalne przeciwne) minus pole, na którym kości wchodzą w siebie.{atlas}",
         [("Najlepsze pary", "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę. "
           "Suwaki ustawień z przeliczaniem jednej pary: python scripts/tune_matching.py",
           matching_figure(rep["pairs"], state.bones, state.contacts, state.view, p.max_shown)),
          ("Wszystkie pary", "Wynik każdej pary powierzchni [a.u.²]; puste pola = ta sama kość, "
-          "„(algorytm)” = powierzchnia z algorytmu wykrywania.",
+          "× = pominięta (atlas: różne kości), „(algorytm)” = powierzchnia z algorytmu wykrywania.",
           match_matrix_figure(rep, state.view))],
         state.view, open_browser=open_browser)
 

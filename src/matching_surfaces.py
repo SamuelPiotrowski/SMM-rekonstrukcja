@@ -36,6 +36,22 @@ DLA KAŻDEJ PARY POWIERZCHNI (A z jednej kości, B z innej):
                     prawdziwe dopasowanie przełomów nie może wbijać jednej kości w drugą,
    - WYNIK = styk - kolizja [a.u.²]; pary są sortowane od najlepszego wyniku.
 
+ATLAS ANATOMICZNY (use_atlas, settings.json "matching"; src/atlas.py, cache out/3d/<zestaw>/cache/atlas/):
+    Dla każdej kości z powierzchniami atlas mówi, z której kompletnej kości z bazy pochodzi fragment
+    (prawdopodobieństwa, też "żadna z bazy") i jak na niej leży (T: model -> fragment, ze skalą).
+    "Ta sama kość" = ten sam model i ta sama strona (odbicie lustrzane albo nie); modele w jednym
+    podfolderze bazy (typ kości) liczą się razem, bez strony - mogą być z różnych stron ciała.
+    Z tego (atlas_relation): P(ta sama kość) = suma p_A x p_B po kościach, P(różne) = reszta znanych;
+    "żadna z bazy" nie liczy się do żadnej, więc niepewny fragment nie wyklucza pary.
+    a) POMIJANIE PAR: P(różne kości) >= atlas_skip_different -> para nie jest dopasowywana
+       (przełomy różnych kości nie mogą do siebie pasować).
+    b) START Z ATLASU (atlas_starts): gdy A i B leżą na tym samym modelu, ich położenie względem
+       siebie wynika z ustawień na modelu: x_B = T_B T_A⁻¹ x_A (bez różnicy skal - sam obrót i
+       przesunięcie zgodne w środku powierzchni A). Z tego startu ICP (pierwszy promień
+       atlas_icp_start_au, dalej jak w kroku 4). Gdy najlepszy start pokrył obie powierzchnie co
+       najmniej w atlas_enough_cover, RANSAC (krok 3) jest pomijany - inaczej liczony jak zwykle.
+    c) PREMIA: WYNIK = styk x (1 + atlas_boost x P(ta sama kość)) - kolizja; para bez styku nic nie zyskuje.
+
 Użycie: scripts/match_surfaces.py liczy i zapisuje out/3d/<zestaw>/matching.json,
 scripts/tune_matching.py (src/match_tool.py) go pokazuje: suwaki ustawień z przeliczaniem
 jednej pary albo (--html) statyczna strona out/3d/<zestaw>/matching.html.
@@ -92,6 +108,13 @@ class SurfaceMatchParams:
     collision_au: float = 1.0              # kolizja: głębiej niż to pod powierzchnią drugiej kości [a.u.]
     collision_search_au: float = 4.0       # ... sprawdzane do tej odległości od drugiej kości [a.u.]
     max_shown: int = 15                    # ile najlepszych par pokazać w 3D
+    # atlas anatomiczny (docstring modułu, "ATLAS ANATOMICZNY")
+    use_atlas: bool = False                # kontekst z atlasu: pomijanie par, start z atlasu, premia
+    atlas_skip_different: float = 0.95     # pomiń parę, gdy P(różne kości) >= tyle; > 1 = nie pomijaj
+    atlas_starts: int = 2                  # najwięcej startów z atlasu na parę (wspólne modele); 0 = bez
+    atlas_icp_start_au: float = 6.0        # ICP ze startu z atlasu: pierwszy promień szukania par [a.u.]
+    atlas_enough_cover: float = 0.35       # start z atlasu pokrył obie powierzchnie w tylu -> bez RANSAC; > 1 = zawsze
+    atlas_boost: float = 0.25              # styk liczy się do tylu razy mocniej przy P(ta sama kość) = 1; 0 = bez
 
 
 # -----------------
@@ -113,6 +136,7 @@ class Surface:
     normals: np.ndarray            # (N, 3), na zewnątrz kości
     area_au2: float                # pole powierzchni (z siatki, nie z punktów)
     bone_tree: cKDTree | None = None   # punkty CAŁEJ kości (do kolizji), wspólne dla powierzchni kości
+    atlas: dict | None = None          # z której kości z bazy pochodzi fragment (atlas_context); None = bez atlasu
     _cache: dict = field(default_factory=dict, repr=False)   # chmury i KD-drzewo (clouds, tree)
 
     @property
@@ -231,21 +255,25 @@ def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: C
     """Powierzchnie styku wszystkich kości (każda osobno), bez mniejszych niż p.min_area_au2.
 
     Kości muszą być wczytane z chmurą punktów (load_bones(features=True)) - do kolizji.
+    Przy p.use_atlas każda kość z powierzchniami dostaje kontekst z atlasu (Surface.atlas,
+    atlas_context) - z cache, a gdy go brak, liczony (jak algorytm "atlas", za pierwszym razem dłużej).
 
     Args:
         bones:          kości do dopasowania.
-        p:              ustawienia (source, min_area_au2, sample_au).
-        contact_params: algorytm wykrywania (tryby "auto" i "manual-auto").
+        p:              ustawienia (source, min_area_au2, sample_au, use_atlas).
+        contact_params: algorytm wykrywania (tryby "auto" i "manual-auto"); też analiza lokalna atlasu.
         root:           folder oznaczeń zamiast contacts/ z settings.json.
 
     Returns:
         (powierzchnie, {id kości: skąd wzięte powierzchnie - jak w bone_contacts; gdy
-         wszystkie odpadły jako za małe, z dopiskiem ", powierzchnie < ... a.u.²"}).
+         wszystkie odpadły jako za małe, z dopiskiem ", powierzchnie < ... a.u.²"; przy
+         use_atlas z dopiskiem ", atlas: <najbardziej prawdopodobna kość> <p>"}).
 
     Raises:
         ValueError: kość bez chmury punktów albo nieznany p.source.
     """
     out, info = [], {}
+    atlas_off = ""                 # powód, gdy atlasu nie da się użyć (pusta baza) - wtedy bez atlasu
     for b in bones:
         if b.cloud is None:
             raise ValueError(f"{b.id}: brak chmury punktów - wczytaj kości przez load_bones(features=True)")
@@ -260,9 +288,133 @@ def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: C
             s = make_surface(b, c, k, p.sample_au, tl, tree)
             if s is not None and s.area_au2 >= p.min_area_au2:
                 out.append(s)
-        if not any(s.bone.id == b.id for s in out):
+        mine = [s for s in out if s.bone.id == b.id]
+        if not mine:
             info[b.id] += f", powierzchnie < {p.min_area_au2:g} a.u.²"
+        elif p.use_atlas and not atlas_off:
+            try:
+                ctx = atlas_context(b, contact_params)
+            except ValueError:     # pusta baza modeli (atlas.load_atlas)
+                atlas_off = "baza modeli pusta - python scripts/build_atlas.py"
+                ctx = None
+            for s in mine:
+                s.atlas = ctx
+            info[b.id] += f", atlas: {atlas_off or atlas_top(ctx)}"
     return out, info
+
+
+# -----------------
+# ATLAS: z której kości pochodzi fragment (src/atlas.py)
+# -----------------
+
+ATLAS_MIN_JOINT = 0.02     # start z atlasu tylko z modelu, na którym p_A x p_B >= tyle
+
+
+def atlas_context(bone: Bone, contact_params: ContactParams) -> dict:
+    """Ranking kości z bazy dla fragmentu, z ustawieniami na modelach (atlas.cached_match).
+
+    Ten sam cache co algorytm "atlas" (out/3d/<zestaw>/cache/atlas/<id>.npz) - gdy wykrywanie
+    liczono algorytmem "atlas" z tymi samymi ustawieniami, nic nie jest liczone od nowa.
+
+    Args:
+        bone:           kość (fragment).
+        contact_params: analiza lokalna (feature_keys, feature_threshold) - jak przy wykrywaniu.
+
+    Returns:
+        {"p_unknown": p "żadna z bazy", "candidates": [{"model", "group", "mirror", "label", "p",
+         "rel_scale", "T": 4x4 model -> fragment (lista)}] od najbardziej prawdopodobnego}.
+
+    Raises:
+        ValueError: pusta baza modeli.
+    """
+    import atlas
+    import config
+
+    ap, sfp = config.atlas_params(), config.surface_feature_params()
+    m = atlas.cached_match(bone, atlas.load_atlas(ap), ap, contact_params, sfp)
+    keys = ("model", "group", "mirror", "label", "p", "rel_scale", "T")
+    return {"p_unknown": round(float(m.p_unknown), 4),
+            "candidates": [{k: c[k] for k in keys} for c in m.candidates if c["p"] >= 0.001]}
+
+
+def atlas_top(ctx: dict | None) -> str:
+    """Najbardziej prawdopodobna kość z kontekstu atlasu, np. "FIBULA_LEFT 82%" (do konsoli)."""
+    if ctx is None:
+        return "brak"
+    import atlas
+
+    best = ctx["candidates"][0] if ctx["candidates"] else None
+    if best is None or best["p"] < ctx["p_unknown"]:
+        return f"{atlas.UNKNOWN} {ctx['p_unknown']:.0%}"
+    return f"{best['label']} {best['p']:.0%}"
+
+
+def atlas_kinds(ctx: dict) -> dict[str, float]:
+    """P(kość) fragmentu: model + strona (odbicie albo nie); modele z podfolderu bazy = jeden typ, bez strony.
+
+    Args:
+        ctx: kontekst z atlas_context.
+
+    Returns:
+        {klucz kości: prawdopodobieństwo}; suma = 1 - p "żadna z bazy".
+    """
+    acc: dict[str, float] = {}
+    for c in ctx["candidates"]:
+        key = c["group"] or f"{c['model']}|{int(bool(c['mirror']))}"
+        acc[key] = acc.get(key, 0.0) + c["p"]
+    return acc
+
+
+def atlas_relation(a: Surface, b: Surface) -> tuple[float, float]:
+    """Czy fragmenty a i b pochodzą z tej samej kości - z rankingów atlasu obu fragmentów.
+
+    Args:
+        a, b: powierzchnie (Surface.atlas z atlas_context; None = bez wiedzy).
+
+    Returns:
+        (P(ta sama kość), P(różne kości)); reszta do 1 = niewiadomo (któryś może być "żadna
+        z bazy"). Bez kontekstu któregoś fragmentu: (0, 0).
+    """
+    if a.atlas is None or b.atlas is None:
+        return 0.0, 0.0
+    ka, kb = atlas_kinds(a.atlas), atlas_kinds(b.atlas)
+    same = sum(q * kb.get(k, 0.0) for k, q in ka.items())
+    return same, max(sum(ka.values()) * sum(kb.values()) - same, 0.0)
+
+
+def atlas_starts(a: Surface, b: Surface, p: SurfaceMatchParams) -> list[tuple[str, float, np.ndarray]]:
+    """Ustawienia startowe A -> B z atlasu: oba fragmenty leżą na tym samym modelu (i stronie).
+
+    x_A = T_A x_modelu, x_B = T_B x_modelu  =>  x_B = T_B T_A⁻¹ x_A. Skale obu fragmentów na
+    modelu mogą się różnić (osobno dopasowane), a skan jest w jednych jednostkach - zostaje
+    sam obrót (najbliższy macierzy T_B T_A⁻¹) i przesunięcie zgodne w środku powierzchni A.
+
+    Args:
+        a, b: powierzchnie z kontekstem atlasu (Surface.atlas).
+        p:    ustawienia (use_atlas, atlas_starts).
+
+    Returns:
+        [(nazwa modelu, p_A x p_B, macierz 4x4 A -> B)] od najbardziej prawdopodobnego, najwyżej
+        p.atlas_starts, tylko modele z p_A x p_B >= ATLAS_MIN_JOINT; [] = bez startów z atlasu.
+    """
+    if not p.use_atlas or p.atlas_starts <= 0 or a.atlas is None or b.atlas is None:
+        return []
+    on_b = {(c["model"], bool(c["mirror"])): c for c in b.atlas["candidates"]}
+    center = a.points.mean(axis=0)
+    out = []
+    for ca in a.atlas["candidates"]:
+        cb = on_b.get((ca["model"], bool(ca["mirror"])))
+        joint = ca["p"] * cb["p"] if cb is not None else 0.0
+        if joint < ATLAS_MIN_JOINT:
+            continue
+        M = np.asarray(cb["T"], dtype=float) @ np.linalg.inv(np.asarray(ca["T"], dtype=float))
+        U, _, Vt = np.linalg.svd(M[:3, :3])
+        R = U @ np.diag([1.0, 1.0, np.sign(np.linalg.det(U @ Vt))]) @ Vt
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = R, transform_points(M, center[None])[0] - R @ center
+        out.append((ca["label"], joint, T))
+    out.sort(key=lambda s: -s[1])
+    return out[:p.atlas_starts]
 
 
 # -----------------
@@ -347,42 +499,57 @@ def evaluate(a: Surface, b: Surface, T: np.ndarray, p: SurfaceMatchParams) -> di
     Args:
         a, b: powierzchnie (każda w układzie swojej kości).
         T:    przekształcenie 4x4 z układu kości a do układu kości b.
-        p:    ustawienia oceny (tolerance_au, normal_angle_deg, collision_au, collision_search_au).
+        p:    ustawienia oceny (tolerance_au, normal_angle_deg, collision_au, collision_search_au,
+              przy use_atlas też atlas_boost).
 
     Returns:
         {"cover_a", "cover_b", "contact_au2", "rmse_au", "collision_au2",
-         "score" = contact_au2 - collision_au2}.
+         "score" = contact_au2 - collision_au2 (+ atlas_bonus_au2)}; przy use_atlas dodatkowo
+        "atlas_same", "atlas_diff" (atlas_relation) i "atlas_bonus_au2" = styk x atlas_boost x atlas_same.
     """
     sc = contact_score(a, b, T, p)
     sc["collision_au2"] = collision_area(a, b, T, p)
     sc["score"] = sc["contact_au2"] - sc["collision_au2"]
+    if p.use_atlas:
+        same, diff = atlas_relation(a, b)
+        sc.update(atlas_same=round(same, 4), atlas_diff=round(diff, 4),
+                  atlas_bonus_au2=sc["contact_au2"] * p.atlas_boost * same)
+        sc["score"] += sc["atlas_bonus_au2"]
     return sc
 
 
-def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, p: SurfaceMatchParams) -> np.ndarray:
+def refine_icp(src_clouds, tgt_clouds, T: np.ndarray, p: SurfaceMatchParams,
+               first_au: float | None = None) -> np.ndarray:
     """ICP point-to-plane: icp_start_au i połowa tego na rzadszych chmurach, potem 2 x sample_au na gęstych.
 
     Args:
         src_clouds: chmury strony A z Surface.clouds(flip=True) (używane [0] i [1]).
         tgt_clouds: chmury strony B z Surface.clouds(flip=False).
-        T:          przekształcenie startowe A -> B (z RANSAC).
+        T:          przekształcenie startowe A -> B (z RANSAC albo z atlasu).
         p:          ustawienia (icp_start_au, sample_au).
+        first_au:   dodatkowy pierwszy krok z tym promieniem (start z atlasu jest mniej dokładny
+                    niż z RANSAC); None = bez.
 
     Returns:
         Poprawione przekształcenie 4x4 A -> B.
     """
     crit = reg.ICPConvergenceCriteria(max_iteration=50)
-    for dist, k in ((p.icp_start_au, 1), (p.icp_start_au / 2, 1), (2 * p.sample_au, 0)):
+    steps = ((p.icp_start_au, 1), (p.icp_start_au / 2, 1), (2 * p.sample_au, 0))
+    if first_au and first_au > p.icp_start_au:
+        steps = ((first_au, 1),) + steps
+    for dist, k in steps:
         T = reg.registration_icp(src_clouds[k], tgt_clouds[k], dist, T,
                                  reg.TransformationEstimationPointToPlane(), crit).transformation
     return T
 
 
 def match_pair(a: Surface, b: Surface, p: SurfaceMatchParams) -> dict:
-    """Szuka T kładącego powierzchnię a na b (twarzą w twarz). Zwraca najlepszą z p.ransac_seeds prób.
+    """Szuka T kładącego powierzchnię a na b (twarzą w twarz). Zwraca najlepszą próbę.
 
-    Każda próba: RANSAC na FPFH (ziarno = numer próby) -> refine_icp -> ocena
-    (contact_score, collision_area). Wygrywa największy wynik = styk - kolizja.
+    Próby: najpierw starty z atlasu (atlas_starts -> refine_icp z promieniem atlas_icp_start_au),
+    potem p.ransac_seeds prób RANSAC na FPFH (ziarno = numer próby RANSAC) -> refine_icp. RANSAC
+    jest pomijany, gdy najlepszy start z atlasu pokrył obie powierzchnie co najmniej w
+    p.atlas_enough_cover. Każda próba oceniana przez evaluate; wygrywa największy wynik.
 
     Args:
         a, b: powierzchnie dwóch różnych kości.
@@ -390,31 +557,72 @@ def match_pair(a: Surface, b: Surface, p: SurfaceMatchParams) -> dict:
 
     Returns:
         {"score", "contact_au2", "collision_au2", "cover_a", "cover_b", "rmse_au",
-         "T": macierz 4x4 (lista) z układu kości a do układu kości b, "seed"}.
+         "T": macierz 4x4 (lista) z układu kości a do układu kości b, "seed": numer wygranej
+         próby (od 0, starty z atlasu pierwsze), "start": "RANSAC" albo "atlas: <model>",
+         "ransac": czy liczono RANSAC} (+ pola atlasu z evaluate przy use_atlas).
     """
     ca, cb = a.clouds(p, flip=True), b.clouds(p, flip=False)
-    dist = 1.5 * p.coarse_voxel_au             # maks. odległość punktów uznanych za pasujące w RANSAC
-    best = None
-    for seed in range(p.ransac_seeds):
-        o3d.utility.random.seed(seed)
-        coarse = reg.registration_ransac_based_on_feature_matching(
-            ca[2], cb[2], ca[3], cb[3], True, dist,
-            reg.TransformationEstimationPointToPoint(False), 3,
-            [reg.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-             reg.CorrespondenceCheckerBasedOnDistance(dist),
-             reg.CorrespondenceCheckerBasedOnNormal(np.deg2rad(p.ransac_normal_angle_deg))],
-            reg.RANSACConvergenceCriteria(p.ransac_iterations, 1.0))    # 1.0 = bez wczesnego końca
-        T = refine_icp(ca, cb, coarse.transformation, p)
+    best, n = None, 0
+
+    def keep(T: np.ndarray, start: str) -> None:
+        """Ocenia próbę n i zapamiętuje ją, jeśli jest najlepsza."""
+        nonlocal best, n
         sc = evaluate(a, b, T, p)
         if best is None or sc["score"] > best["score"]:
-            best = {**sc, "T": T.tolist(), "seed": seed}
+            best = {**sc, "T": T.tolist(), "seed": n, "start": start}
+        n += 1
+
+    for label, _, T0 in atlas_starts(a, b, p):
+        keep(refine_icp(ca, cb, T0, p, first_au=p.atlas_icp_start_au), f"atlas: {label}")
+    ransac = best is None or min(best["cover_a"], best["cover_b"]) < p.atlas_enough_cover
+    if ransac:
+        dist = 1.5 * p.coarse_voxel_au             # maks. odległość punktów uznanych za pasujące w RANSAC
+        for seed in range(p.ransac_seeds):
+            o3d.utility.random.seed(seed)
+            coarse = reg.registration_ransac_based_on_feature_matching(
+                ca[2], cb[2], ca[3], cb[3], True, dist,
+                reg.TransformationEstimationPointToPoint(False), 3,
+                [reg.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+                 reg.CorrespondenceCheckerBasedOnDistance(dist),
+                 reg.CorrespondenceCheckerBasedOnNormal(np.deg2rad(p.ransac_normal_angle_deg))],
+                reg.RANSACConvergenceCriteria(p.ransac_iterations, 1.0))    # 1.0 = bez wczesnego końca
+            keep(refine_icp(ca, cb, coarse.transformation, p), "RANSAC")
+    if best is not None:
+        best["ransac"] = ransac
     return best
+
+
+def split_pairs(surfaces: list[Surface], p: SurfaceMatchParams) -> tuple[list[tuple[int, int]], list[dict]]:
+    """Pary powierzchni z różnych kości: do dopasowania i pominięte (atlas: na pewno różne kości).
+
+    Args:
+        surfaces: powierzchnie z extract_surfaces.
+        p:        ustawienia (use_atlas, atlas_skip_different).
+
+    Returns:
+        ([(i, j) indeksy w `surfaces`] do dopasowania,
+         [{"a", "b", "a_name", "b_name", "atlas_same", "atlas_diff"}] pominięte).
+    """
+    pairs, skipped = [], []
+    for i in range(len(surfaces)):
+        for j in range(i + 1, len(surfaces)):
+            a, b = surfaces[i], surfaces[j]
+            if a.bone.id == b.bone.id:
+                continue
+            same, diff = atlas_relation(a, b) if p.use_atlas else (0.0, 0.0)
+            if diff > 0 and diff >= p.atlas_skip_different:
+                skipped.append({"a": a.key, "b": b.key, "a_name": a.name, "b_name": b.name,
+                                "atlas_same": round(same, 4), "atlas_diff": round(diff, 4)})
+            else:
+                pairs.append((i, j))
+    return pairs, skipped
 
 
 def match_all(surfaces: list[Surface], p: SurfaceMatchParams, progress=print) -> list[dict]:
     """Dopasowuje każdą parę powierzchni z różnych kości. Wynik posortowany od najlepszej pary.
 
     Liczba par rośnie kwadratowo z liczbą powierzchni (~N²/2), każda para trwa ~1-3 s.
+    Przy use_atlas pary na pewno różnych kości są pomijane (split_pairs).
 
     Args:
         surfaces: powierzchnie z extract_surfaces.
@@ -425,9 +633,9 @@ def match_all(surfaces: list[Surface], p: SurfaceMatchParams, progress=print) ->
         Wyniki match_pair uzupełnione o opis pary: "a", "b" (Surface.key), "a_name",
         "b_name", "a_area_au2", "b_area_au2", "a_manual", "b_manual"; od największego "score".
     """
-    pairs = [(i, j) for i in range(len(surfaces)) for j in range(i + 1, len(surfaces))
-             if surfaces[i].bone.id != surfaces[j].bone.id]
-    progress(f"Powierzchnie: {len(surfaces)}, pary do sprawdzenia: {len(pairs)}")
+    pairs, skipped = split_pairs(surfaces, p)
+    note = f" (pominięte {len(skipped)} - atlas: różne kości)" if skipped else ""
+    progress(f"Powierzchnie: {len(surfaces)}, pary do sprawdzenia: {len(pairs)}{note}")
     results = []
     start = time.perf_counter()
     for n, (i, j) in enumerate(pairs, 1):
@@ -477,10 +685,16 @@ def report(surfaces: list[Surface], results: list[dict], p: SurfaceMatchParams,
         {"params": ustawienia dopasowania, "contact_params": ustawienia wykrywania,
          "surfaces": [{"key", "bone", "bone_label", "surface", "name", "source",
                        "area_au2", "points"}],
-         "pairs": wyniki match_all (liczby zaokrąglone do 4 miejsc)}.
+         "pairs": wyniki match_all (liczby zaokrąglone do 4 miejsc),
+         przy use_atlas także "atlas": {id kości: kontekst z atlas_context} (do match_tool) i
+         "skipped": pary pominięte (split_pairs)}.
     """
-    return {"params": asdict(p), "contact_params": asdict(contact_params),
-            "surfaces": [{"key": s.key, "bone": s.bone.id, "bone_label": s.bone.label, "surface": s.sid,
-                          "name": s.contacts.name(s.sid), "source": s.contacts.source,
-                          "area_au2": round(s.area_au2, 1), "points": len(s.points)} for s in surfaces],
-            "pairs": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items()} for r in results]}
+    rep = {"params": asdict(p), "contact_params": asdict(contact_params),
+           "surfaces": [{"key": s.key, "bone": s.bone.id, "bone_label": s.bone.label, "surface": s.sid,
+                         "name": s.contacts.name(s.sid), "source": s.contacts.source,
+                         "area_au2": round(s.area_au2, 1), "points": len(s.points)} for s in surfaces],
+           "pairs": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items()} for r in results]}
+    if p.use_atlas:
+        rep["atlas"] = {s.bone.id: s.atlas for s in surfaces if s.atlas is not None}
+        rep["skipped"] = split_pairs(surfaces, p)[1]
+    return rep
