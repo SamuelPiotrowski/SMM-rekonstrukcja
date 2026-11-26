@@ -1,10 +1,17 @@
 """
-KROK 6: podgląd wyników dopasowania (out/3d/<zestaw>/matching.json) - jak show_bones.py dla prepare_data.py.
+KROK 6: podgląd wyników dopasowania - jak show_bones.py dla prepare_data.py.
 Liczy je scripts/match_surfaces.py; tutaj tylko oglądanie (i próbowanie ustawień na jednej parze).
+
+KTÓRY WYNIK: każda metoda (manual, roughness, features, atlas) ma osobny zapis
+out/3d/<zestaw>/methods/<metoda>/matching.json - po przełączeniu metody nic nie trzeba przeliczać,
+o ile ta metoda była już kiedyś policzona (match_surfaces.py, wszystkie kości).
+    domyślnie   - metoda z settings.json ("matching" -> "source", przy "auto": "contacts" -> "method"),
+    --method X  - inna metoda,
+    --last      - ostatni przebieg out/3d/<zestaw>/matching.json (np. tylko wybrane kości, manual-auto).
 
 Dwa tryby:
     domyślny - strona z SUWAKAMI (lokalny serwer, opis niżej),
-    --html   - statyczna strona out/3d/<zestaw>/matching.html: najlepsze pary w 3D + macierz wyników
+    --html   - statyczna strona out/3d/<zestaw>/matching_<metoda>.html: najlepsze pary w 3D + macierz wyników
                wszystkich par; jeden plik, można go komuś wysłać.
 Oba ostrzegają, gdy matching.json jest nieaktualny (inne ustawienia w settings.json albo
 zmienione oznaczenia) - wtedy uruchom ponownie match_surfaces.py.
@@ -22,7 +29,9 @@ Użycie (z głównego folderu projektu, po scripts/match_surfaces.py):
     python scripts/tune_matching.py
     python scripts/tune_matching.py --port 8800      # inny port
     python scripts/tune_matching.py --no-open        # bez otwierania przeglądarki
-    python scripts/tune_matching.py --html           # statyczna strona out/3d/<zestaw>/matching.html
+    python scripts/tune_matching.py --html           # statyczna strona out/3d/<zestaw>/matching_<metoda>.html
+    python scripts/tune_matching.py --method manual  # wynik innej metody (bez przeliczania)
+    python scripts/tune_matching.py --last           # ostatni przebieg match_surfaces.py
 
 Działa bez internetu. Zakończenie: Ctrl+C w tym oknie. Kod: src/match_tool.py.
 """
@@ -36,6 +45,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # polskie znaki tak�
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # ... i w komunikatach błędów (SystemExit)
 
 import config  # noqa: E402
+import presentation  # noqa: E402
 from match_tool import serve, write_html  # noqa: E402
 
 
@@ -44,14 +54,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, help="port serwera (domyślnie matching.port z settings.json)")
     parser.add_argument("--no-open", action="store_true", help="nie otwieraj przeglądarki")
-    parser.add_argument("--html", action="store_true", help="tylko statyczna strona out/3d/<zestaw>/matching.html (bez serwera)")
+    parser.add_argument("--html", action="store_true",
+                        help="tylko statyczna strona out/3d/<zestaw>/matching_<metoda>.html (bez serwera)")
+    which = parser.add_mutually_exclusive_group()
+    which.add_argument("--method", choices=presentation.methods(), default=None,
+                       help="wynik tej metody (domyślnie metoda z settings.json)")
+    which.add_argument("--last", action="store_true",
+                       help="ostatni przebieg out/3d/<zestaw>/matching.json zamiast zapisu metody")
     config.add_dataset_argument(parser)
     args = parser.parse_args()
     config.use_dataset(args.dataset)
     if args.html:
-        write_html(open_browser=not args.no_open)
+        write_html(open_browser=not args.no_open, method=args.method, last=args.last)
     else:
-        serve(port=args.port, open_browser=not args.no_open)
+        serve(port=args.port, open_browser=not args.no_open, method=args.method, last=args.last)
 
 
 if __name__ == "__main__":

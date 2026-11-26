@@ -10,6 +10,7 @@ __pycache__/
 scanned_bones/
 bone_photos/
 out/
+raporty/prezentacje/
 # pliki modeli kompletnych kości (atlas) - duże; zindeksowana baza atlas_index/ jest mała i może być w repo
 atlas/
 

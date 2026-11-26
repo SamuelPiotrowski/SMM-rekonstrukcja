@@ -24,7 +24,7 @@ import json
 import sys
 import tempfile
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -311,11 +311,16 @@ def main() -> None:
         check(r["start"] == "atlas: kość 1" and r["ransac"] is False and pose_err(r["T"]) < 0.3,
               f"ICP ze startu z atlasu, bez RANSAC: błąd {pose_err(r['T']):.3f} a.u. ({time.perf_counter() - t:.1f} s)")
         same, diff = ms.atlas_relation(a_s, b_s)
+        mean_area = 0.5 * (a_s.area_au2 + b_s.area_au2)
+        area_r = ms.evaluate(a_s, b_s, np.asarray(r["T"]), replace(ap, score_mode="area"))
         check(abs(same - 0.9 * 0.85) < 1e-9 and abs(diff - (0.98 * 0.95 - same)) < 1e-9
-              and abs(r["score"] - (r["contact_au2"] * (1 + ap.atlas_boost * same) - r["collision_au2"])) < 1e-6,
-              f"P(ta sama kość) {same:.2f}, różne {diff:.2f}; premia +{r['atlas_bonus_au2']:.0f} a.u.² w wyniku")
+              and abs(r["score"] - 100 * (r["contact_au2"] * (1 + ap.atlas_boost * same) - r["collision_au2"])
+                      / mean_area) < 1e-6 and r["score_unit"] == "%"
+              and abs(area_r["score"] - (r["contact_au2"] * (1 + ap.atlas_boost * same) - r["collision_au2"])) < 1e-6,
+              f"P(ta sama kość) {same:.2f}, różne {diff:.2f}; wynik {r['score']:.0f}% (premia +{r['atlas_bonus']:.0f}), "
+              f"jako pole {area_r['score']:.0f} a.u.²")
         r_off = ms.evaluate(a_s, b_s, np.asarray(r["T"]), replace(ap, use_atlas=False))
-        check("atlas_same" not in r_off and abs(r_off["score"] - (r["score"] - r["atlas_bonus_au2"])) < 1e-6,
+        check("atlas_same" not in r_off and abs(r_off["score"] - (r["score"] - r["atlas_bonus"])) < 1e-6,
               "bez use_atlas: wynik bez premii i bez pól atlasu")
         no_start = ms.match_pair(a_s, b_s, replace(ap, atlas_starts=0, ransac_seeds=1))
         check(no_start["start"] == "RANSAC" and no_start["ransac"], "atlas_starts = 0 -> zwykły RANSAC")
@@ -348,6 +353,214 @@ def main() -> None:
               and len(match_matrix_figure(rep_atlas).data) == 1,
               "matching.json: konteksty atlasu i pominięte pary (× w macierzy)")
         a_s.atlas = None
+
+        print("Kości długie: osie w jednej linii (walce 60 x r 5, przełomy na końcach)")
+        from types import SimpleNamespace
+
+        import open3d as o3d
+        from scipy.spatial import cKDTree
+
+        def piece(name, height=60.0, radius=5.0, sphere=False):
+            """Sztuczny fragment: walec wzdłuż z (albo kula) jako obiekt z .mesh, jak kość."""
+            t = trimesh.creation.icosphere(3, radius) if sphere else trimesh.creation.cylinder(radius, height, 48)
+            m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(t.vertices), o3d.utility.Vector3iVector(t.faces))
+            m.compute_vertex_normals()
+            cloud = o3d.geometry.PointCloud(m.vertices)
+            cloud.normals = m.vertex_normals
+            return SimpleNamespace(id=name, label=name, mesh=m, cloud=cloud, meta={})
+
+        def cap(bone, z, n_up):
+            """Powierzchnia styku = tarcza na wysokości z (normalne n_up = na zewnątrz kości)."""
+            ang, rad = rng.random(400) * 2 * np.pi, 4.5 * np.sqrt(rng.random(400))
+            pts = np.column_stack([rad * np.cos(ang), rad * np.sin(ang), np.full(400, z)])
+            return ms.Surface(bone=bone, contacts=None, sid=1, points=pts, normals=np.tile([0, 0, n_up], (400, 1)),
+                              area_au2=60.0, bone_tree=cKDTree(np.asarray(bone.mesh.vertices)))
+
+        def move(R=np.eye(3), t=(0, 0, 0)):
+            """Macierz 4x4 z obrotu R i przesunięcia t."""
+            M = np.eye(4)
+            M[:3, :3], M[:3, 3] = R, t
+            return M
+
+        ax_p = replace(mp, axis_check=True)
+        top, bottom = cap(piece("A"), 30.0, 1.0), cap(piece("B"), -30.0, -1.0)
+        good = ms.axis_fit(top, bottom, move(t=(0, 0, -60)), ax_p)      # A pod B, koniec do końca
+        side = ms.axis_fit(top, bottom, move(rot_deg([1, 0, 0], 90), (0, 30, -30)), ax_p)  # koniec do boku
+        along = ms.axis_fit(top, bottom, move(t=(10, 0, 0)), ax_p)      # obok siebie, równolegle
+        check(good["axis_weight"] == 1.0 and good["axis_deg"] < 1 and good["axis_offset"] < 0.05
+              and side["axis_weight"] == 0.0 and side["axis_deg"] > 89 and along["axis_weight"] == 0.0
+              and along["axis_offset"] > 1.9,
+              f"ocena osi: koniec do końca waga 1, koniec do boku {side['axis_deg']:.0f}° -> 0, "
+              f"obok siebie {along['axis_offset']:.1f} promienia -> 0")
+        starts = ms.axis_starts_for(top, bottom, ax_p)
+        ends = [ms.transform_points(T, np.zeros((1, 3)))[0] for _, T in starts]   # środek A po ustawieniu
+        check(len(starts) == ax_p.axis_starts
+              and all(ms.axis_fit(top, bottom, T, ax_p)["axis_weight"] == 1.0 for _, T in starts)
+              and all(abs(e[2] + 60) < 1e-6 and np.hypot(e[0], e[1]) < 1.0 for e in ends),
+              f"{len(starts)} startów wzdłuż osi: A przedłuża B (środek A na osi, 60 a.u. za przełomem B)")
+        mid = cap(piece("C"), 0.0, 1.0)
+        check(len(ms.axis_starts_for(mid, bottom, ax_p)) == 2 * ax_p.axis_starts
+              and not ms.axis_starts_for(cap(piece("K", sphere=True), 4.0, 1.0), bottom, ax_p)
+              and ms.axis_fit(cap(piece("K", sphere=True), 4.0, 1.0), bottom, np.eye(4), ax_p) is None
+              and not ms.axis_starts_for(top, bottom, replace(ax_p, axis_check=False)),
+              "przełom w środku boku -> obie strony; kula (niewydłużona) i axis_check = false -> bez osi")
+        scored = ms.evaluate(top, bottom, move(rot_deg([1, 0, 0], 90), (0, 30, -30)), ax_p)
+        check(scored["axis_weight"] == 0.0 and abs(scored["score"] + scored["collision_au2"]) < 1e-9,
+              "styk pod złym kątem nie liczy się do wyniku")
+
+        print("Proponowane złożenie (każdy przełom i para kości raz)")
+        res = [{"a": "X#1", "b": "Y#1", "score": 100}, {"a": "X#1", "b": "Z#1", "score": 90},
+               {"a": "X#2", "b": "Y#2", "score": 80}, {"a": "X#2", "b": "Z#1", "score": 70},
+               {"a": "Y#2", "b": "Z#2", "score": -5}]
+        chosen = ms.assemble(res)["chosen"]
+        check([r["score"] for r in chosen] == [100, 70] and [r["chosen"] for r in res] == [True, False, False, True, False],
+              "zachłannie od najlepszej: zajęty przełom, ta sama para kości i wynik <= 0 odpadają")
+
+        print("Przybliżenie przełomu płaszczyzną / funkcją kwadratową (contacts.fit_surface)")
+        grid = np.stack(np.meshgrid(np.linspace(-5, 5, 30), np.linspace(-5, 5, 30)), -1).reshape(-1, 2)
+        tilt = rot_deg([1, 1, 0], 30)
+        flat_pts = np.column_stack([grid, rng.normal(0, 0.05, len(grid))]) @ tilt.T + [3, -2, 7]
+        bowl_pts = np.column_stack([grid, 0.08 * (grid ** 2).sum(1)]) @ tilt.T
+        up = np.tile(tilt[:, 2], (len(grid), 1))
+        f_flat = ct.fit_surface(flat_pts, up)
+        f_plane, f_quad = ct.fit_surface(bowl_pts, up), ct.fit_surface(bowl_pts, up, mode="quadric")
+        check(abs(f_flat["normal"] @ tilt[:, 2]) > 0.999 and f_flat["rms_au"] < 0.08 and f_quad["rms_au"] < 0.02
+              and f_plane["rms_au"] > 0.3 and np.abs(ct.surface_residual(f_quad, bowl_pts)).max() < 0.05,
+              f"płaszczyzna: normalna i odchylenie {f_flat['rms_au']:.2f} a.u. (szum 0.05); misa: płaszczyzna "
+              f"{f_plane['rms_au']:.2f}, funkcja kwadratowa {f_quad['rms_au']:.3f} a.u.")
+
+        print("Po wykrywaniu: rozdzielenie końców i odcięcie kory (contacts.refine_surfaces)")
+        tube = trimesh.creation.cylinder(5.0, 60.0, 48)
+        tv, tf = trimesh.remesh.subdivide_to_size(tube.vertices, tube.faces, 1.0)
+        tube_mesh = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(tv), o3d.utility.Vector3iVector(tf))
+        tube_mesh.compute_vertex_normals()
+        # "test 3": oba końce (z rękawem kory 12 a.u.) połączone paskiem kory wzdłuż boku = jedna powierzchnia
+        one = ((np.abs(tv[:, 2]) > 18) | (tv[:, 0] > 4.6)).astype(np.uint8)
+        rp = replace(cp, surface_fit="plane", split_ends=True, fit_tolerance_au=3.0, min_surface_au2=15.0)
+        ref, refined = ct.refine_surfaces(tube_mesh, one, rp)
+        fits = refined["fits"]
+        zs = [tv[ref == k, 2] for k in (1, 2)]
+        check(ref.max() == 2 and all(np.abs(z).min() > 26.5 for z in zs) and np.sign(zs[0].mean()) != np.sign(zs[1].mean())
+              and all(abs(abs(fits[k]["normal"][2]) - 1) < 0.01 and fits[k]["rms_au"] < 1.0 for k in ("1", "2")),
+              "jedna powierzchnia przez całą kość -> dwa końce, bez rękawa kory (zostaje do 3 a.u. od twarzy), "
+              "płaszczyzny prostopadłe do osi")
+        check(np.array_equal(ct.refine_surfaces(tube_mesh, one, replace(rp, surface_fit="none", split_ends=False))[0], one),
+              "surface_fit = none, split_ends = false -> etykiety bez zmian")
+        # głowa kości: górny koniec rozszerzony (promień x1.4 w ostatnich 8 a.u.), przełom na dolnym (zwężonym) końcu;
+        # ostra krawędź kory: wąski pasek wzdłuż trzonu (normalne w bok, płaski)
+        hv = tv.copy()
+        grow = np.clip((hv[:, 2] - 22.0) / 8.0, 0, 1)
+        hv[:, :2] *= (1 + 0.4 * grow)[:, None]
+        hv[:, :2] *= (1 - 0.3 * np.clip((-hv[:, 2] - 22.0) / 8.0, 0, 1))[:, None]
+        head_mesh = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(hv), o3d.utility.Vector3iVector(tf))
+        head_mesh.compute_vertex_normals()
+        ang = np.arctan2(hv[:, 1], hv[:, 0])
+        lab3 = np.zeros(len(hv), np.uint8)
+        lab3[hv[:, 2] > 27] = 1                                     # głowa (szorstka u prawdziwej kości)
+        lab3[hv[:, 2] < -27] = 2                                    # przełom na zwężonym końcu
+        lab3[(np.abs(ang) < 0.12) & (np.abs(hv[:, 2]) < 15)] = 3    # krawędź wzdłuż trzonu
+        hp = replace(cp, surface_fit="none", min_surface_au2=5.0, head_min_ratio=1.1, crest_max_axial=0.2)
+        out3, info3 = ct.refine_surfaces(head_mesh, lab3, hp)
+        whys = sorted(d["why"].split(" (")[0] for d in info3["dropped"])
+        check(out3.max() == 1 and hv[out3 == 1, 2].max() < -26 and whys == ["głowa kości", "ostra krawędź kory"],
+              f"głowa kości (szerszy koniec) i ostra krawędź kory odrzucone, przełom na zwężonym końcu zostaje: {whys}")
+
+        print("Płaskie cięcia, tryb \"plane\" i próg złożenia")
+        rough_top = cap(piece("A"), 30.0, 1.0)
+        rough_top.points[:, 2] += rng.normal(0, 0.8, len(rough_top.points))
+        flat_p = replace(mp, axis_check=True, flat_max_rms_au=0.25)
+        check(top.fit(flat_p)["rms_au"] < 0.05 and rough_top.fit(flat_p)["rms_au"] > 0.4,
+              f"spiłowany koniec: odchylenie {top.fit(flat_p)['rms_au']:.2f} a.u., przełom {rough_top.fit(flat_p)['rms_au']:.2f} a.u.")
+        pl = ms.match_pair(top, bottom, replace(ax_p, mode="plane", plane_steps=12))
+        Tpl = np.asarray(pl["T"])
+        check(pl["start"].startswith("płaszczyzna") and pl["ransac"] is False and pl["cover_a"] > 0.9
+              and np.allclose(Tpl[:3, 3] + Tpl[:3, :3] @ top.points.mean(0), bottom.points.mean(0), atol=1e-6)
+              and ms.axis_fit(top, bottom, Tpl, ax_p)["axis_weight"] == 1.0,
+              f"tryb plane: płaszczyzna A na płaszczyźnie B, obrysy pokryte w {pl['cover_a']:.0%}, osie w linii")
+        res = [{"a": "X#1", "b": "Y#1", "score": 40}, {"a": "X#2", "b": "Z#1", "score": 8}]
+        check([r["score"] for r in ms.assemble(res, replace(mp, assembly_min_score=10.0))["chosen"]] == [40]
+              and not res[1]["chosen"],
+              "złożenie: para słabsza niż assembly_min_score zostaje bez pary (może brakuje kawałka)")
+
+        print("Prostowanie osi, starty z płaszczyzn, jakość, filtr pól (pomysły z OSTEOFORM)")
+        tilt5 = move(rot_deg([1, 0, 0], 5), (0.5, -0.3, -60))
+        locked = ms.axis_locked_icp(top, bottom, tilt5, ax_p)
+        check(ms.axis_fit(top, bottom, tilt5, ax_p)["axis_deg"] > 4.5 and ms.axis_fit(top, bottom, locked, ax_p)["axis_deg"] < 0.1
+              and ms.contact_score(top, bottom, locked, ax_p)["cover_a"] > 0.8,
+              "prostowanie: oś A na osi B (5° -> 0°), styk po dociśnięciu ICP z obrotem wokół osi")
+        ps = ms.plane_starts_for(top, bottom, replace(ax_p, plane_starts=24, plane_starts_keep=3))
+        check(len(ps) == 3 and all(lbl.startswith("płaszczyzna") for lbl, _ in ps)
+              and not ms.plane_starts_for(top, bottom, ax_p),
+              "starty płaszczyzna na płaszczyźnie: 3 najlepsze z 24 obrotów; plane_starts = 0 -> bez")
+        q = ms.evaluate(top, bottom, move(t=(0, 0, -60)), replace(ax_p, quality_factor=True))
+        check(0 < q["quality"] <= 1 and q["angle_deg"] < 1, f"jakość: kąt normalnych {q['angle_deg']:.1f}°, czynnik {q['quality']:.2f}")
+        big = ms.Surface(bone=piece("D"), contacts=None, sid=1, points=bottom.points, normals=bottom.normals, area_au2=200.0)
+        sk = ms.split_pairs([top, big], replace(ax_p, max_area_ratio=2.0))[1]
+        check(len(sk) == 1 and "pola" in sk[0]["why"] and not ms.split_pairs([top, big], ax_p)[1],
+              f"filtr pól: {sk[0]['why']}")
+
+        print("Składanie całych grup: wiązka z kontrolą kolizji (OSTEOFORM)")
+
+        def tube_bone(name):
+            """Fragment = rura 60 x r 5 (gęsta siatka) z chmurą i KD-drzewem, jak kość."""
+            c = o3d.geometry.PointCloud(tube_mesh.vertices)
+            c.normals = tube_mesh.vertex_normals
+            return SimpleNamespace(id=name, label=name, mesh=tube_mesh, cloud=c, meta={})
+
+        tb = {k: tube_bone(k) for k in "ABC"}
+        tsurf = [ms.Surface(bone=tb[k], contacts=None, sid=1, points=top.points, normals=top.normals, area_au2=60.0,
+                            bone_tree=cKDTree(tv)) for k in "ABC"]
+        e1 = {"a": "A#1", "b": "B#1", "score": 50.0, "T": move(t=(0, 0, -60)).tolist()}       # A pod B
+        e2 = {"a": "B#2", "b": "C#1", "score": 40.0, "T": move(t=(0, 0, -60)).tolist()}       # B pod C
+        e4 = {"a": "C#1", "b": "B#2", "score": 48.0, "T": move(t=(3, 0, -60)).tolist()}       # C w miejscu A
+        greedy = [r["score"] for r in ms.assemble([e1, e4, e2], replace(mp, assembly_beam=0), tsurf)["chosen"]]
+        beam = ms.assemble([e1, e4, e2], replace(mp, assembly_beam=12), tsurf)
+        pz = {k: np.asarray(beam["poses"][k])[2, 3] for k in "ABC"}
+        check(greedy == [50.0, 48.0] and sorted(r["score"] for r in beam["chosen"]) == [40.0, 50.0]
+              and len(set(beam["groups"].values())) == 1 and pz["A"] < pz["B"] < pz["C"],
+              f"zachłannie: {greedy} (C wchodzi w A); wiązka: A-B + B-C, jedna grupa A pod B pod C")
+
+        print("Kości długie, tryb \"gap\": szczelina między przełomami, ciągłość kory")
+        def ring(z, up):
+            """400 punktów tarczy przełomu (promień 4.5) na wysokości z."""
+            r, ang = 4.5 * np.sqrt(rng.random(400)), rng.random(400) * 2 * np.pi
+            return np.column_stack([r * np.cos(ang), r * np.sin(ang), np.full(400, z)])
+
+        ga = ms.Surface(bone=tb["A"], contacts=None, sid=1, points=ring(30.0, 1), normals=np.tile([0, 0, 1.0], (400, 1)),
+                        area_au2=60.0, bone_tree=cKDTree(tv))
+        gb = ms.Surface(bone=tb["B"], contacts=None, sid=1, points=ring(-30.0, -1), normals=np.tile([0, 0, -1.0], (400, 1)),
+                        area_au2=60.0, bone_tree=cKDTree(tv))
+        gp = replace(mp, axis_check=True, long_mode="gap", gap_twist_deg=30.0, gap_step_au=2.0, axis_lock=False)
+        gap_true = move(t=(0, 0, -61.5))                      # A pod B, szczelina 1.5 a.u.
+        strict = ms.evaluate(ga, gb, gap_true, replace(gp, long_mode="contact"))
+        loose = ms.evaluate(ga, gb, gap_true, gp)
+        found = ms.match_pair(ga, gb, gp)
+        tz = np.asarray(found["T"])[2, 3]
+        check(strict["contact_au2"] == 0 and loose["proximity"] > 0.95 and loose["continuity"] > 0.3
+              and -63.0 < tz < -59.0 and found["axis_deg"] < 1.0 and ms.acceptable({**found, "a_area_au2": 60.0,
+                                                                                     "b_area_au2": 60.0}, gp),
+              f"szczelina 1.5 a.u.: ścisły styk 0, bliskość {loose['proximity']:.2f}, ciągłość kory "
+              f"{loose['continuity']:.2f}; znalezione: A {(-tz - 60):+.1f} a.u. od B, osie {found['axis_deg']:.1f}° ({found['start']})")
+
+        print("Atlas: wspólna skala zestawu")
+        import atlas
+
+        def votes(*cands):
+            """Dopasowanie jak AtlasMatch: tylko lista kandydatów (model, p, ocena, skala)."""
+            return SimpleNamespace(candidates=[{"model": m, "name": m, "p": q, "fit": f, "scale": sc}
+                                               for m, q, f, sc in cands])
+
+        frags = [(votes(("F", 0.8, 0.8, 0.84), ("F", 0.2, 0.7, 0.86)), 80.0, "długi 1"),
+                 (votes(("F", 0.9, 0.85, 0.82)), 330.0, "cała kość"),
+                 (votes(("F", 0.6, 0.75, 1.05), ("H", 0.3, 0.5, 0.7)), 40.0, "krótki"),
+                 (votes(("F", 0.3, 0.9, 0.5), ("H", 0.6, 0.4, 0.9)), 50.0, "niepewny")]
+        sh = atlas.shared_scales(frags, atlas.AtlasParams())
+        bounds = atlas.scale_bounds(atlas.AtlasParams(model_scales={"F": 0.82}), "F")
+        check(set(sh) == {"F"} and sh["F"]["scale"] == 0.82 and [o[0] for o in sh["F"]["outliers"]] == ["krótki"]
+              and abs(sh["F"]["agree"] - 303.65 / 321.65) < 1e-3
+              and len(sh["F"]["votes"]) == 3 and np.allclose(bounds, (0.738, 0.902))
+              and atlas.scale_bounds(atlas.AtlasParams(), "F") == (0.75, 1.35),
+              f"mediana ważona długością: ×{sh['F']['scale']}, inna skala: krótki; zakres ±10% tylko dla modelu z wpisem")
 
         print("Wizualizacje")
         fig = bones_figure(loaded, {bone.id: back}, "fpfh", View3DParams())
@@ -396,7 +609,7 @@ def main() -> None:
         tool = MatchState(out_dir, cp, View3DParams(triangles_total=20000), root)
         top = rep["pairs"][0]
         same = tool.match({"a": top["a"], "b": top["b"], "params": {}, "mode": "score", "T": top["T"]})
-        check(abs(same["score"] - top["score"]) < 1e-3 and abs(same["atlas_bonus_au2"] - top["atlas_bonus_au2"]) < 1e-3,
+        check(abs(same["score"] - top["score"]) < 1e-3 and abs(same["atlas_bonus"] - top["atlas_bonus"]) < 1e-3,
               "ta sama para i ustawienia -> ten sam wynik oceny (z premią z atlasu z matching.json)")
         looser = tool.match({"a": top["a"], "b": top["b"], "params": {"tolerance_au": 2.0}, "mode": "score",
                              "T": top["T"]})
@@ -410,6 +623,56 @@ def main() -> None:
               "ostrzeżenie, gdy settings.json różni się od matching.json")
         page = matching_page(tool, out_dir / "matching.html")
         check(page.stat().st_size > 1000, "strona HTML z zapisanego matching.json (tune_matching.py --html)")
+
+        print("Prezentacja (zapis metody, spójność)")
+        import presentation as pr
+        check("settings" in config.read_json(out_dir / "merging.json"), "merging.json z ustawieniami prepare_data")
+        pm, pcp = pr.method_settings("manual")
+        rep_m = {"params": ms.json_safe(asdict(pm)), "contact_params": ms.json_safe(asdict(pcp)), "surfaces": [], "pairs": []}
+        pr.save_snapshot("manual", rep_m, loaded, pm, pcp, out_dir, root)
+        snap, why = pr.load_snapshot("manual", loaded, out_dir, root)
+        check(snap is not None and why == [] and bone.id in snap["contacts"]
+              and np.array_equal(snap["contacts"][bone.id].labels, ct.load_contacts(bone.id, bone.mesh, root=root).labels),
+              f"zapis metody aktualny zaraz po zapisie, z tymi samymi oznaczeniami ({why})")
+        manual_path = ct.contacts_path(bone.id, "manual", root)
+        kept = manual_path.read_bytes()
+        edited = ct.load_contacts(bone.id, bone.mesh, root=root)
+        edited.labels[np.flatnonzero(edited.labels == 0)[:200]] = 1
+        ct.save_contacts(bone.mesh, edited, manual_path)
+        _, why = pr.load_snapshot("manual", loaded, out_dir, root)
+        check(any("ręczne oznaczenia" in w for w in why), "zmienione ręczne oznaczenia -> przelicz")
+        manual_path.write_bytes(kept)
+        snap_rep = pr.snapshot_dir("manual", out_dir) / "matching.json"
+        changed = config.read_json(snap_rep)
+        changed["params"]["tolerance_au"] = 9.0
+        snap_rep.write_text(json.dumps(changed), encoding="utf-8")
+        _, why = pr.load_snapshot("manual", loaded, out_dir, root)
+        check(len(why) == 1 and "matching" in why[0] and "tolerance_au" in why[0], "inne ustawienia dopasowania -> przelicz")
+        _, why = pr.load_snapshot("features", loaded, out_dir, root)
+        check(len(why) == 1 and "brak" in why[0], "metoda bez zapisu -> przelicz")
+        check(pr.find_matching("manual", out_dir=out_dir)[0] == snap_rep
+              and pr.find_matching(last=True, out_dir=out_dir)[0] == out_dir / "matching.json",
+              "podgląd: zapis metody albo ostatni przebieg (--last)")
+        try:
+            pr.find_matching("features", out_dir=out_dir)
+            check(False, "metoda bez zapisu -> błąd z komendą")
+        except SystemExit as e:
+            check("--method features" in str(e) and "--last" in str(e), "metoda bez zapisu -> błąd z komendą")
+        snap_tool = MatchState(out_dir, pcp, View3DParams(triangles_total=20000), root, path=snap_rep)
+        check(snap_tool.path == snap_rep and snap_tool.report["params"]["tolerance_au"] == 9.0,
+              "podgląd wczytuje zapis metody (nie ostatni przebieg)")
+        check(pr.method_key("manual-auto", "atlas") is None and pr.method_key("auto", "atlas") == "atlas",
+              "manual-auto (mieszanka) nie jest metodą prezentacji")
+        check(pr.parse_steps(["porównanie,powierzchnie"]) == ("powierzchnie", "porownanie")
+              and pr.page_path("atlas", out_dir, ("powierzchnie", "porownanie")).name
+              == "prezentacja_atlas_powierzchnie-porownanie.html"
+              and pr.page_path("atlas", out_dir).name == "prezentacja_atlas.html",
+              "kroki prezentacji: kolejność, polskie znaki, osobny plik bez dopasowania")
+        try:
+            pr.parse_steps(["foo"])
+            check(False, "nieznany krok -> błąd")
+        except ValueError:
+            check(True, "nieznany krok -> błąd")
 
         print("Zestawy danych i zmiana nazwy kości")
         check(config.dataset_dirs("x")[0] == config.SCANS_ROOT / "x"

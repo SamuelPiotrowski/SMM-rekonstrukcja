@@ -17,6 +17,28 @@ Skąd się biorą etykiety (oba rodzaje w jednym folderze contacts/, ten sam for
 Algorytmy (DETECTORS): "roughness" (bazowy), "features" (kilka cech lokalnych naraz),
 "atlas" (kontekst anatomiczny z bazy modeli kompletnych kości + cechy lokalne - src/atlas.py).
 
+PO KAŻDYM ALGORYTMIE (refine_surfaces, ustawienia surface_fit, split_ends, fit_tolerance_au):
+    1. ROZDZIELENIE KOŃCÓW: na wydłużonym fragmencie (>= long_min_elongation razy dłuższy niż szerszy)
+       powierzchnia, która ma co najmniej min_surface_au2 po obu stronach środka fragmentu, jest dzielona
+       na dwie - przełomy dwóch końców połączone pasem kory to dwie powierzchnie, nie jedna.
+    2. PRZYBLIŻENIE (fit_surface): płaszczyzna ("plane") albo funkcja kwadratowa nad nią ("quadric"),
+       dopasowana odpornie (punkty daleko od przybliżenia mało ważą); na kości długiej punkty ważone
+       (n . oś)², bo twarz przełomu na końcu patrzy wzdłuż osi, a kora w bok.
+    3. ODCIĘCIE: zostają wierzchołki bliżej przybliżenia niż fit_tolerance_au - pas kory ciągnący się
+       wzdłuż kości od końca odpada; na kości długiej za płaszczyzną zostaje też środek przekroju (do
+       MARROW_RADIUS promienia od osi) - wklęsły dół kanału szpikowego to przełom; potem znowu spójne
+       obszary >= min_surface_au2.
+    4. GŁOWA KOŚCI (head_min_ratio): koniec kości długiej, przy którym fragment jest SZERSZY niż trzon
+       (promień skrajnych 12% długości >= head_min_ratio x promień środkowych 40%), to nasada / głowa
+       - naturalna, często szorstka powierzchnia. Przełom trzonu zwęża fragment (na grzesiu_test 0.5-0.85
+       promienia trzonu, głowy 1.2-1.4). Obszary leżące w tej części (|miejsce| >= head_zone) odpadają.
+    5. OSTRE KRAWĘDZIE KORY (crest_max_axial): grzebień / krawędź wzdłuż trzonu ma normalne w bok (średnie
+       |n . oś| < crest_max_axial) i jest prawie płaski (odchylenie od płaszczyzny < crest_max_rms_au);
+       przełom patrzy częściowo wzdłuż osi i jest nierówny. Takie obszary odpadają.
+    Odrzucone obszary (z powodem) trafiają do "info" -> "dropped".
+    Opis każdej powierzchni (środek, normalna, odchylenie od przybliżenia rms_au - płaskie spiłowane
+    cięcie ma ~0.1 a.u., przełom więcej - i kąt normalnej do osi kości) trafia do "info" -> "fits".
+
 Jak dodać własny algorytm:
     @detector("moja_metoda")
     def moja_metoda(bone: Bone, params: ContactParams) -> np.ndarray:
@@ -92,6 +114,14 @@ class ContactParams:
     feature_threshold: float = 0.15   # "features": o ile wynik ponad typowy dla tej kości (w odchyleniach) = przełom
     feature_smooth_au: float = 1.0    # "features": uśrednianie wyniku w tym promieniu przed progiem
     feature_open_au: float = 1.0      # "features": otwarcie morfologiczne (rozcina wąskie mostki między obszarami)
+    surface_fit: str = "none"         # po algorytmie: przybliżenie przełomu "plane" / "quadric" i odcięcie kory; "none" = bez
+    split_ends: bool = False          # po algorytmie: rozdziel powierzchnię sięgającą obu końców wydłużonego fragmentu
+    fit_tolerance_au: float = 3.0     # odcięcie: zostają punkty bliżej przybliżenia niż to [a.u.]
+    long_min_elongation: float = 2.5  # fragment wydłużony (kość długa) = co najmniej tyle razy dłuższy niż szerszy
+    head_min_ratio: float = 0.0       # kość długa: koniec szerszy niż trzon tyle razy = głowa, obszary na niej odpadają; 0 = bez
+    head_zone: float = 0.3            # ... odpadają obszary od tego miejsca do końca (0 = środek fragmentu, 1 = koniec)
+    crest_max_axial: float = 0.0      # kość długa: ostra krawędź kory = średnie |n . oś| poniżej tego ...; 0 = bez
+    crest_max_rms_au: float = 0.35    # ... i odchylenie od płaszczyzny poniżej tego [a.u.]
     exclude: tuple = ()               # kości (fragment id / nazwy), dla których algorytm nic nie liczy (np. całe kości)
 
 
@@ -854,6 +884,206 @@ def regions_from_score(mesh: o3d.geometry.TriangleMesh, score: np.ndarray, thres
     return split_regions(mesh, mask, params.min_surface_au2)
 
 
+# -----------------
+# PRZYBLIŻENIE POWIERZCHNI PRZEŁOMU (płaszczyzna / funkcja kwadratowa)
+# -----------------
+
+SURFACE_FITS = ("none", "plane", "quadric")
+MARROW_RADIUS = 0.6     # odcięcie: za płaszczyzną zostaje środek przekroju (do tylu promieni kości od osi) - kanał szpikowy
+
+
+def bone_axis(mesh: o3d.geometry.TriangleMesh) -> dict:
+    """Oś główna kości (PCA wierzchołków).
+
+    Returns:
+        {"c": środek, "d": kierunek osi (jednostkowy), "elong": wydłużenie (odchylenie wzdłuż osi /
+         największe w poprzek), "r": promień (mediana odległości wierzchołków od osi) [a.u.],
+         "lo", "hi": zasięg wierzchołków wzdłuż osi od środka [a.u.]}.
+    """
+    v = np.asarray(mesh.vertices)
+    c = v.mean(axis=0)
+    w, U = np.linalg.eigh(np.cov((v - c).T))
+    d = U[:, -1]
+    t = (v - c) @ d
+    radial = np.linalg.norm((v - c) - np.outer(t, d), axis=1)
+    return {"c": c, "d": d, "elong": float(np.sqrt(w[-1] / max(w[-2], 1e-12))),
+            "r": float(max(np.median(radial), 1e-6)), "lo": float(t.min()), "hi": float(t.max())}
+
+
+def fit_surface(points: np.ndarray, normals: np.ndarray, weights: np.ndarray | None = None,
+                axis: np.ndarray | None = None, mode: str = "plane", iterations: int = 6) -> dict:
+    """Odporne przybliżenie powierzchni przełomu płaszczyzną albo funkcją kwadratową nad płaszczyzną.
+
+    Ważone PCA, potem kilka razy wagi x exp(-(odległość / sigma)² / 2), sigma = 2.5 x odporne
+    odchylenie (MAD) - punkty daleko od płaszczyzny (kora, odpryski) mało ważą. Z osią kości
+    wagi startowe x (n . oś)²: twarz przełomu na końcu kości długiej patrzy wzdłuż osi, kora w bok.
+    "quadric": na koniec h = a u² + b uv + c v² + d u + e v + f (h = odległość od płaszczyzny,
+    u, v = współrzędne w płaszczyźnie) metodą najmniejszych kwadratów z tymi samymi wagami.
+
+    Args:
+        points, normals: (N, 3) punkty powierzchni i ich normalne (na zewnątrz kości).
+        weights:         (N,) pole przypadające na punkt; None = równe.
+        axis:            kierunek osi kości długiej; None = bez ważenia normalnymi.
+        mode:            "plane" albo "quadric".
+        iterations:      kroków odpornego ważenia.
+
+    Returns:
+        {"mode", "center", "normal" (na zewnątrz kości), "u", "v" (osie w płaszczyźnie, u = najdłuższa),
+         "coef" (6 współczynników funkcji kwadratowej; zera dla płaszczyzny), "rms_au": ważone odchylenie
+         punktów od przybliżenia (bez punktów odrzuconych), "axis_deg": kąt normalnej do osi (None bez osi),
+         "extent_au": (dł., szer.) w płaszczyźnie}.
+    """
+    P = np.asarray(points, dtype=float)
+    N = np.asarray(normals, dtype=float)
+    w0 = np.ones(len(P)) if weights is None else np.asarray(weights, dtype=float).copy()
+    if axis is not None:
+        w0 = w0 * ((N @ axis) ** 2 + 1e-3)
+    w = w0.copy()
+    for _ in range(max(iterations, 1)):
+        c = (w[:, None] * P).sum(axis=0) / max(w.sum(), 1e-12)
+        X = P - c
+        C = (X * w[:, None]).T @ X / max(w.sum(), 1e-12)
+        _, E = np.linalg.eigh(C)
+        nrm = E[:, 0]
+        dist = X @ nrm
+        mad = _weighted_median(np.abs(dist), w)
+        sigma = max(2.5 * 1.4826 * mad, 0.3)
+        w = w0 * np.exp(-0.5 * (dist / sigma) ** 2)
+    if (w[:, None] * N).sum(axis=0) @ nrm < 0:
+        nrm = -nrm
+    u, v_ = E[:, 2], np.cross(nrm, E[:, 2])
+    X = P - c
+    pu, pv, h = X @ u, X @ v_, X @ nrm
+    coef = np.zeros(6)
+    if mode == "quadric" and len(P) >= 6:
+        A = np.column_stack([pu ** 2, pu * pv, pv ** 2, pu, pv, np.ones(len(P))])
+        sw = np.sqrt(w)
+        coef = np.linalg.lstsq(A * sw[:, None], h * sw, rcond=None)[0]
+    fit = {"mode": mode, "center": c, "normal": nrm, "u": u, "v": v_, "coef": coef}
+    res = surface_residual(fit, P)
+    keep = w > 0.05 * w.max() if w.max() > 0 else np.ones(len(P), bool)
+    fit["rms_au"] = float(np.sqrt((w[keep] * res[keep] ** 2).sum() / max(w[keep].sum(), 1e-12)))
+    fit["axis_deg"] = None if axis is None else float(np.degrees(np.arccos(min(1.0, abs(float(nrm @ axis))))))
+    fit["extent_au"] = (float(np.ptp(pu[keep])) if keep.any() else 0.0, float(np.ptp(pv[keep])) if keep.any() else 0.0)
+    return fit
+
+
+def _weighted_median(x: np.ndarray, w: np.ndarray) -> float:
+    """Mediana ważona (0 dla pustych danych)."""
+    if len(x) == 0 or w.sum() <= 0:
+        return 0.0
+    o = np.argsort(x)
+    cw = np.cumsum(w[o])
+    return float(x[o][np.searchsorted(cw, cw[-1] / 2)])
+
+
+def surface_residual(fit: dict, points: np.ndarray) -> np.ndarray:
+    """Odległość punktów od przybliżenia (ze znakiem: + = na zewnątrz kości) [a.u.]."""
+    X = np.asarray(points, dtype=float) - fit["center"]
+    pu, pv, h = X @ fit["u"], X @ fit["v"], X @ fit["normal"]
+    a, b, c, d, e, f = fit["coef"]
+    return h - (a * pu ** 2 + b * pu * pv + c * pv ** 2 + d * pu + e * pv + f)
+
+
+def fit_info(fit: dict) -> dict:
+    """Opis przybliżenia do zapisu w JSON ("info" -> "fits"): liczby zaokrąglone, bez tablic numpy."""
+    r = lambda x: [round(float(t), 4) for t in x]  # noqa: E731
+    return {"mode": fit["mode"], "center": r(fit["center"]), "normal": r(fit["normal"]), "u": r(fit["u"]),
+            "v": r(fit["v"]), "coef": r(fit["coef"]), "rms_au": round(fit["rms_au"], 4),
+            "axis_deg": None if fit["axis_deg"] is None else round(fit["axis_deg"], 2),
+            "extent_au": r(fit["extent_au"])}
+
+
+def refine_surfaces(mesh: o3d.geometry.TriangleMesh, labels: np.ndarray,
+                    params: ContactParams) -> tuple[np.ndarray, dict]:
+    """Po algorytmie wykrywania: rozdzielenie końców, przybliżenie przełomu i odcięcie kory (docstring modułu).
+
+    Args:
+        mesh:   siatka kości.
+        labels: (V,) etykiety z algorytmu.
+        params: surface_fit, split_ends, fit_tolerance_au, long_min_elongation, min_surface_au2.
+
+    Returns:
+        ((V,) uint8 nowe etykiety 1..K od największej, {"fits": {"<k>": fit_info} - przybliżenie każdej
+         powierzchni (puste przy surface_fit = "none"), "dropped": [{"area_au2", "pos", "why"}] - obszary
+         odrzucone jako głowa kości albo ostra krawędź}; {} gdy nic nie robi).
+
+    Raises:
+        ValueError: nieznane surface_fit.
+    """
+    if params.surface_fit not in SURFACE_FITS:
+        raise ValueError(f"contacts.surface_fit = {params.surface_fit!r}, dostępne: {', '.join(SURFACE_FITS)}")
+    labels = np.asarray(labels, dtype=np.uint8)
+    fitting = params.surface_fit != "none"
+    rules = params.head_min_ratio > 0 or params.crest_max_axial > 0
+    if not labels.any() or (not fitting and not params.split_ends and not rules):
+        return labels, {}
+    if not mesh.has_vertex_normals():
+        mesh.compute_vertex_normals()
+    v, n, va = np.asarray(mesh.vertices), np.asarray(mesh.vertex_normals), vertex_areas(mesh)
+    ax = bone_axis(mesh)
+    long = ax["elong"] >= params.long_min_elongation
+    t = (v - ax["c"]) @ ax["d"]
+    mid = 0.5 * (ax["lo"] + ax["hi"])
+    groups = []
+    for k in [int(k) for k in np.unique(labels) if k > 0]:
+        idx = np.flatnonzero(labels == k)
+        parts = [idx]
+        if params.split_ends and long:
+            low, high = idx[t[idx] < mid], idx[t[idx] >= mid]
+            if min(va[low].sum(), va[high].sum()) >= params.min_surface_au2:
+                parts = [low, high]
+        for g in parts:
+            if fitting:
+                f = fit_surface(v[g], n[g], va[g], ax["d"] if long else None, params.surface_fit)
+                res = surface_residual(f, v[g])
+                keep = np.abs(res) <= params.fit_tolerance_au
+                if long:          # kanał szpikowy: wklęsły dół W ŚRODKU przekroju, za płaszczyzną - zostaje
+                    rel = v[g] - ax["c"]
+                    radial = np.linalg.norm(rel - np.outer(rel @ ax["d"], ax["d"]), axis=1)
+                    keep |= (res < 0) & (radial < MARROW_RADIUS * ax["r"])
+                g = g[keep]
+            groups.append(g)
+    found = []                                     # (pole, wierzchołki) spójnych obszarów po odcięciu
+    for g in groups:
+        mask = np.zeros(len(v), bool)
+        mask[g] = True
+        sub = split_regions(mesh, mask, params.min_surface_au2)
+        found += [(float(va[sub == j].sum()), np.flatnonzero(sub == j)) for j in range(1, int(sub.max()) + 1)]
+    found.sort(key=lambda x: -x[0])
+    dropped = []
+    if long and rules:
+        radial = np.linalg.norm((v - ax["c"]) - np.outer(t, ax["d"]), axis=1)
+        length = ax["hi"] - ax["lo"]
+        shaft = np.median(radial[(t > ax["lo"] + 0.3 * length) & (t < ax["hi"] - 0.3 * length)])
+        end_ratio = {-1: np.median(radial[t < ax["lo"] + 0.12 * length]) / shaft,
+                     1: np.median(radial[t > ax["hi"] - 0.12 * length]) / shaft}
+        keep = []
+        for area, g in found:
+            pos = float((t[g].mean() - mid) / max(length / 2, 1e-9))
+            side = 1 if pos > 0 else -1
+            why = ""
+            if params.head_min_ratio > 0 and end_ratio[side] >= params.head_min_ratio and abs(pos) >= params.head_zone:
+                why = f"głowa kości (koniec {end_ratio[side]:.2f} x szerszy niż trzon)"
+            elif params.crest_max_axial > 0:
+                axial = float(np.abs(n[g] @ ax["d"]).mean())
+                rms = fit_surface(v[g], n[g], va[g], ax["d"], "plane")["rms_au"]
+                if axial < params.crest_max_axial and rms < params.crest_max_rms_au:
+                    why = f"ostra krawędź kory (|n . oś| {axial:.2f}, odchylenie {rms:.2f} a.u.)"
+            if why:
+                dropped.append({"area_au2": round(area, 1), "pos": round(pos, 2), "why": why})
+            else:
+                keep.append((area, g))
+        found = keep
+    out = np.zeros(len(v), dtype=np.uint8)
+    fits = {}
+    for k, (_, g) in enumerate(found[:255], start=1):
+        out[g] = k
+        if fitting:
+            fits[str(k)] = fit_info(fit_surface(v[g], n[g], va[g], ax["d"] if long else None, params.surface_fit))
+    return out, {"fits": fits, "dropped": dropped}
+
+
 def _atlas_data_key(bone, params: ContactParams) -> str:
     """Od czego poza sekcją "contacts" zależy wynik "atlas": modele w bazie, sekcje "atlas" i "surface_features"."""
     import atlas
@@ -972,10 +1202,13 @@ def detect_contacts(bone, method: str | None = None, params: ContactParams = Con
         method: nazwa z DETECTORS; None = params.method.
         params: ustawienia algorytmu.
 
+    Po algorytmie: refine_surfaces (rozdzielenie końców, przybliżenie przełomu, odcięcie kory).
+
     Returns:
         Contacts z source = "auto:<method>", nazwami "Wykryta k" i opisem algorytmu
         w `detector` (żeby auto_contacts mógł sprawdzić aktualność). Algorytm może zwrócić
-        (labels, info) - wtedy `info` (słownik JSON, np. ranking kości z atlasu) trafia do Contacts.info.
+        (labels, info) - wtedy `info` (słownik JSON, np. ranking kości z atlasu) trafia do Contacts.info;
+        przybliżenia powierzchni: info["fits"].
 
     Raises:
         ValueError: nieznany algorytm.
@@ -985,7 +1218,9 @@ def detect_contacts(bone, method: str | None = None, params: ContactParams = Con
         raise ValueError(f"Nieznany algorytm {method!r}, dostępne: {', '.join(DETECTORS)}")
     result = DETECTORS[method](bone, params)
     labels, info = result if isinstance(result, tuple) else (result, {})
-    labels = np.asarray(labels, dtype=np.uint8)
+    labels, refined = refine_surfaces(bone.mesh, np.asarray(labels, dtype=np.uint8), params)
+    info = dict(info or {})
+    info.update({k: val for k, val in refined.items() if val})
     names = {int(k): f"Wykryta {k}" for k in np.unique(labels) if k > 0}
     return Contacts(bone_id=bone.id, labels=labels, names=names, source=f"auto:{method}",
                     detector=detector_info(bone, method, params), info=dict(info or {}))

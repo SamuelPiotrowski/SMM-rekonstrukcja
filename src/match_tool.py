@@ -6,6 +6,9 @@ scripts/match_surfaces.py liczy i zapisuje matching.json, a ten moduł go pokazu
       wyników wszystkich par) - jeden plik, można go komuś wysłać,
     - serve():      strona z suwakami ustawień (opis niżej).
 Oba sprawdzają, czy matching.json jest aktualny (MatchState.warnings).
+Który wynik: zapis metody out/3d/<zestaw>/methods/<metoda>/matching.json (metoda z settings.json albo
+method=...; presentation.find_matching) z powierzchniami styku dokładnie z dopasowania - przełączenie
+metody nic nie przelicza; last=True = ostatni przebieg out/3d/<zestaw>/matching.json.
 
 Strona z suwakami: uruchamia mały serwer HTTP (tylko na tym komputerze, 127.0.0.1) i otwiera stronę
 src/web/match_tool.html. Strona pokazuje pary z out/3d/<zestaw>/matching.json (wynik
@@ -52,7 +55,8 @@ from config import read_json
 from bones import Bone, load_bones
 from contact_tool import LocalServer, _b64
 from contacts import ContactParams, triangle_labels
-from visualization_3d import View3DParams, _surface_overlay, decimate, match_matrix_figure, matching_figure, write_page
+from visualization_3d import (View3DParams, _surface_overlay, assembly_figure, decimate, match_matrix_figure,
+                              matching_figure, write_page)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STATIC = {"/": ("match_tool.html", "text/html; charset=utf-8"),
@@ -71,44 +75,61 @@ class MatchState:
     a serwer obsługuje zapytania w osobnych wątkach.
     """
 
-    def __init__(self, out_dir: Path, contact_params: ContactParams, view: View3DParams, root: Path | None = None):
+    def __init__(self, out_dir: Path, contact_params: ContactParams, view: View3DParams, root: Path | None = None,
+                 path: Path | None = None, bones: list[Bone] | None = None, contacts: dict | None = None,
+                 run: str | None = None):
         """Wczytuje matching.json, kości i ich powierzchnie styku.
 
         Args:
-            out_dir:        folder wyników (z matching.json i bones/).
+            out_dir:        folder wyników (z bones/ i domyślnie z matching.json).
             contact_params: algorytm wykrywania (gdy matching.json był liczony w trybie "auto").
             view:           wygląd (triangles_total - szczegółowość siatek na stronie).
             root:           folder oznaczeń zamiast contacts/ z settings.json (np. w testach).
+            path:           plik wyniku (None = <out_dir>/matching.json), np. zapis metody
+                            out/3d/<zestaw>/methods/<metoda>/matching.json.
+            bones:          już wczytane kości (z chmurami; None = wczytaj z out_dir).
+            contacts:       {id kości: Contacts} - powierzchnie dokładnie te z dopasowania (zapis metody);
+                            kości spoza słownika biorą je jak dopasowanie (bone_contacts).
+            run:            komenda przeliczenia do komunikatów (None = match_surfaces.py).
 
         Raises:
             SystemExit: brak matching.json albo kości z niego (komunikat mówi, co zrobić).
         """
         import config
 
-        path = Path(out_dir) / "matching.json"
-        run = f"python scripts/match_surfaces.py{config.dataset_flag()}"
+        path = Path(path) if path else Path(out_dir) / "matching.json"
+        self.run = run = run or f"python scripts/match_surfaces.py{config.dataset_flag()}"
         if not path.exists():
             raise SystemExit(f"Brak {path} - uruchom najpierw: {run}")
+        self.path = path
         self.report = read_json(path)
         self.params = ms.SurfaceMatchParams(**{k: v for k, v in self.report["params"].items() if k in PARAM_NAMES})
         self.view = view
         self.lock = threading.Lock()
         needed = {s["bone"] for s in self.report["surfaces"]}
-        self.bones: dict[str, Bone] = {b.id: b for b in load_bones(out_dir, features=True) if b.id in needed}
+        if bones is None:
+            bones = load_bones(out_dir, features=True)
+        self.bones: dict[str, Bone] = {b.id: b for b in bones if b.id in needed}
         missing = needed - set(self.bones)
         if missing:
-            raise SystemExit(f"Kości z matching.json nie ma w {out_dir}/bones: {sorted(missing)} - "
+            raise SystemExit(f"Kości z {path.name} nie ma w {out_dir}/bones: {sorted(missing)} - "
                              f"uruchom ponownie: {run}")
         self.contacts, self.tri_labels, self.trees = {}, {}, {}
         for bid, b in self.bones.items():
-            c, _ = ms.bone_contacts(b, self.params.source, contact_params, root)
+            c = (contacts or {}).get(bid)
+            if c is None:
+                c, _ = ms.bone_contacts(b, self.params.source, contact_params, root)
             if c is None:
                 raise SystemExit(f"{b.label}: brak powierzchni styku (tryb {self.params.source!r}) - "
                                  f"uruchom ponownie: {run}")
             self.contacts[bid] = c
         self._surfaces: dict[tuple[str, float], ms.Surface] = {}
         self._geometry: dict[str, dict] = {}
+        self._views: dict[str, object] = {}                     # {id kości: uproszczona siatka} - raz na kość
+        self._geometry_lock = threading.Lock()                 # geometry() z wątku warm() i z zapytań strony
         self._settings: ms.SurfaceMatchParams | None = None   # ustawia _load() - do warnings()
+        self.stale: list[str] = []                             # powody nieaktualności zapisu metody (_load)
+        self.method: str | None = None                         # metoda wyniku (_load), do nazwy strony
 
     def surface(self, key: str, sample_au: float) -> ms.Surface:
         """Powierzchnia styku próbkowana co `sample_au` (liczona raz dla każdej wartości).
@@ -146,7 +167,7 @@ class MatchState:
              "params": ustawienia z matching.json (startowe położenie suwaków)}.
         """
         return {"pairs": self.report["pairs"], "surfaces": self.report["surfaces"], "params": asdict(self.params),
-                "warnings": self.warnings(self._settings)}
+                "warnings": self.warnings(self._settings) + self.stale}
 
     def warnings(self, settings: ms.SurfaceMatchParams | None = None) -> list[str]:
         """Czy matching.json jest aktualny: ustawienia z settings.json i obecne oznaczenia.
@@ -159,16 +180,17 @@ class MatchState:
         """
         out = []
         if settings is not None:
-            now, then = asdict(settings), asdict(self.params)
+            plain = lambda d: {k: list(v) if isinstance(v, tuple) else v for k, v in d.items()}  # noqa: E731
+            now, then = plain(asdict(settings)), plain(asdict(self.params))   # lista z JSON = krotka z ustawień
             diff = [f"{k}: {then[k]} -> {now[k]}" for k in now if now[k] != then.get(k)]
             if diff:
                 out.append("settings.json (sekcja \"matching\") różni się od ustawień, z którymi liczono "
-                           f"matching.json ({', '.join(diff)}) - przelicz: python scripts/match_surfaces.py")
+                           f"matching.json ({', '.join(diff)}) - przelicz: {self.run}")
         gone = [s["key"] for s in self.report["surfaces"]
                 if int(s["surface"]) not in set(np.unique(self.contacts[s["bone"]].labels).tolist())]
         if gone:
             out.append(f"oznaczenia zmieniły się po matching.json, nie ma już powierzchni: {', '.join(gone)} "
-                       "- przelicz: python scripts/match_surfaces.py")
+                       f"- przelicz: {self.run}")
         return out
 
     def geometry(self, key: str) -> dict:
@@ -188,23 +210,41 @@ class MatchState:
         Raises:
             KeyError: nieznana kość.
         """
-        if key not in self._geometry:
-            bid, sid = key.rsplit("#", 1)
-            if bid not in self.bones:
-                raise KeyError(bid)
-            b = self.bones[bid]
-            d = decimate(b.mesh, max(20000, self.view.triangles_total // 2))
-            v = np.asarray(d.vertices)
-            q, tri = _surface_overlay(b, self.contacts[bid].labels, int(sid), d,
-                                      v + 0.04 * np.asarray(d.vertex_normals))
-            if q is None:
-                q, tri = np.zeros((0, 3)), np.zeros((0, 3), dtype=int)
-            self._geometry[key] = {
-                "key": key, "label": b.label, "name": f"{b.label} · {self.contacts[bid].name(int(sid))}",
-                "positions": _b64(v.astype(np.float32)), "indices": _b64(np.asarray(d.triangles, dtype=np.uint32)),
-                "surf_positions": _b64(q.astype(np.float32)), "surf_indices": _b64(tri.astype(np.uint32)),
-            }
-        return self._geometry[key]
+        with self._geometry_lock:       # ten sam klucz z warm() i ze strony liczony tylko raz
+            if key not in self._geometry:
+                bid, sid = key.rsplit("#", 1)
+                if bid not in self.bones:
+                    raise KeyError(bid)
+                b = self.bones[bid]
+                if bid not in self._views:  # upraszczanie dużej siatki trwa sekundy - raz na kość, nie na powierzchnię
+                    self._views[bid] = decimate(b.mesh, max(20000, self.view.triangles_total // 2))
+                d = self._views[bid]
+                v = np.asarray(d.vertices)
+                q, tri = _surface_overlay(b, self.contacts[bid].labels, int(sid), d,
+                                          v + 0.04 * np.asarray(d.vertex_normals))
+                if q is None:
+                    q, tri = np.zeros((0, 3)), np.zeros((0, 3), dtype=int)
+                self._geometry[key] = {
+                    "key": key, "label": b.label, "name": f"{b.label} · {self.contacts[bid].name(int(sid))}",
+                    "positions": _b64(v.astype(np.float32)),
+                    "indices": _b64(np.asarray(d.triangles, dtype=np.uint32)),
+                    "surf_positions": _b64(q.astype(np.float32)), "surf_indices": _b64(tri.astype(np.uint32)),
+                }
+            return self._geometry[key]
+
+    def warm(self) -> None:
+        """Liczy w tle geometrię wszystkich powierzchni z par, w kolejności listy (pierwsza para najpierw).
+
+        Uruchamiane w osobnym wątku zaraz po starcie serwera - zanim przeglądarka poprosi
+        o pierwszą parę, upraszczanie siatek już trwa, a kolejne pary pokazują się od razu.
+        Błędy są pomijane (strona dostanie je przy własnym zapytaniu).
+        """
+        keys = dict.fromkeys(k for p in self.report["pairs"] for k in (p["a"], p["b"]))
+        for key in keys:
+            try:
+                self.geometry(key)
+            except Exception:  # noqa: BLE001 - tylko rozgrzewka
+                pass
 
     def match(self, body: dict) -> dict:
         """POST /api/match: przelicza jedną parę z ustawieniami ze strony. Nic nie zapisuje.
@@ -346,21 +386,42 @@ def make_handler(state: MatchState):
     return Handler
 
 
-def _load(out_dir: Path | None) -> MatchState:
-    """Wczytuje matching.json z kośćmi (ustawienia z settings.json) i wypisuje ostrzeżenia w konsoli.
+def _load(out_dir: Path | None, method: str | None = None, last: bool = False) -> MatchState:
+    """Wczytuje wynik dopasowania metody z kośćmi i wypisuje ostrzeżenia w konsoli. Nic nie przelicza.
+
+    Domyślnie zapis metody out/3d/<zestaw>/methods/<metoda>/ (metoda z settings.json albo `method`)
+    z powierzchniami styku dokładnie takimi jak przy dopasowaniu - przełączenie metody nie wymaga
+    liczenia od nowa (presentation.find_matching). `last` = ostatni przebieg out/3d/<zestaw>/matching.json.
 
     Args:
-        out_dir: folder wyników z matching.json i kośćmi (None = DATA_OUT).
+        out_dir: folder wyników z kośćmi (None = DATA_OUT).
+        method:  metoda (None = z settings.json).
+        last:    pokaż ostatni przebieg zamiast zapisu metody.
 
     Returns:
-        Stan z ustawieniami z settings.json w `_settings` (do porównania w warnings()).
+        Stan z ustawieniami do porównania w `_settings` (warnings()) i powodami nieaktualności w `stale`.
     """
     import config
+    import presentation as pr
 
+    out_dir = Path(out_dir or config.DATA_OUT)
+    path, used, notes = pr.find_matching(method, last, out_dir)
+    print(f"Wynik dopasowania: {config._rel(path)} - {pr.method_label(used)}")
+    for n in notes:
+        print(f"UWAGA: {n}")
+    p_now, cp = pr.method_settings(used) if used else (config.matching_params(), config.contact_params())
+    run = pr.recompute_command(used) if used else None
     print("Wczytywanie kości i powierzchni styku...")
-    state = MatchState(Path(out_dir or config.DATA_OUT), config.contact_params(), config.view3d_params())
-    state._settings = config.matching_params()
-    for w in state.warnings(state._settings):
+    bones = load_bones(out_dir, features=True)
+    contacts, stale, settings = None, [], p_now
+    if path.parent != out_dir:          # zapis metody: jego powierzchnie + pełne sprawdzenie aktualności
+        snap, reasons = pr.load_snapshot(used, bones, out_dir)
+        contacts = snap["contacts"] if snap else None
+        stale = [f"{r} - przelicz: {run}" for r in reasons]
+        settings = None                 # ustawienia "matching" porównuje już load_snapshot
+    state = MatchState(out_dir, cp, config.view3d_params(), path=path, bones=bones, contacts=contacts, run=run)
+    state._settings, state.stale, state.method = settings, stale, used
+    for w in state.warnings(settings) + stale:
         print(f"UWAGA: {w}")
     return state
 
@@ -377,66 +438,102 @@ def matching_page(state: MatchState, path: Path, open_browser: bool = False) -> 
         Ścieżka zapisanej strony.
     """
     p, rep = state.params, state.report
+    return write_page(
+        path, "Dopasowanie powierzchni styku", matching_description(p, rep),
+        [("Najlepsze pary", BEST_PAIRS_NOTE + " Suwaki ustawień z przeliczaniem jednej pary: "
+          "python scripts/tune_matching.py",
+          matching_figure(rep["pairs"], state.bones, state.contacts, state.view, p.max_shown)),
+         ("Wszystkie pary", matrix_note(p), match_matrix_figure(rep, state.view))]
+        + ([("Proponowane złożenie", "Całe grupy fragmentów złożone z par proponowanego złożenia (wiązka z kontrolą "
+             "kolizji grup); przełomy użyte w złożeniu na różowo. Grupy leżą obok siebie.", fig)]
+           if (fig := assembly_figure(rep, state.bones, state.contacts, state.view)) is not None else []),
+        state.view, open_browser=open_browser)
+
+
+BEST_PAIRS_NOTE = "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę."
+
+
+def matrix_note(p: ms.SurfaceMatchParams) -> str:
+    """Opis macierzy wyników wszystkich par (match_matrix_figure) - jednostka wyniku wg p.score_mode."""
+    return (f"Wynik każdej pary powierzchni [{'%' if p.score_mode == 'dice' else 'a.u.²'}]; puste pola = ta sama "
+            "kość, × = pominięta (atlas: różne kości albo pola przełomów zbyt różne), „(algorytm)” = powierzchnia "
+            "z algorytmu wykrywania.")
+
+
+def matching_description(p: ms.SurfaceMatchParams, rep: dict) -> str:
+    """Opis dopasowania do strony (matching.html, scripts/presentation.py): skąd powierzchnie, jak liczony wynik.
+
+    Args:
+        p:   ustawienia, z którymi liczono wyniki.
+        rep: zawartość matching.json (contact_params, skipped).
+
+    Returns:
+        Tekst (jedno-kilka zdań).
+    """
     algo = f" (algorytm: {rep['contact_params'].get('method')})" if p.source != "manual" else ""
     atlas = (f" Atlas anatomiczny: start z ustawień obu fragmentów na wspólnym modelu kości, styk liczy się do "
              f"{p.atlas_boost:.0%} mocniej, gdy to ta sama kość; pominięte pary na pewno różnych kości: "
              f"{len(rep.get('skipped', []))}.") if p.use_atlas else ""
-    return write_page(
-        path, "Dopasowanie powierzchni styku",
-        f"Powierzchnie styku: {ms.SOURCE_NAMES.get(p.source, p.source)}{algo}. Każda dopasowana (RANSAC + ICP) "
-        "do każdej powierzchni innej kości, twarzą w twarz. Wynik = pole styku (powierzchnie bliżej niż "
-        f"{p.tolerance_au:g} a.u., normalne przeciwne) minus pole, na którym kości wchodzą w siebie.{atlas}",
-        [("Najlepsze pary", "Kość A (niebieska) ustawiona na kości B. Lista w lewym dolnym rogu wybiera parę. "
-          "Suwaki ustawień z przeliczaniem jednej pary: python scripts/tune_matching.py",
-          matching_figure(rep["pairs"], state.bones, state.contacts, state.view, p.max_shown)),
-         ("Wszystkie pary", "Wynik każdej pary powierzchni [a.u.²]; puste pola = ta sama kość, "
-          "× = pominięta (atlas: różne kości), „(algorytm)” = powierzchnia z algorytmu wykrywania.",
-          match_matrix_figure(rep, state.view))],
-        state.view, open_browser=open_browser)
+    return (f"Powierzchnie styku: {ms.SOURCE_NAMES.get(p.source, p.source)}{algo}. Każda dopasowana (RANSAC + ICP) "
+            "do każdej powierzchni innej kości, twarzą w twarz. Wynik = pole styku (powierzchnie bliżej niż "
+            f"{p.tolerance_au:g} a.u., normalne przeciwne) minus pole, na którym kości wchodzą w siebie"
+            + (", jako udział w średnim polu obu przełomów [%] - nieprzylegająca część przełomu obniża wynik, "
+               "wielkość fragmentów się nie liczy" if p.score_mode == "dice" else " [a.u.²]")
+            + (f". Kości długie: osie w jednej linii (do {p.axis_max_deg:g}° bez kary)" if p.axis_check else "")
+            + f".{atlas}")
 
 
-def write_html(out_dir: Path | None = None, open_browser: bool = True) -> Path:
-    """tune_matching.py --html: wczytuje matching.json i zapisuje out/3d/<zestaw>/matching.html (matching_page).
+def write_html(out_dir: Path | None = None, open_browser: bool = True, method: str | None = None,
+               last: bool = False) -> Path:
+    """tune_matching.py --html: wczytuje wynik metody i zapisuje out/3d/<zestaw>/matching_<metoda>.html
+    (ostatni przebieg, --last: matching.html) - matching_page.
 
     Args:
-        out_dir:      folder wyników z matching.json i kośćmi (None = DATA_OUT); strona trafia tam.
+        out_dir:      folder wyników z kośćmi (None = DATA_OUT); strona trafia tam.
         open_browser: otwórz stronę po zapisie (o ile pozwala OPEN_BROWSER z settings.json).
+        method:       metoda (None = z settings.json).
+        last:         ostatni przebieg (matching.json) zamiast zapisu metody.
 
     Returns:
         Ścieżka zapisanej strony.
 
     Raises:
-        SystemExit: brak matching.json albo kości z niego (komunikat mówi, co zrobić).
+        SystemExit: brak wyniku albo kości z niego (komunikat mówi, co zrobić).
     """
     import config
 
-    state = _load(out_dir)
-    page = matching_page(state, Path(out_dir or config.DATA_OUT) / "matching.html",
+    state = _load(out_dir, method, last)
+    name = "matching.html" if state.path.parent == Path(out_dir or config.DATA_OUT) else f"matching_{state.method}.html"
+    page = matching_page(state, Path(out_dir or config.DATA_OUT) / name,
                          open_browser=config.OPEN_BROWSER and open_browser)
     print(f"Zapisano {page}")
     return page
 
 
-def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | None = None) -> None:
+def serve(port: int | None = None, open_browser: bool = True, out_dir: Path | None = None,
+          method: str | None = None, last: bool = False) -> None:
     """Uruchamia podgląd i czeka (Ctrl+C kończy). Serwer słucha tylko na 127.0.0.1.
 
     Args:
         port:         port serwera (None = MATCH_TOOL_PORT z settings.json, "matching" -> "port").
         open_browser: otwórz stronę w przeglądarce po starcie.
-        out_dir:      folder wyników z matching.json i kośćmi (None = DATA_OUT).
+        out_dir:      folder wyników z kośćmi (None = DATA_OUT).
+        method:       metoda (None = z settings.json).
+        last:         ostatni przebieg (matching.json) zamiast zapisu metody.
 
     Raises:
-        SystemExit: brak matching.json / kości albo port zajęty (komunikat mówi, co zrobić).
+        SystemExit: brak wyniku / kości albo port zajęty (komunikat mówi, co zrobić).
     """
     import config
 
     port = port or config.MATCH_TOOL_PORT
-    state = _load(out_dir)
+    state = _load(out_dir, method, last)
     try:
         server = LocalServer(("127.0.0.1", port), make_handler(state))
     except OSError:
         raise SystemExit(f"Port {port} jest zajęty - może podgląd już działa w innym oknie? "
                          f"Inny port: python scripts/tune_matching.py --port {port + 1}") from None
+    threading.Thread(target=state.warm, daemon=True).start()   # siatki do pokazania liczą się już teraz
     url = f"http://127.0.0.1:{port}/"
     print(f"Podgląd dopasowania z suwakami: {url}")
     print(f"Pary: {len(state.report['pairs'])}, kości: {len(state.bones)}. Nic nie jest zapisywane.")

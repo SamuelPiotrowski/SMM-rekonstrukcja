@@ -85,7 +85,7 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -101,7 +101,7 @@ from data_parsing import compute_fpfh, load_mesh, repair_mesh, sample_surface, s
 reg = o3d.pipelines.registration
 
 INDEX_FORMAT = "bones-smm-atlas/1"
-MATCH_FORMAT = "bones-smm-atlas-match/1"
+MATCH_FORMAT = "bones-smm-atlas-match/2"
 MODEL_EXTENSIONS = ("ply", "obj", "stl")     # kolejność = pierwszeństwo, gdy model jest w kilku formatach
 MIRROR = np.array([-1.0, 1.0, 1.0])          # odbicie lustrzane (druga strona ciała): x -> -x
 SI_BINS = 10                                 # przedziały indeksu kształtu w [-1, 1]
@@ -117,6 +117,9 @@ MAX_POINTS = 300000                          # najwięcej zapisanych punktów mo
 CLOUD_CACHE = 12                             # ile chmur FPFH (model x skala x odbicie) trzymać w pamięci
 EVIDENCE_EPS = 0.05                          # dowód z atlasu w [-log(1.05/0.05), +...] ~ [-3, 3]
 LOCAL_CLIP = 4.0                             # głos analizy lokalnej (szorstkość itd.) najwyżej +-4 log-szans
+COARSE_ALONG = 100                           # RANSAC: najwyżej tyle odstępów punktów na długość fragmentu (dłuższy = rzadziej)
+SHARED_MIN_P = 0.5                           # wspólna skala: tylko fragmenty, dla których model ma p >= tyle
+SHARED_MIN_AGREE = 0.6                       # one_person = "auto": wspólna skala, gdy tyle wagi głosów leży w ±tolerancji
 UNKNOWN = "żadna z bazy"
 # Ustawienia, które zmieniają tylko łączenie wyników (nie dopasowanie) - bez liczenia dopasowania od nowa.
 FUSION_ONLY = ("atlas_weight", "min_confidence")
@@ -130,6 +133,9 @@ class AtlasParams:
     reference_scale: float = 1.0       # ile a.u. skanu to 1 jednostka modelu (model w mm, skan w a.u. ~ mm -> 1)
     scale_range: tuple = (0.75, 1.35)  # dopuszczalna skala względem reference_scale (różnice osobnicze, skaner)
     mirror: bool = True                # sprawdzaj też odbicie lustrzane modelu (druga strona ciała)
+    model_scales: dict = field(default_factory=dict)  # {id modelu: skala} wspólna dla zestawu (shared_scales)
+    one_person: object = "auto"        # zestaw od jednej osoby: true / false / "auto" (= gdy skale fragmentów się zgadzają)
+    shared_scale_tolerance: float = 0.1  # ... model z wpisem: skala tylko w zakresie +- tyle (0.1 = 10%)
     # sito własności (przed RANSAC)
     curvature_radius_au: float = 2.5   # promień liczenia krzywizn [a.u.]
     size_tolerance: float = 0.15       # zapas na różnice osobnicze w rozmiarze i polu (0.15 = 15%)
@@ -813,6 +819,14 @@ def prepare_fragment(bone, cp, p: AtlasParams, sfp) -> Fragment:
 # SITO WŁASNOŚCI
 # -----------------
 
+def scale_bounds(p: AtlasParams, model_id: str) -> tuple[float, float]:
+    """Zakres skali modelu: wspólna skala zestawu +- shared_scale_tolerance, inaczej reference_scale x scale_range."""
+    s = p.model_scales.get(model_id)
+    if s:
+        return s * (1 - p.shared_scale_tolerance), s * (1 + p.shared_scale_tolerance)
+    return p.reference_scale * p.scale_range[0], p.reference_scale * p.scale_range[1]
+
+
 def screen(frag: Fragment, atlas: Atlas, p: AtlasParams) -> list[dict]:
     """Sito własności (opis: docstring modułu, krok 1) - które modele w ogóle warto dopasowywać.
 
@@ -821,11 +835,11 @@ def screen(frag: Fragment, atlas: Atlas, p: AtlasParams) -> list[dict]:
         "status": "ok" | "za mała" | "inny kształt" | "poza limitem", "unexplained": najmniejsza
         niewyjaśniona część kory, "scales": skale do sprawdzenia, "reason": opis}.
     """
-    lo, hi = p.reference_scale * p.scale_range[0], p.reference_scale * p.scale_range[1]
     total = float(frag.hist.sum())
     hf = frag.hist / total if total > 0 else None
     out = []
     for m in atlas.models:
+        lo, hi = scale_bounds(p, m.id)
         e = {"model": m.id, "name": m.name, "scales": [], "unexplained": 1.0}
         s_len = frag.length / (m.length * (1 + p.size_tolerance))
         s_area = math.sqrt(frag.cortex_area / m.area) / (1 + p.size_tolerance)
@@ -1091,17 +1105,26 @@ def match_fragment(bone, atlas: Atlas, p: AtlasParams, cp, sfp, log: Callable | 
     t0 = time.perf_counter()
     frag = prepare_fragment(bone, cp, p, sfp)
     scr = screen(frag, atlas, p)
-    lo, hi = p.reference_scale * p.scale_range[0], p.reference_scale * p.scale_range[1]
-    s_bounds = (lo / 1.1, hi * 1.1)
+    # długi fragment (np. cała kość): rzadsze punkty i większa tolerancja RANSAC - kość innej osoby różni
+    # się kształtem tym bardziej, im dalej od siebie są punkty, więc trójki punktów nie zgadzają się co do 1 a.u.
+    voxel = max(p.voxel_au, frag.length / COARSE_ALONG)
+    pr = p
+    if voxel > 1.05 * p.voxel_au:
+        pr = replace(p, voxel_au=voxel, fpfh_radius_au=p.fpfh_radius_au * voxel / p.voxel_au)
+        cs = sample_surface(bone.mesh, voxel)
+        frag.coarse = to_cloud(cs.points, cs.normals)
+        frag.coarse_fpfh = compute_fpfh(frag.coarse, pr.fpfh_radius_au)
     cands = []
     for e in [e for e in scr if e["status"] == "ok"]:
         model = atlas.get(e["model"])
+        lo, hi = scale_bounds(p, model.id)
+        s_bounds = (lo, hi) if p.model_scales.get(model.id) else (lo / 1.1, hi * 1.1)
         for mirror in ((False, True) if p.mirror else (False,)):
             best = None
             for s in e["scales"]:
-                cloud, fpfh = atlas.cloud(model, s, mirror, p)
+                cloud, fpfh = atlas.cloud(model, s, mirror, pr)
                 for seed in range(p.ransac_seeds):
-                    T = _ransac(frag, cloud, fpfh, p, seed)
+                    T = _ransac(frag, cloud, fpfh, pr, seed)
                     R0 = T[:3, :3]
                     pose = Pose(s, R0.T, -R0.T @ T[:3, 3])        # fragment -> model w skali s  =>  model -> fragment
                     pose = refine_pose(frag, model, mirror, pose, p, s_bounds)
@@ -1130,6 +1153,53 @@ def match_fragment(bone, atlas: Atlas, p: AtlasParams, cp, sfp, log: Callable | 
         ev.append(np.log((fracture + EVIDENCE_EPS) / (cortex + EVIDENCE_EPS)).astype(np.float16))
     return AtlasMatch(bone.id, cands, p_unknown, scr, ev, frag.local_score, frag.cavity, frag.local_logit,
                       len(atlas.models), time.perf_counter() - t0)
+
+
+def fragment_length(mesh) -> float:
+    """Długość fragmentu wzdłuż głównej osi (PCA wierzchołków) [a.u.]."""
+    v = np.asarray(mesh.vertices)
+    c = v.mean(axis=0)
+    _, _, vt = np.linalg.svd(v - c, full_matrices=False)
+    return float(np.ptp((v - c) @ vt[0]))
+
+
+def shared_scales(items: list[tuple], p: AtlasParams) -> dict[str, dict]:
+    """Wspólna skala każdego modelu dla zestawu - fragmenty jednej osoby mają tę samą skalę względem modelu.
+
+    Każdy fragment, dla którego model (obie strony razem) ma p >= SHARED_MIN_P i ocenę >= min_fit, głosuje
+    skalą swojej lepszej strony z wagą p x ocena x długość fragmentu (długi fragment = pewniejsza skala).
+    Wynik = mediana ważona (odporna na fragmenty położone na modelu w złym miejscu).
+
+    Args:
+        items: [(AtlasMatch, długość fragmentu [a.u.], nazwa fragmentu)].
+        p:     ustawienia (min_fit, shared_scale_tolerance).
+
+    Returns:
+        {id modelu: {"scale": skala, "name": nazwa modelu, "votes": [(nazwa fragmentu, skala, waga)],
+                     "outliers": [(nazwa fragmentu, skala)] - poza zakresem +- shared_scale_tolerance,
+                     "agree": część wagi głosów w tym zakresie (1 = wszystkie fragmenty zgodne)}}.
+    """
+    votes: dict[str, list] = {}
+    names: dict[str, str] = {}
+    for m, length, label in items:
+        per_model: dict[str, list] = {}
+        for c in m.candidates:
+            per_model.setdefault(c["model"], []).append(c)
+        for mid, cs in per_model.items():
+            best = max(cs, key=lambda c: c["p"])
+            if sum(c["p"] for c in cs) >= SHARED_MIN_P and best["fit"] >= p.min_fit:
+                votes.setdefault(mid, []).append((label, float(best["scale"]), best["p"] * best["fit"] * length))
+                names[mid] = best["name"]
+    out = {}
+    for mid, vs in votes.items():
+        vs.sort(key=lambda v: v[1])
+        w = np.cumsum([v[2] for v in vs])
+        s = vs[int(np.searchsorted(w, w[-1] / 2))][1]
+        inside = [wt for _, sc, wt in vs if abs(sc / s - 1) <= p.shared_scale_tolerance]
+        out[mid] = {"scale": round(s, 4), "name": names[mid], "votes": vs,
+                    "outliers": [(lbl, sc) for lbl, sc, _ in vs if abs(sc / s - 1) > p.shared_scale_tolerance],
+                    "agree": round(sum(inside) / max(w[-1], 1e-12), 3)}
+    return out
 
 
 def _match_tag(bone, atlas: Atlas, p: AtlasParams, cp, sfp) -> str:

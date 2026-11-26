@@ -127,6 +127,7 @@ _paths = SETTINGS.get("paths", {})
 SCANS_ROOT = ROOT / _paths.get("data_in", "scanned_bones")    # skany, podfolder na każdy zestaw
 OUT_ROOT = ROOT / _paths.get("data_out", "out/3d")            # wyniki, podfolder na każdy zestaw
 CONTACTS_ROOT = ROOT / _paths.get("contacts", "contacts")     # oznaczenia styku, podfolder na każdy zestaw
+PRESENTATIONS_ROOT = ROOT / _paths.get("presentations", "raporty/prezentacje")  # presentation.py, podfolder na zestaw
 # Pliki skanów - po nich list_datasets rozpoznaje zestaw.
 SCAN_EXTENSIONS = (".ply", ".obj", ".stl")
 
@@ -218,6 +219,29 @@ def use_dataset(name: str | None = None, check: bool = True) -> str:
     own = data_in / DATASET_SETTINGS_NAME
     DATASET_SETTINGS = load_settings(own) if name and own.is_file() else {}
     return name
+
+
+def save_dataset_settings(section: str, values: dict) -> Path:
+    """Zapisuje klucze sekcji w ustawieniach bieżącego zestawu (DATA_IN/settings.json), resztę zostawia.
+
+    Plik zapisywany jest jako JSON bez komentarzy - gdy miał komentarze //, poprzednia wersja
+    zostaje obok jako settings.json.bak. Po zapisie wywołaj use_dataset(DATASET), żeby je wczytać.
+
+    Args:
+        section: nazwa sekcji, np. "atlas".
+        values:  {klucz: wartość} do wpisania (nadpisują te same klucze).
+
+    Returns:
+        Ścieżka zapisanego pliku.
+    """
+    path = DATA_IN / DATASET_SETTINGS_NAME
+    data = load_settings(path) if path.is_file() else {}
+    if path.is_file() and "//" in path.read_text(encoding="utf-8"):
+        path.with_suffix(".json.bak").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    data.setdefault(section, {}).update(values)
+    DATA_IN.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
 
 
 def add_dataset_argument(parser) -> None:
@@ -449,6 +473,19 @@ def atlas_params():
     """
     from atlas import AtlasParams
     return _section("atlas", AtlasParams)
+
+
+def presentation_params():
+    """Prezentacja (scripts/presentation.py): sekcja "presentation" settings.json.
+
+    Returns:
+        presentation.PresentationParams (brakujące klucze = wartości domyślne).
+
+    Raises:
+        SystemExit: nieznany klucz w sekcji (patrz _section).
+    """
+    from presentation import PresentationParams
+    return _section("presentation", PresentationParams)
 
 
 def view3d_params():

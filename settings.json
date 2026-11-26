@@ -12,7 +12,7 @@
   // Zestaw może mieć własne ustawienia: scanned_bones/<zestaw>/settings.json - te same sekcje co tu,
   // nadpisują tylko podane klucze (np. {"merging": {"enabled": false}}).
   // -----------------
-  "dataset": "grzesiu",
+  "dataset": "grzesiu_test",
 
   // -----------------
   // Foldery (względem głównego folderu projektu) - w każdym z nich podfoldery zestawów
@@ -21,6 +21,7 @@
     "data_in": "scanned_bones",   // surowe skany (.ply/.obj/.stl): <zestaw>/<kość>/<plik skanu>
     "data_out": "out/3d",         // wyniki - generowane, można je usunąć i policzyć od nowa
     "contacts": "contacts",       // powierzchnie styku: ręczne (commituj!) + podfolder auto/ (generowane)
+    "presentations": "raporty/prezentacje",  // prezentacje (scripts/presentation.py), podfolder na każdy zestaw
     // Atlas anatomiczny (sekcja "atlas") - wspólny dla wszystkich zestawów:
     "atlas": "atlas",             // pliki modeli KOMPLETNYCH kości (.ply/.obj/.stl) - potrzebne tylko do zindeksowania
     "atlas_index": "atlas_index"  // zindeksowana baza (~1 MB na kość) - z niej korzysta wykrywanie; oryginały można usunąć
@@ -48,7 +49,7 @@
   // Po zmianie uruchom ponownie prepare_data.py (wyniki par są w cache, więc szybko).
   // -----------------
   "merging": {
-    "enabled": true,            // false = każdy skan to osobna kość
+    "enabled": false,            // false = każdy skan to osobna kość
 
     // Dwa skany = ta sama kość, gdy co najmniej taka część mniejszego leży na drugim
     // (bliżej niż tolerance_au, normalne w tę samą stronę). Różne fragmenty: ~0.05-0.16,
@@ -118,6 +119,27 @@
     "feature_smooth_au": 1.0,   // uśrednianie wyniku w tym promieniu przed progiem [a.u.] (0 = bez)
     "feature_open_au": 1.0,     // otwarcie morfologiczne [a.u.]: rozcina wąskie mostki między obszarami (więcej = więcej kawałków)
 
+    // Po KAŻDYM algorytmie (contacts.refine_surfaces):
+    //   1. kość długa (fragment co najmniej long_min_elongation razy dłuższy niż szerszy): powierzchnia sięgająca
+    //      obu połówek fragmentu = dwa przełomy połączone pasem kory -> dzielona na dwie (split_ends),
+    //   2. każdą powierzchnię przybliża płaszczyzna ("plane") albo funkcja kwadratowa ("quadric"); na kości długiej
+    //      liczą się głównie punkty patrzące wzdłuż osi (twarz przełomu), a nie kora z boku,
+    //   3. zostają tylko punkty bliżej przybliżenia niż fit_tolerance_au - rękaw kory wzdłuż kości odpada.
+    // Opis przybliżenia każdej powierzchni (normalna, odchylenie od płaszczyzny) trafia do wyniku ("info" -> "fits").
+    "surface_fit": "plane",     // "plane" / "quadric" / "none" (= bez przybliżenia i odcinania)
+    "split_ends": true,
+    "fit_tolerance_au": 3.0,    // [a.u.]; więcej = zostaje więcej kory przy końcu, mniej = ryzyko obcięcia nierównego przełomu
+    "long_min_elongation": 2.5,
+    //   4. GŁOWA KOŚCI: koniec, przy którym fragment jest szerszy niż trzon (promień skrajnych 12% długości / promień
+    //      środka >= head_min_ratio), to nasada / głowa - obszary od head_zone do tego końca odpadają.
+    //      Przełom trzonu zwęża fragment (grzesiu_test: 0.5-0.85), głowy 1.2-1.4. 0 = bez.
+    "head_min_ratio": 1.1,
+    "head_zone": 0.3,
+    //   5. OSTRE KRAWĘDZIE KORY: obszar z normalnymi w bok (średnie |n . oś| < crest_max_axial) i prawie płaski
+    //      (odchylenie od płaszczyzny < crest_max_rms_au) to grzebień / krawędź wzdłuż trzonu, nie przełom. 0 = bez.
+    "crest_max_axial": 0.2,
+    "crest_max_rms_au": 0.35,
+
     // Kości, dla których algorytm NIE liczy powierzchni styku (np. całe, nieprzełamane kości):
     // id albo nazwa zawiera któryś z tekstów (bez wielkości liter i polskich znaków, spacja = "_").
     // Ręczne oznaczenia tych kości nadal działają. Osobno dla zestawu: scanned_bones/<zestaw>/settings.json.
@@ -137,6 +159,14 @@
     "reference_scale": 1.0,     // ile a.u. skanu to 1 jednostka modelu (model w mm, skan w a.u. ~ mm -> 1)
     "scale_range": [0.75, 1.35],// dopuszczalna skala względem reference_scale (różnice osobnicze, kalibracja skanera)
     "mirror": true,             // sprawdzaj też odbicie lustrzane modelu (kość z drugiej strony ciała)
+    // Wspólna skala zestawu: fragmenty jednej osoby mają tę samą skalę względem modelu. Liczy ją
+    // python scripts/identify_bones.py (mediana), a z --shared-scale zapisuje jako "model_scales"
+    // w scanned_bones/<zestaw>/settings.json - wtedy skala modelu tylko w zakresie ± shared_scale_tolerance.
+    "shared_scale_tolerance": 0.1,
+    // Czy zestaw jest od jednej osoby: true = zawsze wspólna skala, false = nigdy (każdy fragment swoją),
+    // "auto" = nie wiadomo: wspólna skala tylko, gdy fragmenty się co do niej zgadzają (60% wagi w ±10%).
+    // Ustawia ją python scripts/identify_bones.py (osobno dla zestawu: scanned_bones/<zestaw>/settings.json).
+    "one_person": "auto",
 
     // Sito własności - PRZED dopasowaniem wyklucza kości, które na pewno nie pasują (rozmiar, krzywizny)
     "curvature_radius_au": 2.5, // promień liczenia krzywizn [a.u.] (zmiana = baza liczona od nowa)
@@ -183,6 +213,10 @@
     // Jednorazowo: python scripts/match_surfaces.py --source auto
     "source": "auto",
     "min_area_au2": 20.0,       // mniejsze powierzchnie styku są pomijane [a.u.²]
+    // Wynik pary: "dice" = (styk - kolizja) / średnie pole obu przełomów [%] - jaka część OBU przełomów do siebie
+    // przylega (część, która nic nie dotyka, obniża wynik; duże fragmenty nie wygrywają samym polem),
+    // "area" = styk - kolizja [a.u.²] (dawny wynik - rośnie z wielkością przełomów)
+    "score_mode": "dice",
 
     // Punkty i deskryptory
     "sample_au": 0.3,           // odstęp punktów powierzchni (do ICP) [a.u.]; mniej = dokładniej, wolniej
@@ -211,9 +245,74 @@
     "use_atlas": true,
     "atlas_skip_different": 0.95, // POMIŃ parę, gdy atlas daje tyle szans, że to RÓŻNE kości (> 1 = nie pomijaj)
     "atlas_starts": 2,          // START: najwięcej ustawień startowych z atlasu na parę (fragmenty na wspólnym modelu); 0 = bez
-    "atlas_icp_start_au": 6.0,  // ... ICP z takiego startu szuka najpierw tak daleko (start jest przybliżony) [a.u.]
-    "atlas_enough_cover": 0.35, // ... gdy start z atlasu pokrył OBIE powierzchnie co najmniej w tylu - bez RANSAC (> 1 = zawsze RANSAC)
     "atlas_boost": 0.25,        // PREMIA: styk liczy się o tyle mocniej, gdy to na pewno ta sama kość (0 = bez premii)
+
+    // Płaskie cięcia: koniec spiłowany / przecięty piłą jest prawie płaski, przełom nierówny. Powierzchnia, której punkty
+    // odchylają się od płaszczyzny średnio mniej niż to, NIE jest dopasowywana (dwa płaskie cięcia zawsze do siebie pasują).
+    // Odchylenie każdej powierzchni wypisuje match_surfaces.py; 0 = nie pomijaj [a.u.]
+    "flat_max_rms_au": 0.0,
+
+    // Tryb dopasowania: "points" = RANSAC + ICP na punktach przełomów; "plane" = do testów: same przybliżenia
+    // płaszczyzną (płaszczyzna na płaszczyźnie, obrót co 360°/plane_steps, styk = wspólna część obrysów)
+    "mode": "points",
+    "plane_steps": 36,
+
+    // Proponowane złożenie: tylko pary z wynikiem co najmniej tyle (słabszych nie wciska na siłę - przełom zostaje
+    // bez pary, np. gdy brakuje kawałka pomiędzy) [jednostka wyniku: % przy "dice"]
+    "assembly_min_score": 10.0,
+    // ... i (jak w OSTEOFORM) pokrycie KAŻDEJ strony co najmniej tyle, kolizja najwyżej taka część styku
+    "assembly_min_cover": 0.2,
+    "assembly_max_collision": 0.25,
+    // Składanie CAŁYCH GRUP (jak w OSTEOFORM): wiązka tylu częściowych złożeń; dołączana grupa jest przenoszona sztywno,
+    // a połączenie odpada, gdy dwa fragmenty łączonych grup wchodzą w siebie (część punktów) bardziej niż
+    // assembly_max_penetration. 0 = zachłannie, para po parze, bez sprawdzania całych grup.
+    "assembly_beam": 12,
+    "assembly_max_penetration": 0.06,
+
+    // Starty płaszczyzna na płaszczyźnie (jak w OSTEOFORM): środki przybliżeń przełomów razem, normalne przeciwne,
+    // obrót co 360°/plane_starts; plane_starts_keep najlepszych idzie do ICP (obok startów wzdłuż osi i RANSAC). 0 = bez
+    "plane_starts": 24,
+    "plane_starts_keep": 3,
+    // Jakość (jak w OSTEOFORM): styk x 1/(1 + RMSE/tolerance_au) x exp(-kąt normalnych/45°) - ciasne dopasowanie wygrywa
+    "quality_factor": true,
+    // Pomiń pary, których pola przełomów różnią się więcej niż tyle razy (OSTEOFORM: 4); 0 = bez
+    "max_area_ratio": 5.0,
+
+    // Kości długie: kawałki trzonu łączą się KONIEC DO KOŃCA, wzdłuż jednej osi (nie pod kątem, nie koniec do boku).
+    // Dotyczy par, w których OBA fragmenty są wydłużone (oś = kierunek, w którym fragment jest najdłuższy).
+    "axis_check": true,
+    "axis_min_elongation": 2.5, // fragment wydłużony = co najmniej tyle razy dłuższy niż szerszy
+    "axis_max_deg": 8.0,        // OCENA: osie rozchodzą się do tylu stopni bez kary; przy 2x tyle styk się już nie liczy (20 przepuszczało złożenia pod kątem)
+    "axis_max_offset": 1.0,     // ... osie rozsunięte w miejscu styku do tylu promieni kości bez kary (koniec do boku ~ 2)
+    "axis_starts": 12,          // START: koniec do końca wzdłuż osi, obrót wokół osi co 360°/tyle (12 = co 30°); 0 = bez
+    // PROSTOWANIE: najlepsze ustawienie pary kości długich jest prostowane (oś A na osi B, osie liczone przy przełomach -
+    // głowa kości i wygięcie nie przekrzywiają osi) i dociskane ICP, w którym wolno tylko obracać wokół osi i przesuwać.
+    // Wygrywa, jeśli ma lepszy wynik.
+    "axis_lock": true,
+    // OŚ JAKO WARUNEK SZUKANIA (nie tylko oceny): dla pary kości długich KAŻDY start (siatka ustawień na wprost,
+    // starty wzdłuż osi, płaszczyzny, RANSAC) jest prostowany i dociskany ICP z obrotem tylko wokół wspólnej osi;
+    // potem mały zwykły ICP, przyjęty tylko przy kącie osi <= axis_max_deg. false = oś tylko w ocenie.
+    "axis_constrain": true,
+    "constrain_grid_keep": 8,   // ... z siatki ustawień na wprost tyle najlepszych idzie do ICP
+    "constrain_twist_deg": 15.0, // ... siatka: obrót wokół osi co tyle [stopnie]
+    "constrain_step_au": 3.0,   // ... siatka: przesunięcie wzdłuż osi co tyle [a.u.]
+    "constrain_ransac": false,  // ... dodatkowo RANSAC (szuka bez osi, wolny) - niepotrzebny przy osi jako warunku
+    // Ocena kości długich: "contact" = ścisły styk przełomów (tolerance_au); "gap" = ODPORNA NA SZCZELINĘ:
+    // osie w linii, A przedłuża B, szukane tylko obrót wokół osi i przesunięcie wzdłuż niej; wynik =
+    // 0.5 x BLISKOŚĆ przełomów (bliżej niż gap_au) + 0.5 x CIĄGŁOŚĆ KORY (kora A przy przełomie na przedłużeniu
+    // kory B: bliżej jej płaszczyzny niż continuity_au, normalne zgodne), minus kolizja.
+    // Na grzesiu_test prawdziwe przełomy nawet w dobrym złożeniu są 2-3 a.u. od siebie - ścisły styk ich nie widzi.
+    "long_mode": "contact",
+    "gap_au": 2.5,              // przełomy bliżej niż to = blisko [a.u.]
+    "rim_au": 6.0,              // kora przy przełomie = do tylu a.u. od niego
+    "continuity_au": 0.8,       // kora A na przedłużeniu kory B = bliżej jej płaszczyzny stycznej niż to [a.u.]
+    "gap_twist_deg": 15.0,      // szukanie: krok obrotu wokół osi [stopnie]
+    "gap_shift_au": [-30.0, 15.0], // szukanie: przesunięcie wzdłuż osi (ujemne = końce zachodzą na siebie, spirala) [a.u.]
+    "gap_step_au": 2.0,         // szukanie: krok przesunięcia [a.u.]
+
+    // Starty z atlasu i wzdłuż osi (dokładane do RANSAC)
+    "start_icp_au": 6.0,        // ICP z takiego startu szuka najpierw tak daleko (start jest przybliżony) [a.u.]
+    "start_enough_cover": 0.35, // gdy start pokrył OBIE powierzchnie co najmniej w tylu (i osie się zgadzają) - bez RANSAC (> 1 = zawsze RANSAC)
 
     "max_shown": 15,            // ile najlepszych par pokazać w 3D (tune_matching.py --html -> matching.html)
 
@@ -263,6 +362,19 @@
     // Gotowe układy: python scripts/make_synthetic.py --preset chip
     "layout": [],
     "seed": 0                   // ziarno losowania: to samo = ten sam zestaw
+  },
+
+  // -----------------
+  // Prezentacja jednej metody - scripts/presentation.py (src/presentation.py)
+  // -----------------
+  "presentation": {
+    // Które kroki ma strona (jednorazowo: --steps powierzchnie porownanie):
+    //   "dane"         = skany -> kości (prepare_data.py),
+    //   "powierzchnie" = kości z powierzchniami styku metody,
+    //   "porownanie"   = algorytm vs ręczne oznaczenia (IoU / precyzja / czułość),
+    //   "dopasowanie"  = dopasowanie końcowe (pary, macierz, złożenie) - wymaga match_surfaces.py.
+    // Bez "dopasowanie" wystarczą powierzchnie (detect_contacts.py), plik: prezentacja_<metoda>_<kroki>.html
+    "steps": ["dane", "powierzchnie", "porownanie", "dopasowanie"]
   },
 
   // -----------------

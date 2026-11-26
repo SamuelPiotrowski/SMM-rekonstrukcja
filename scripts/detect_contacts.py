@@ -92,6 +92,8 @@ def main() -> None:
             scores.append(r)
             line += f"  | vs ręczne: IoU {r['iou']:.2f}, precyzja {r['precision']:.2f}, czułość {r['recall']:.2f}"
         print(line)
+        for d in found.info.get("dropped", []):     # odrzucone po algorytmie: głowa kości, ostra krawędź kory
+            print(f"      odrzucone {d['area_au2']:.0f} a.u.² (miejsce {d['pos']:+.2f}): {d['why']}")
         if found.info.get("atlas"):     # algorytm "atlas": z której kości z bazy pochodzi fragment
             import atlas
             for text in atlas.summary_lines(found.info["atlas"]):

@@ -765,7 +765,7 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
         allp = np.vstack(pts)
         boxes.append((allp.min(axis=0), allp.max(axis=0)))
         notes.append("<br>".join([
-            f"<b>{n + 1}. miejsce</b>   wynik: <b>{r['score']:.0f}</b> a.u.²",
+            f"<b>{n + 1}. miejsce</b>   wynik: <b>{r['score']:.0f}</b> {r.get('score_unit', 'a.u.²')}",
             f"<span style='color:{MATCH_COLORS['surf_a']}'>■</span> A: {r['a_name']} ({r['a_area_au2']:.0f} a.u.²"
             f"{', ręczna' if r.get('a_manual', True) else ', z algorytmu'})",
             f"<span style='color:{MATCH_COLORS['surf_b']}'>■</span> B: {r['b_name']} ({r['b_area_au2']:.0f} a.u.²"
@@ -773,9 +773,16 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
             f"styk: {r['contact_au2']:.0f} a.u.²  (A pokryte w {r['cover_a']:.0%}, B w {r['cover_b']:.0%})",
             f"RMSE w styku: {r['rmse_au']:.2f} a.u." if r.get("rmse_au") is not None else "RMSE w styku: –",
             f"kolizja kości: {r['collision_au2']:.0f} a.u.²",
-            *([f"atlas: ta sama kość {r['atlas_same']:.0%}, premia +{r['atlas_bonus_au2']:.0f} a.u.², "
-               f"start: {r.get('start', 'RANSAC')}"] if "atlas_same" in r else []),
-            "", "<i>wynik = styk - kolizja" + (" + premia z atlasu" if "atlas_same" in r else "") + "</i>"]))
+            *([f"osie: kąt {r['axis_deg']:.0f}°, rozsunięcie {r['axis_offset']:.1f} promienia "
+               f"-> waga styku {r['axis_weight']:.0%}"] if "axis_deg" in r else []),
+            *([f"atlas: ta sama kość {r['atlas_same']:.0%}, premia +{r.get('atlas_bonus', 0):.0f} "
+               f"{r.get('score_unit', 'a.u.²')}"]
+              if "atlas_same" in r else []),
+            *([f"start: {r['start']}" + ("" if r.get("ransac", True) else " (bez RANSAC)")] if r.get("start") else []),
+            *(["<b>w proponowanym złożeniu</b>"] if r.get("chosen") else []),
+            "", "<i>wynik = (styk" + (" x waga osi" if "axis_deg" in r else "")
+            + (" x premia z atlasu" if "atlas_same" in r else "") + " - kolizja)"
+            + (" / średnie pole obu przełomów" if r.get("score_unit") == "%" else "") + "</i>"]))
 
     def layout_for(k):
         """Zmiany układu (sześcienne osie wokół pary, opis) po wybraniu k-tej pary z listy.
@@ -817,6 +824,78 @@ def matching_figure(results: list[dict], bones: dict[str, Bone], contacts: dict[
     return fig
 
 
+ASSEMBLY_COLORS = ("#6f9fd8", "#e0c9a0", "#9bc53d", "#c58bd8", "#f2b134", "#7fc8c2", "#e8908f", "#b0b8c4")
+
+
+def assembly_figure(report: dict, bones: dict[str, Bone], contacts: dict[str, Contacts],
+                    params: View3DParams = View3DParams()) -> go.Figure | None:
+    """Proponowane złożenie całych grup (matching_surfaces.assemble z wiązką): każda grupa w swoim układzie.
+
+    Grupy (co najmniej 2 kości) leżą obok siebie wzdłuż osi X; kości w kolorach, przełomy użyte w złożeniu
+    na różowo. Pojedyncze kości bez pary są pominięte (wypisane w podpisie).
+
+    Args:
+        report:   matching.json z "assembly" ("groups", "poses", "chosen").
+        bones:    {id kości: Bone}.
+        contacts: {id kości: Contacts} - etykiety, z których wzięto powierzchnie.
+        params:   wygląd (triangles_total, background).
+
+    Returns:
+        Figura albo None, gdy w złożeniu nie ma żadnej grupy z co najmniej 2 kośćmi.
+    """
+    asm = report.get("assembly") or {}
+    groups: dict[int, list[str]] = {}
+    for b, g in asm.get("groups", {}).items():
+        groups.setdefault(int(g), []).append(b)
+    multi = [sorted(m) for m in groups.values() if len(m) >= 2 and all(b in bones for b in m)]
+    if not multi:
+        return None
+    used = {k for pair in asm.get("chosen", []) for k in pair}
+    per_bone = max(4000, params.triangles_total // max(1, sum(len(m) for m in multi)))
+    light = dict(lighting=LIGHTING, lightposition=dict(x=-1e4, y=-2e4, z=3e4))
+    traces, offset, color = [], 0.0, 0
+    for gi, members in enumerate(sorted(multi, key=len, reverse=True), start=1):
+        placed = []
+        for b in members:
+            d = decimate(bones[b].mesh, per_bone)
+            T = np.asarray(asm["poses"][b])
+            v = np.asarray(d.vertices) @ T[:3, :3].T + T[:3, 3]
+            placed.append((b, d, T, v))
+        lo = min(v[:, 0].min() for *_, v in placed)
+        hi = max(v[:, 0].max() for *_, v in placed)
+        shift = np.array([offset - lo, 0, 0])
+        for b, d, T, v in placed:
+            v = v + shift
+            traces.append(go.Mesh3d(x=_f32(v[:, 0]), y=_f32(v[:, 1]), z=_f32(v[:, 2]),
+                                    **_ijk(np.asarray(d.triangles), len(v)),
+                                    color=ASSEMBLY_COLORS[color % len(ASSEMBLY_COLORS)],
+                                    name=f"grupa {gi}: {bones[b].label}", showlegend=True,
+                                    hovertemplate=f"<b>{bones[b].label}</b> (grupa {gi})<extra></extra>", **light))
+            color += 1
+            nrm = np.asarray(d.vertex_normals) @ T[:3, :3].T
+            for k in sorted(used):
+                bid, sid = k.rsplit("#", 1)
+                if bid != b or b not in contacts:
+                    continue
+                q, tri = _surface_overlay(bones[b], contacts[b].labels, int(sid), d, v + 0.04 * nrm)
+                if q is not None:
+                    traces.append(go.Mesh3d(x=_f32(q[:, 0]), y=_f32(q[:, 1]), z=_f32(q[:, 2]), **_ijk(tri, len(q)),
+                                            color=MATCH_COLORS["surf_a"], name=f"przełom {bones[b].label} #{sid}",
+                                            showlegend=False, hovertemplate=f"<b>{k}</b><extra></extra>", **light))
+        offset += (hi - lo) + 20.0
+    single = sorted(b for b, g in asm.get("groups", {}).items() if len(groups.get(int(g), [])) < 2)
+    axis = dict(backgroundcolor="#eef2f5", showticklabels=False, title="")
+    fig = go.Figure(traces)
+    fig.update_layout(paper_bgcolor=params.background, font=FONT, margin=dict(l=0, r=0, t=10, b=0), height=640,
+                      legend=dict(x=0.99, y=0.97, xanchor="right", bgcolor="rgba(255,255,255,0.85)"),
+                      scene=dict(xaxis=axis, yaxis=axis, zaxis=axis, aspectmode="data"),
+                      annotations=[dict(text="bez pary: " + (", ".join(bones[b].label for b in single if b in bones) or "-"),
+                                        x=0.01, y=0.97, xref="paper", yref="paper", showarrow=False, align="left",
+                                        xanchor="left", yanchor="top", bgcolor="rgba(255,255,255,0.88)",
+                                        bordercolor="#c9d2db", borderwidth=1, borderpad=8, font=dict(size=13))])
+    return fig
+
+
 def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> go.Figure:
     """Macierz wyników wszystkich par powierzchni (puste = ta sama kość, × = pominięta przez atlas).
 
@@ -837,17 +916,18 @@ def match_matrix_figure(report: dict, params: View3DParams = View3DParams()) -> 
         m[i, j] = m[j, i] = p["score"]
     labels = [f"{s['bone_label']} · {s['surface']}{'' if s['source'] == 'manual' else ' (algorytm)'}" for s in surfs]
     text = [["" if np.isnan(x) else f"{x:.0f}" for x in row] for row in m]
-    hover = [["–" if np.isnan(x) else f"wynik: {x:.0f} a.u.²" for x in row] for row in m]
+    unit = "%" if report.get("params", {}).get("score_mode", "area") == "dice" else "a.u.²"
+    hover = [["–" if np.isnan(x) else f"wynik: {x:.0f} {unit}" for x in row] for row in m]
     for p in report.get("skipped", []):
         if p["a"] in pos and p["b"] in pos:
             i, j = pos[p["a"]], pos[p["b"]]
             text[i][j] = text[j][i] = "×"
-            hover[i][j] = hover[j][i] = f"pominięta: atlas - różne kości ({p['atlas_diff']:.0%})"
+            hover[i][j] = hover[j][i] = f"pominięta: {p.get('why') or 'atlas - różne kości'}"
     top = np.nanmax(m) if np.isfinite(m).any() else 1.0
     fig = go.Figure(go.Heatmap(
         z=m, x=labels, y=labels, text=text, texttemplate="%{text}", textfont=dict(size=9),
         colorscale=[[0, "#f4f6f8"], [0.5, "#8fb8de"], [1, "#1d4f91"]], zmin=0, zmax=max(top, 1.0),
-        colorbar=dict(title="wynik [a.u.²]"), xgap=1, ygap=1, customdata=hover,
+        colorbar=dict(title=f"wynik [{unit}]"), xgap=1, ygap=1, customdata=hover,
         hovertemplate="%{y}<br>%{x}<br>%{customdata}<extra></extra>"))
     size = max(480, 22 * n + 260)
     fig.update_layout(paper_bgcolor=params.background, plot_bgcolor=params.background, font=FONT,
@@ -872,6 +952,16 @@ p.lead {{ margin: 6px 0 0; color: #6b7b8c; max-width: 980px; line-height: 1.5; }
 section {{ background: #fff; margin: 14px 24px; border-radius: 12px; border: 1px solid #dde3e9; overflow: hidden; }}
 section h2 {{ font-size: 15px; margin: 0; padding: 12px 16px; border-bottom: 1px solid #dde3e9; }}
 section .note {{ font-size: 13px; color: #6b7b8c; padding: 8px 16px 0; margin: 0; }}
+section .html {{ padding: 10px 16px 14px; font-size: 13px; line-height: 1.5; }}
+.todo {{ background: #fff4e5; border: 1px solid #f2b134; border-radius: 10px; padding: 12px 16px; }}
+.todo b {{ color: #a55d00; }} .ok {{ color: #2f7d32; }} .bad {{ color: #b3261e; }} .muted {{ color: #888; }}
+.infobox {{ background: #f3f6f9; border: 1px solid #c9d3dd; border-radius: 10px; padding: 12px 16px; }}
+code {{ background: #eef2f6; border-radius: 5px; padding: 1px 6px; font-family: Consolas, monospace; font-size: 12px; }}
+table.kv {{ border-collapse: collapse; margin: 4px 0 10px; }}
+table.kv td, table.kv th {{ border-bottom: 1px solid #e6ebf0; padding: 3px 10px 3px 0; text-align: left; vertical-align: top; }}
+table.kv th {{ color: #6b7b8c; font-weight: 600; }}
+.grid {{ display: flex; flex-wrap: wrap; gap: 6px 36px; }}
+details summary {{ cursor: pointer; font-weight: 600; }}
 </style>{head}</head><body>
 <header><h1>{title}</h1><p class="lead">{lead}</p></header>
 {sections}
@@ -907,7 +997,7 @@ def _plotly_head(embed: bool) -> str:
     return f'<script src="https://cdn.plot.ly/plotly-{plotly.__version__.split("+")[0]}.min.js"></script>'
 
 
-def write_page(path: Path, title: str, lead: str, sections: list[tuple[str, str, go.Figure]],
+def write_page(path: Path, title: str, lead: str, sections: list[tuple[str, str, go.Figure | str | list]],
                params: View3DParams = View3DParams(), open_browser: bool = False) -> Path:
     """Zapisuje stronę HTML z kilkoma figurami plotly (każda w swojej sekcji z nagłówkiem).
 
@@ -915,7 +1005,8 @@ def write_page(path: Path, title: str, lead: str, sections: list[tuple[str, str,
         path:         plik wynikowy (foldery są tworzone).
         title:        tytuł strony i nagłówek na górze.
         lead:         opis pod tytułem (może zawierać HTML, np. <b>).
-        sections:     [(nagłówek sekcji, opis albo "", figura), ...].
+        sections:     [(nagłówek sekcji, opis albo "", treść), ...]; treść = figura, tekst HTML
+                      albo lista figur i tekstów (po kolei w jednej sekcji).
         params:       wygląd (background, embed_plotly).
         open_browser: otwórz stronę w przeglądarce po zapisie.
 
@@ -923,10 +1014,18 @@ def write_page(path: Path, title: str, lead: str, sections: list[tuple[str, str,
         Ścieżka zapisanego pliku.
     """
     config = dict(displaylogo=False, scrollZoom=True, toImageButtonOptions=dict(format="png", scale=2))
+
+    def part(item) -> str:
+        """Figura -> <div> plotly (z linijką w 3D); tekst = gotowy HTML (np. ramka "przelicz", tabela)."""
+        if isinstance(item, str):
+            return f"<div class='html'>{item}</div>"
+        return item.to_html(full_html=False, include_plotlyjs=False, config=config, post_script=_ruler_post(item))
+
     body = []
-    for heading, note, fig in sections:
-        div = fig.to_html(full_html=False, include_plotlyjs=False, config=config, post_script=_ruler_post(fig))
-        body.append(f"<section><h2>{heading}</h2>" + (f"<p class='note'>{note}</p>" if note else "") + f"{div}</section>")
+    for heading, note, content in sections:
+        items = content if isinstance(content, (list, tuple)) else [content]
+        body.append(f"<section><h2>{heading}</h2>" + (f"<p class='note'>{note}</p>" if note else "")
+                    + "".join(part(x) for x in items) + "</section>")
     html = PAGE.format(title=title, lead=lead, bg=params.background, head=_plotly_head(params.embed_plotly) + _ruler_head(),
                        sections="\n".join(body))
     path = Path(path)

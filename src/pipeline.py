@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -138,7 +139,8 @@ def prepare_all(data_in: Path | None = None, out_dir: Path | None = None, *,
         if orphaned or extra:
             # kości z dysku (jak w każdym innym skrypcie) - odcisk siatki zgadza się z zapisanym w oznaczeniach
             contacts_mod.adopt_renamed(bones_mod.load_bones(out_dir), contacts_dir, extra, log=log)
-    write_merging_report(prepared, pairs, groups, result, merge, out_dir)
+    write_merging_report(prepared, pairs, groups, result, merge, out_dir,
+                         settings={"scans": asdict(scan), "merging": asdict(merge), "features": asdict(features)})
     summary = bones_mod.write_summary(result, out_dir)
     log(f"Gotowe: {len(result)} kości w {out_dir / 'bones'}, tabela: {summary}")
     return result
@@ -169,14 +171,16 @@ def _abandoned_contact_dirs(current: Path) -> list[Path]:
     return out
 
 
-def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path) -> Path:
+def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path, settings: dict | None = None) -> Path:
     """Zapisuje out_dir/merging.json - dane do wizualizacji łączenia (scripts/show_merging.py).
 
     Zawartość:
         "params": {"min_overlap", "tolerance_au"},
         "scans":  [{"id", "label", "path", "bone": id kości, do której trafił skan}],
         "pairs":  [{"a", "b": id skanów, "overlap": nakładanie}],
-        "bones":  [{"id", "label", "scans": [id skanów]}].
+        "bones":  [{"id", "label", "scans": [id skanów]}],
+        "settings": {"scans", "merging", "features": wszystkie użyte ustawienia} - po nich
+                  scripts/presentation.py sprawdza, czy kości są aktualne względem settings.json.
 
     Args:
         prepared: wszystkie skany (merging.prepare_scan).
@@ -185,6 +189,7 @@ def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path) 
         result:   zapisane kości.
         merge:    użyte ustawienia łączenia.
         out_dir:  folder wyników.
+        settings: wszystkie użyte ustawienia ({"scans", "merging", "features"}: asdict) albo None.
 
     Returns:
         Ścieżka do merging.json.
@@ -200,6 +205,7 @@ def write_merging_report(prepared, pairs, groups, result, merge, out_dir: Path) 
         "pairs": [{"a": prepared[i].file.id, "b": prepared[j].file.id, "overlap": round(r["overlap"], 4)}
                   for (i, j), r in sorted(pairs.items())],
         "bones": [{"id": b.id, "label": b.label, "scans": [s["id"] for s in b.meta["scans"]]} for b in result],
+        **({"settings": settings} if settings else {}),
     }
     path = out_dir / "merging.json"
     path.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
