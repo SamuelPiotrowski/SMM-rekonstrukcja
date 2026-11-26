@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Powierzchnie styku</title>
+  <link rel="stylesheet" href="/contact_tool.css">
+  <script type="importmap">{"imports": {"three": "/vendor/three.module.js"}}</script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">◐</span> Powierzchnie styku</div>
+    <div class="bone-title" id="boneTitle">Wczytywanie…</div>
+    <div class="top-actions">
+      <span class="auto-badge" id="autoBadge" hidden title="Oznaczenia z algorytmu, jeszcze nie zapisane jako ręczne">ustawienie automatyczne</span>
+      <span class="dirty" id="dirtyBadge" hidden>niezapisane zmiany</span>
+      <button class="ghost" id="helpBtn" title="Pomoc (H)">? Pomoc</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel left">
+      <div class="panel-head">Kości <span class="muted" id="boneCount"></span></div>
+      <input class="search" id="boneSearch" placeholder="Szukaj…" autocomplete="off">
+      <ul class="bone-list" id="boneList"></ul>
+      <div class="legend-mini">
+        <span><i class="dot done"></i>oznaczona ręcznie</span>
+        <span><i class="dot auto"></i>ustawienie automatyczne</span>
+      </div>
+    </aside>
+
+    <section class="viewport" id="viewport">
+      <canvas id="canvas"></canvas>
+      <div class="loading" id="loading"><div class="spinner"></div><span>Wczytywanie kości…</span></div>
+      <div class="hint" id="hint"></div>
+      <div class="stats" id="stats"></div>
+    </section>
+
+    <aside class="panel right">
+      <div class="section">
+        <div class="section-title">Narzędzie</div>
+        <div class="tools">
+          <button class="tool" data-tool="brush" title="Pędzel (B)"><span>🖌</span>Pędzel<kbd>B</kbd></button>
+          <button class="tool" data-tool="eraser" title="Gumka (E)"><span>⌫</span>Gumka<kbd>E</kbd></button>
+          <button class="tool" data-tool="wand" title="Różdżka (W)"><span>✦</span>Różdżka<kbd>W</kbd></button>
+        </div>
+        <label class="slider" id="brushRow">
+          <span>Promień pędzla <b id="brushVal"></b></span>
+          <input type="range" id="brushSize" min="0.2" max="10" step="0.1">
+        </label>
+        <label class="slider" id="wandRow">
+          <span>Tolerancja różdżki <b id="wandVal"></b></span>
+          <input type="range" id="wandAngle" min="5" max="70" step="1">
+        </label>
+        <p class="tip" id="toolTip"></p>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Powierzchnie styku</div>
+        <div class="auto-note" id="autoNote" hidden></div>
+        <ul class="surface-list" id="surfaceList"></ul>
+        <button class="ghost wide" id="newSurface" title="Nowa powierzchnia (N)">+ Nowa powierzchnia <kbd>N</kbd></button>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Widok</div>
+        <label class="check"><input type="checkbox" id="scanColors" checked> Kolory skanera <kbd>C</kbd></label>
+        <div class="row">
+          <button class="ghost" id="resetView" title="Reset widoku (R)">⟲ Reset widoku</button>
+          <button class="ghost" id="flipView" title="Obróć na drugą stronę (F)">⇋ Druga strona</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="row">
+          <button class="ghost" id="undoBtn" title="Cofnij (Ctrl+Z)">↶ Cofnij</button>
+          <button class="ghost" id="redoBtn" title="Ponów (Ctrl+Y)">↷ Ponów</button>
+          <button class="ghost danger" id="clearBtn" title="Usuń wszystkie oznaczenia tej kości">Wyczyść</button>
+        </div>
+        <button class="ghost wide" id="detectBtn" title="Zastąp oznaczenia propozycją algorytmu (np. żeby zacząć od nowa)">✨ Propozycja algorytmu</button>
+        <button class="primary wide" id="saveBtn" title="Zapisz (Ctrl+S)">Zapisz <kbd>Ctrl+S</kbd></button>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="modal" id="help" hidden>
+    <div class="modal-card">
+      <h2>Jak oznaczać powierzchnie styku</h2>
+      <ol>
+        <li>Wybierz kość z listy po lewej (albo <kbd>PgUp</kbd> / <kbd>PgDn</kbd>).</li>
+        <li>Kość bez ręcznych oznaczeń otwiera się z <b>ustawieniem automatycznym</b> (propozycja
+          algorytmu) - wystarczy je poprawić i zapisać. Dopóki nie zapiszesz, zostaje automatyczne.</li>
+        <li>Obracaj <b>prawym</b> przyciskiem myszy i znajdź przełom.</li>
+        <li><b>Różdżka</b>: kliknij przełom - zaznaczy obszar aż do ostrej krawędzi.
+          Za dużo? <kbd>Ctrl+Z</kbd> i zmniejsz tolerancję.</li>
+        <li><b>Pędzel</b> / <b>Gumka</b>: popraw brzegi lewym przyciskiem.</li>
+        <li>Drugi przełom na tej samej kości = <b>Nowa powierzchnia</b> (każda ma swój kolor).</li>
+        <li><kbd>Ctrl+S</kbd> zapisuje do <code>contacts/&lt;zestaw&gt;/&lt;kość&gt;.json</code>. Przy zmianie kości zmiany zapisują się same
+          (nieruszone ustawienie automatyczne - nie, zapisz je <kbd>Ctrl+S</kbd>, jeśli jest dobre).</li>
+      </ol>
+      <table class="keys">
+        <tr><td>Lewy przycisk</td><td>maluj / zaznacz</td></tr>
+        <tr><td>Prawy przycisk</td><td>obracaj</td></tr>
+        <tr><td>Środkowy / Shift + prawy</td><td>przesuwaj</td></tr>
+        <tr><td>Kółko</td><td>przybliż / oddal</td></tr>
+        <tr><td><kbd>B</kbd> <kbd>E</kbd> <kbd>W</kbd></td><td>pędzel / gumka / różdżka</td></tr>
+        <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>mniejszy / większy pędzel (lub tolerancja różdżki)</td></tr>
+        <tr><td><kbd>1</kbd>…<kbd>9</kbd>, <kbd>N</kbd></td><td>wybór powierzchni, nowa powierzchnia</td></tr>
+        <tr><td><kbd>Ctrl+Z</kbd> <kbd>Ctrl+Y</kbd></td><td>cofnij / ponów</td></tr>
+        <tr><td><kbd>R</kbd> <kbd>F</kbd> <kbd>C</kbd></td><td>reset widoku / druga strona / kolory skanera</td></tr>
+      </table>
+      <button class="primary" id="helpClose">Zaczynamy</button>
+    </div>
+  </div>
+
+  <script type="module" src="/contact_tool.js"></script>
+</body>
+</html>

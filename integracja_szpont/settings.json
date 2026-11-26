@@ -1,0 +1,96 @@
+// Ustawienia projektu - wszystko w jednym miejscu, wczytuje je src/config.py.
+// Składnia JSON: true / false / null małymi literami, tekst w "...", liczby z kropką,
+// bez przecinka po ostatnim elemencie. Komentarze // są dozwolone.
+// Brakujący klucz = wartość domyślna z kodu, więc można usuwać linie, których nie zmieniasz.
+
+{
+  // -----------------
+  // Foldery (względem głównego folderu projektu)
+  // -----------------
+  "paths": {
+    "data_in": "scanned_bones",   // surowe skany (.ply/.obj/.stl), mogą być w podfolderach
+    "data_out": "out/3d",         // wyniki - generowane, można je usunąć i policzyć od nowa
+    "contacts": "contacts"        // ręczne oznaczenia powierzchni styku (praca ręczna - commituj!)
+  },
+
+  // -----------------
+  // Wczytywanie skanów - scripts/prepare_data.py
+  // -----------------
+  "scans": {
+    // Kolejność wyboru formatu, gdy ten sam skan jest w kilku plikach (PLY: najmniejszy, ma kolory).
+    "preferred_formats": ["ply", "obj", "stl"],
+
+    // Pomiń skany, których ścieżka zawiera któryś z tych tekstów (bez wielkości liter).
+    // "occlusion" = skan zgryzu Medit: dwa fragmenty złożone RAZEM - skleiłby dwie kości w jedną.
+    "exclude": ["occlusion"],
+
+    // Oderwany kawałek skanu jest szumem, jeśli jest mniejszy niż ten ułamek największego
+    // albo dalej od niego niż max_component_gap_mm - chyba że potwierdzają go inne skany tej kości.
+    "min_component_area_ratio": 0.05,
+    "max_component_gap_mm": 3.0
+  },
+
+  // -----------------
+  // Łączenie skanów tej samej kości - src/merging.py
+  // Po zmianie uruchom ponownie prepare_data.py (wyniki par są w cache, więc szybko).
+  // -----------------
+  "merging": {
+    "enabled": true,           // false = każdy skan to osobna kość
+
+    // Dwa skany = ta sama kość, gdy co najmniej taka część mniejszego leży na drugim
+    // (bliżej niż tolerance_mm, normalne w tę samą stronę). Różne fragmenty: ~0.05-0.16,
+    // ten sam fragment: ~0.35-0.6.
+    "min_overlap": 0.3,
+    "tolerance_mm": 0.15,
+
+    // Kawałek skanu potwierdzony przez inne skany kości w mniejszej części niż to = szum.
+    "min_support": 0.25,
+
+    // "union"   = skan referencyjny + brakujące miejsca z innych skanów (oryginalna geometria),
+    // "poisson" = jedna gładka powierzchnia (rekonstrukcja Poissona, lekko wygładza).
+    "fuse_method": "union",
+    "poisson_depth": 9,
+
+    "sample_mm": 0.25,         // odstęp punktów do porównywania skanów [mm]
+    "coarse_voxel_mm": 1.0,    // rozdzielczość zgrubnej rejestracji (FPFH + RANSAC) [mm]
+    "ransac_seeds": 3,         // prób zgrubnej rejestracji na parę (więcej = pewniej, wolniej)
+    "ransac_iterations": 50000,
+
+    // null = grupy automatyczne. Ręcznie: {"nazwa kości": ["fragment nazwy skanu", ...]},
+    // np. {"strzalkowa_A": ["first_test-lowerjaw", "matematyczne_6"]}.
+    // Nazwy skanów wypisuje prepare_data.py. Skany spoza listy są grupowane automatycznie.
+    "groups": null
+  },
+
+  // -----------------
+  // Chmura punktów i deskryptory FPFH kości (do dopasowania) - src/bones.py
+  // -----------------
+  "features": {
+    "center": true,             // przesuń kość tak, żeby jej środek był w (0, 0, 0)
+    "voxel_size": 0.5,          // odstęp punktów chmury [mm]
+    "sampling_density": 4,      // punktów losowanych na voxel^2 przed przerzedzeniem
+    "fpfh_radius_factor": 5.0   // promień FPFH = ta liczba x voxel_size (2.5 mm)
+  },
+
+  // -----------------
+  // Powierzchnie styku - scripts/mark_contacts.py (ręcznie) i scripts/detect_contacts.py (algorytm)
+  // -----------------
+  "contacts": {
+    "port": 8765,               // port lokalnego serwera narzędzia do oznaczania
+    "brush_mm": 2.0,            // startowy promień pędzla [mm]
+    "wand_angle_deg": 25,       // startowa tolerancja kąta "różdżki" (zaznacza obszar do ostrej krawędzi)
+    // Algorytm bazowy "roughness" (detect_contacts.py): przełom = szorstka powierzchnia
+    "roughness_radius_mm": 1.0, // promień sąsiedztwa do liczenia szorstkości
+    "rough_threshold": 0.09,    // od tej szorstkości powierzchnia = przełom (kora ~0.04, gąbczasty przełom ~0.15)
+    "min_surface_mm2": 15.0     // mniejsze wykryte obszary są pomijane
+  },
+
+  // -----------------
+  // Wizualizacje 3D (pliki HTML w przeglądarce) - src/visualization_3d.py
+  // -----------------
+  "visualization_3d": {
+    "triangles_total": 240000,  // trójkątów w całym HTML, dzielone między kości (więcej = dokładniej, większy plik)
+    "embed_plotly": true,       // true = działa bez internetu; false = mniejszy plik, wymaga internetu
+    "open_browser": true        // otwórz wynik w przeglądarce
+  }
+}

@@ -1,0 +1,10 @@
+# Biblioteki bezpośrednio używane przez kod (src/, scripts/, tests/).
+# Ich zależności (np. dash i nbformat dla open3d) pip doinstaluje sam.
+
+numpy==2.5.5        # tablice, geometria
+scipy==1.18.1       # KD-drzewa (sąsiedzi punktów), macierze rzadkie, otoczka wypukła
+open3d==0.20.0      # siatki, chmury punktów, FPFH, rejestracja (RANSAC + ICP)
+trimesh==5.2.2      # wczytywanie / zapis .ply .obj .stl (działa ze ścieżkami z polskimi znakami)
+plotly==7.1.0       # interaktywne wizualizacje 3D (HTML)
+Flask==3.1.3       # moduł dopasowania OSTEOFORM V6
+h5py==3.16.0       # zbiory FRACTURA

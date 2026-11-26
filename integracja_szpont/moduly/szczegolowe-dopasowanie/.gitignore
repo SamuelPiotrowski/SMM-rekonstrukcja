@@ -1,0 +1,26 @@
+# venv
+.venv/
+
+# python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# data: skany (duże, każdy trzyma lokalnie) i wyniki (generowane przez scripts/prepare_data.py)
+scanned_bones/
+bone_photos/
+out/
+raporty/prezentacje/
+# pliki modeli kompletnych kości (atlas) - duże; zindeksowana baza atlas_index/ jest mała i może być w repo
+atlas/
+
+# powierzchnie styku (ręczne i auto) - każdy trzyma lokalnie
+contacts/
+
+# sources
+articles/
+
+# system / edytor
+Thumbs.db
+desktop.ini
+.DS_Store

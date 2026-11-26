@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OSTEOFORM · Składanie fragmentów</title>
+  <link rel="stylesheet" href="/contact_tool.css">
+  <script defer src="/case-start.js"></script>
+</head>
+<body class="assembly case-page">
+  <main class="case-start">
+    <header class="case-hero">
+      <div>
+        <p class="product-name">OSTEOFORM</p>
+        <h1>Składanie fragmentów kości</h1>
+      </div>
+      <img class="case-hero-image" src="/case-preview.webp" width="560" height="224" alt="">
+    </header>
+    <div class="case-tabs" role="tablist" aria-label="Obszary robocze">
+      <a href="#nowy-przypadek" id="newCaseTab" role="tab" aria-controls="nowy-przypadek" aria-selected="true">Nowy przypadek</a>
+      <a href="#nasze-skany" id="ourScansTab" role="tab" aria-controls="nasze-skany" aria-selected="false" tabindex="-1">Nasze skany</a>
+      <a href="#szczegolowe-dopasowanie" id="detailedMatchingTab" role="tab" aria-controls="szczegolowe-dopasowanie" aria-selected="false" tabindex="-1">Szczegółowe dopasowanie</a>
+      <a href="#podglad-kosci" id="boneMaterialsTab" role="tab" aria-controls="podglad-kosci" aria-selected="false" tabindex="-1">Podgląd kości</a>
+      <a href="#historia" id="historyTab" role="tab" aria-controls="historia" aria-selected="false" tabindex="-1">Historia skanów</a>
+    </div>
+    <section id="nowy-przypadek" class="case-card intake-card" role="tabpanel" aria-labelledby="newCaseTab">
+      <form id="caseForm" method="post" enctype="multipart/form-data">
+        <div class="intake-layout">
+          <section class="case-fields" aria-labelledby="caseFieldsHeading">
+            <h2 id="caseFieldsHeading">Dane przypadku</h2>
+            <label>Rodzaj zestawu
+              <select name="mode" id="caseMode">
+                <option value="single">Jedna kość</option>
+                <option value="mixed">Wymieszane fragmenty</option>
+                <option value="target">Złóż wybraną kość</option>
+              </select>
+            </label>
+            <label id="scanAnchorLabel" hidden>Fragment odniesienia
+              <select id="scanAnchor" name="anchor" disabled></select>
+              <small>Wskaż odłamek, o którym wiesz, że należy do szukanej kości.</small>
+            </label>
+            <label><span>Nazwa przypadku <span class="muted">(opcjonalnie)</span></span><input name="title" placeholder="np. Żuchwa" maxlength="80"></label>
+            <label>Folder zapisu<select name="folder" id="uploadFolder"><option value="">Bez folderu</option></select></label>
+          </section>
+          <section class="scan-intake" aria-labelledby="scanIntakeHeading">
+            <h2 id="scanIntakeHeading">Skany fragmentów</h2>
+            <label class="drop-zone" id="scanDrop">
+              <input id="scans" type="file" name="scans" accept=".stl,.obj,.ply" aria-describedby="caseLimit" multiple>
+              <span class="upload-symbol" aria-hidden="true">↑</span>
+              <strong>Wybierz pliki</strong>
+              <span>lub przeciągnij je tutaj</span>
+              <small>STL, OBJ, PLY · łącznie do 100 MB</small>
+            </label>
+            <p id="caseLimit">Do złożenia potrzebujesz co najmniej dwóch plików. Możesz też zapisać pojedynczy skan.</p>
+            <div class="selected-files" id="selectedFiles" hidden>
+              <details>
+                <summary id="filesSummary" aria-live="polite"></summary>
+                <ul id="fileList" class="file-list"></ul>
+              </details>
+              <button id="clearFiles" class="ghost" type="button">Wyczyść wybór</button>
+            </div>
+          </section>
+        </div>
+        <div class="case-submit">
+          <button id="solveCase" class="primary" type="submit">Złóż fragmenty</button>
+          <button id="saveCase" class="ghost" type="submit">Zapisz skany</button>
+          <p id="caseMessage" role="status"></p>
+        </div>
+      </form>
+    </section>
+    <section class="case-card case-example" id="nasze-skany" role="tabpanel" aria-labelledby="ourScansTab" hidden>
+      <div class="case-example-row">
+        <div>
+          <h2>Test nr 1 · Kość strzałkowa</h2>
+          <p>Próba kontrolna na czterech odłamkach z pełnego skanu.</p>
+        </div>
+        <div class="library-actions">
+          <a class="library-link" href="/assembly?job=demo-fibula">Odtwórz składanie</a>
+          <a class="library-link" href="/scan-gallery">Obejrzyj skany</a>
+        </div>
+      </div>
+      <div class="case-example-row">
+        <div>
+          <h2>Test nr 2 · Dwie kości strzałkowe</h2>
+          <p>Cztery odłamki ze skanu i siedem z drugiego modelu w jednym zestawie.</p>
+        </div>
+        <a class="library-link" href="/assembly?job=demo-fibula-pair">Pokaż składanie obu kości</a>
+      </div>
+      <div class="case-example-row">
+        <div>
+          <h2>Test nr 3 · Kość strzałkowa i obce odłamki</h2>
+          <p>Wymieszane odłamki strzałkowej i trzonu udowej. Zobacz, które program odłożył i dlaczego.</p>
+        </div>
+        <a class="library-link" href="/assembly?job=demo-fibula-rejection">Pokaż składanie i odrzucenia</a>
+      </div>
+      <div class="case-example-row">
+        <div>
+          <h2>Test nr 4 · Brakujący odłamek</h2>
+          <p>Rekonstrukcja strzałkowej z luką i jednym obcym odłamkiem.</p>
+        </div>
+        <a class="library-link" href="/assembly?job=demo-fibula-gap">Pokaż rekonstrukcję z ubytkiem</a>
+      </div>
+    </section>
+    <section id="szczegolowe-dopasowanie" class="detailed-matching" role="tabpanel" aria-labelledby="detailedMatchingTab" hidden>
+      <a class="library-link" href="/detailed-matching" target="_blank" rel="noopener">Otwórz w pełnym oknie</a>
+      <iframe id="detailedMatchingFrame" data-src="/detailed-matching" title="Szczegółowe dopasowanie fragmentów" allow="clipboard-write"></iframe>
+    </section>
+    <section id="podglad-kosci" class="case-card bone-materials" role="tabpanel" aria-labelledby="boneMaterialsTab" hidden>
+      <p id="boneMaterialsStatus" role="status" hidden></p>
+      <div id="boneReportControls" class="bone-report-controls" hidden>
+        <label>Prezentacja<select id="boneReport"></select></label>
+        <a id="boneReportLink" class="library-link" target="_blank" rel="noopener">Otwórz w pełnym oknie</a>
+      </div>
+      <iframe id="boneReportFrame" title="Prezentacja atlasu kości" sandbox="allow-scripts allow-downloads" hidden></iframe>
+      <details id="bonePhotoSection" hidden>
+        <summary id="bonePhotoSummary">Zdjęcia kości</summary>
+        <div id="bonePhotoGrid" class="bone-photo-grid"></div>
+      </details>
+      <details id="boneFileSection" hidden>
+        <summary>Pliki źródłowe</summary>
+        <div id="boneFileGroups"></div>
+      </details>
+    </section>
+    <section class="case-card case-history" id="historia" role="tabpanel" aria-labelledby="historyTab" hidden>
+      <h2>Foldery i zapisane przypadki</h2>
+      <div class="history-tools">
+        <label>Filtr folderu<select id="historyFolder"><option value="all">Wszystkie przypadki</option></select></label>
+        <form id="folderForm" class="folder-form">
+          <label>Nazwa nowego folderu<input name="name" maxlength="60" required></label>
+          <button type="submit" class="ghost">Utwórz folder</button>
+        </form>
+      </div>
+      <p id="historyMessage" role="status">Wczytuję historię…</p>
+      <ul id="historyCases" class="history-cases"></ul>
+    </section>
+  </main>
+</body>
+</html>

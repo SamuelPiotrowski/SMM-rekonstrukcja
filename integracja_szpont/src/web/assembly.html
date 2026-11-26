@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dopasowanie przełomów</title>
+  <link rel="stylesheet" href="/contact_tool.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>
+  <script defer src="/plotly.js"></script>
+  <script type="module" src="/assembly.js"></script>
+</head>
+<body class="assembly">
+  <main>
+    <header class="assembly-head page-heading">
+      <div>
+        <p class="product-name">OSTEOFORM</p>
+        <h1 id="resultTitle">Dopasowanie przełomów</h1>
+      </div>
+      <nav class="assembly-links" aria-label="Nawigacja przypadku">
+        <a id="libraryLink" class="library-link" href="/case-start">Wróć do przypadków</a>
+        <a id="markLink" class="library-link" href="/">Oznacz przełomy</a>
+        <a id="benchmarkLink" class="library-link" hidden></a>
+        <a id="rejectionLink" class="library-link" href="#rejectionDetails" hidden>Powody odrzuceń</a>
+        <a id="labelledLink" class="library-link" href="/assembly?job=benchmark-labelled" hidden>Test ze wskazanym przełomem</a>
+      </nav>
+    </header>
+    <p id="resultStatus" role="status">Wczytuję wynik…</p>
+    <div id="resultControls" class="assembly-controls" hidden>
+      <div class="result-options" role="group" aria-label="Wybór wyniku">
+        <label id="groupLabel" hidden>Grupa fragmentów<select id="groupSelect"></select></label>
+        <label id="candidateLabel">Wariant dopasowania<select id="candidate"></select></label>
+      </div>
+      <div class="playback-controls" role="group" aria-label="Animacja składania">
+        <button id="play" class="primary">Odtwórz składanie</button>
+        <label class="motion-control">Przebieg składania<input type="range" id="motion" min="0" max="100" value="0"></label>
+        <button id="togglePosition" class="ghost">Pokaż przed złożeniem</button>
+      </div>
+      <div class="view-controls" role="group" aria-label="Widok i eksport">
+        <label id="resultColorsLabel" class="patch-toggle" hidden><input type="checkbox" id="resultColors" aria-controls="scene" checked> Kolory skanu</label>
+        <label class="patch-toggle"><input type="checkbox" id="wireframe" aria-controls="scene" checked> Pokaż siatkę trójkątów</label>
+        <label id="patchesLabel" class="patch-toggle"><input type="checkbox" id="patches" checked> Pokaż przełomy</label>
+        <label id="inspectionLabel" class="patch-toggle" hidden><input type="checkbox" id="inspection" aria-controls="inspectionLegend" aria-describedby="pairExplanation"> Pokaż styk i kolizje</label>
+        <button id="focusAssembly" class="ghost" hidden>Przybliż złożenie</button>
+        <button id="export" class="ghost">Eksportuj macierz JSON</button>
+      </div>
+    </div>
+    <div id="registrationStages" class="registration-stages" hidden>
+      <div class="library-actions" aria-label="Etapy rejestracji Open3D">
+        <button class="ghost" id="registrationStart" type="button">Skany wejściowe</button>
+        <button class="ghost" id="registrationGlobal" type="button">FPFH + RANSAC</button>
+        <button class="ghost" id="registrationRefined" type="button">ICP point-to-plane</button>
+      </div>
+      <p id="registrationStage"></p>
+    </div>
+    <div class="assembly-workspace" id="assemblyWorkspace">
+      <div class="assembly-view">
+        <div id="inspectionLegend" class="inspection-legend" hidden>
+          <span><i class="contact-key" aria-hidden="true"></i> Szacowany styk</span>
+          <span><i class="collision-key" aria-hidden="true"></i> Możliwe przenikanie</span>
+        </div>
+        <div class="assembly-figure">
+          <div id="demoStage" class="demo-stage" hidden>
+            <div>
+              <strong id="demoPhase">Przed złożeniem</strong>
+              <span id="demoStageDetail"></span>
+            </div>
+            <span id="demoProgress" class="demo-progress" aria-hidden="true">0%</span>
+          </div>
+          <div id="scene" class="assembly-scene" aria-label="Modele 3D fragmentów w wybranym widoku"></div>
+          <div id="demoFragments" class="demo-fragments" role="group" aria-label="Wybierz fragment do podglądu" hidden></div>
+        </div>
+      </div>
+      <aside id="scanPanel" class="scan-panel" hidden aria-labelledby="scanHeading">
+        <div class="scan-panel-heading">
+          <h2 id="scanHeading">Podgląd fragmentu</h2>
+          <button id="scanClose" class="ghost" type="button" hidden>Zamknij</button>
+        </div>
+        <label>Fragment<select id="scanFragment"></select></label>
+        <label id="scanSourceLabel" hidden>Ujęcie skanera<select id="scanSource"></select></label>
+        <label id="scanDetailLabel" class="scan-detail" hidden><input type="checkbox" id="scanDetail"> Pełna siatka skanera</label>
+        <p id="scanStatus" role="status">Kliknij fragment w widoku 3D lub wybierz go z listy.</p>
+        <div id="scanScene" class="scan-scene" hidden aria-label="Osobny widok 3D wybranego skanu"></div>
+        <a id="scanDownload" class="library-link scan-download" hidden>Pobierz siatkę źródłową</a>
+      </aside>
+    </div>
+    <dl id="metrics" class="assembly-metrics"></dl>
+    <section id="rejectionDetails" class="pair-details" hidden aria-labelledby="rejectionTitle">
+      <h2 id="rejectionTitle">Dlaczego odłożono te fragmenty?</h2>
+      <p id="rejectionIntro"></p>
+      <ul id="rejectionList" class="rejection-list"></ul>
+    </section>
+    <section id="pairDetails" class="pair-details" hidden aria-labelledby="pairTitle">
+      <h2 id="pairTitle">Analiza końcowego dopasowania</h2>
+      <p id="pairExplanation">Program szacuje, gdzie fragmenty się stykają i gdzie mogą przenikać. Dla otwartych siatek ocena opiera się na lokalnej orientacji powierzchni.</p>
+      <p id="pairNote" class="muted"></p>
+      <div id="pairTable" class="pair-table" role="region" aria-label="Pomiary według par fragmentów" tabindex="0" hidden>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Para fragmentów</th>
+              <th scope="col">Kontakt A / B</th>
+              <th scope="col">Próbki styku</th>
+              <th scope="col">Szczelina (RMSE)</th>
+              <th scope="col">Próbki przenikania</th>
+              <th scope="col">Głębokość (P95)</th>
+            </tr>
+          </thead>
+          <tbody id="pairList"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -24,3 +24,8 @@ articles/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Paczka danych OSTEOFORM
+/OSTEOFORM-dane.zip
+/01_WZORCE_KOSCI/
+/02_FRAGMENTY_ZLAMANE/

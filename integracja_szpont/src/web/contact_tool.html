@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Powierzchnie styku</title>
+  <link rel="stylesheet" href="/contact_tool.css">
+  <script type="importmap">{"imports": {"three": "/vendor/three.module.js"}}</script>
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">Oznaczanie przełomów</h1>
+    <div class="bone-title" id="boneTitle">Wczytywanie…</div>
+    <div class="top-actions">
+      <a class="library-link" href="/case-start">Wróć do przypadków</a>
+      <span class="dirty" id="dirtyBadge" hidden>Niezapisane zmiany</span>
+      <button class="ghost" id="helpBtn" title="Pomoc (H)">Pomoc</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel left" aria-labelledby="fragmentHeading">
+      <div class="panel-head"><h2 id="fragmentHeading">Fragmenty</h2><p class="muted" id="boneCount"></p></div>
+      <input class="search" id="boneSearch" placeholder="Szukaj fragmentu…" aria-label="Szukaj fragmentu" autocomplete="off">
+      <ul class="bone-list" id="boneList"></ul>
+      <div class="legend-mini">
+        <span><i class="dot done"></i>oznaczony</span>
+        <span><i class="dot"></i>bez oznaczeń</span>
+      </div>
+    </aside>
+
+    <section class="viewport" id="viewport">
+      <canvas id="canvas"></canvas>
+      <div class="loading" id="loading"><div class="spinner"></div><span>Wczytuję fragment…</span></div>
+      <div class="hint" id="hint"></div>
+      <div class="stats" id="stats"></div>
+    </section>
+
+    <aside class="panel right">
+      <div class="section">
+        <h2 class="section-title">Narzędzia zaznaczania</h2>
+        <div class="tools">
+          <button class="tool" data-tool="brush" title="Pędzel (B)"><span>🖌</span>Pędzel<kbd>B</kbd></button>
+          <button class="tool" data-tool="eraser" title="Gumka (E)"><span>⌫</span>Gumka<kbd>E</kbd></button>
+          <button class="tool" data-tool="wand" title="Różdżka (W)"><span>✦</span>Różdżka<kbd>W</kbd></button>
+        </div>
+        <label class="slider" id="brushRow">
+          <span>Promień pędzla <b id="brushVal"></b></span>
+          <input type="range" id="brushSize" min="0.2" max="10" step="0.1">
+        </label>
+        <label class="slider" id="wandRow">
+          <span>Tolerancja różdżki <b id="wandVal"></b></span>
+          <input type="range" id="wandAngle" min="5" max="70" step="1">
+        </label>
+        <p class="tip" id="toolTip"></p>
+      </div>
+
+      <div class="section">
+        <h2 class="section-title">Powierzchnie styku</h2>
+        <ul class="surface-list" id="surfaceList"></ul>
+        <button class="ghost wide" id="newSurface" title="Nowa powierzchnia (N)">+ Nowa powierzchnia <kbd>N</kbd></button>
+      </div>
+
+      <div class="section">
+        <h2 class="section-title">Widok 3D</h2>
+        <label class="check"><input type="checkbox" id="scanColors" checked> Kolory skanera <kbd>C</kbd></label>
+        <div class="row">
+          <button class="ghost" id="resetView" title="Reset widoku (R)">Reset widoku</button>
+          <button class="ghost" id="flipView" title="Obróć na drugą stronę (F)">Druga strona</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2 class="section-title">Edycja i zapis</h2>
+        <div class="row">
+          <button class="ghost" id="undoBtn" title="Cofnij (Ctrl+Z)">↶ Cofnij</button>
+          <button class="ghost" id="redoBtn" title="Ponów (Ctrl+Y)">↷ Ponów</button>
+          <button class="ghost danger" id="clearBtn" title="Usuń wszystkie oznaczenia tej kości">Wyczyść</button>
+        </div>
+        <button class="ghost wide" id="detectBtn" title="Wczytaj propozycję algorytmu jako punkt wyjścia">Zaproponuj przełom</button>
+        <button class="primary wide" id="saveBtn" title="Zapisz (Ctrl+S)">Zapisz oznaczenia <kbd>Ctrl+S</kbd></button>
+        <button class="ghost wide" id="matchBtn">Dopasuj zaznaczone przełomy</button>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="modal" id="help" hidden>
+    <div class="modal-card">
+      <h2>Jak oznaczać powierzchnie styku</h2>
+      <ol>
+        <li>Wybierz fragment z listy (albo użyj <kbd>PgUp</kbd> / <kbd>PgDn</kbd>).</li>
+        <li>Obracaj <b>prawym</b> przyciskiem myszy i znajdź przełom.</li>
+        <li><b>Różdżka</b>: kliknij przełom - zaznaczy obszar aż do ostrej krawędzi.
+          Za dużo? <kbd>Ctrl+Z</kbd> i zmniejsz tolerancję.</li>
+        <li><b>Pędzel</b> / <b>Gumka</b>: popraw brzegi lewym przyciskiem.</li>
+        <li>Użyj <b>Nowa powierzchnia</b>, by oznaczyć drugi przełom na tym samym fragmencie.</li>
+        <li>Zapisz oznaczenia przyciskiem <b>Zapisz oznaczenia</b> lub skrótem <kbd>Ctrl+S</kbd>. Zmiana fragmentu zapisuje je automatycznie.</li>
+      </ol>
+      <table class="keys">
+        <tr><td>Lewy przycisk</td><td>maluj / zaznacz</td></tr>
+        <tr><td>Prawy przycisk</td><td>obracaj</td></tr>
+        <tr><td>Środkowy / Shift + prawy</td><td>przesuwaj</td></tr>
+        <tr><td>Kółko</td><td>przybliż / oddal</td></tr>
+        <tr><td><kbd>B</kbd> <kbd>E</kbd> <kbd>W</kbd></td><td>pędzel / gumka / różdżka</td></tr>
+        <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>mniejszy / większy pędzel (lub tolerancja różdżki)</td></tr>
+        <tr><td><kbd>1</kbd>…<kbd>9</kbd>, <kbd>N</kbd></td><td>wybór powierzchni, nowa powierzchnia</td></tr>
+        <tr><td><kbd>Ctrl+Z</kbd> <kbd>Ctrl+Y</kbd></td><td>cofnij / ponów</td></tr>
+        <tr><td><kbd>R</kbd> <kbd>F</kbd> <kbd>C</kbd></td><td>reset widoku / druga strona / kolory skanera</td></tr>
+      </table>
+      <button class="primary" id="helpClose">Zaczynamy</button>
+    </div>
+  </div>
+
+  <dialog id="matchDialog" class="match-dialog" aria-labelledby="matchTitle">
+    <form id="matchForm">
+      <h2 id="matchTitle">Dopasuj zaznaczone przełomy</h2>
+      <div class="match-fields">
+        <label>Fragment nieruchomy<select id="matchBoneA" required></select></label>
+        <label>Przełom A<select id="matchSurfaceA" required></select></label>
+        <label>Fragment ustawiany<select id="matchBoneB" required></select></label>
+        <label>Przełom B<select id="matchSurfaceB" required></select></label>
+      </div>
+      <p id="matchStatus" role="status"></p>
+      <div class="row">
+        <button class="ghost" type="button" id="matchClose">Zamknij</button>
+        <button class="primary" type="submit" id="matchStart">Porównaj</button>
+      </div>
+    </form>
+  </dialog>
+  <script type="module" src="/contact_tool.js"></script>
+</body>
+</html>

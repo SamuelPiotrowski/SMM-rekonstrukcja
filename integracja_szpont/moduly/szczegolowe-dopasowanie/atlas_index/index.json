@@ -1,0 +1,89 @@
+{
+ "format": "bones-smm-atlas/1",
+ "models": {
+  "FIBULA_LEFT": {
+   "name": "FIBULA_LEFT",
+   "group": "",
+   "file": "FIBULA_LEFT.stl",
+   "checksum": "ec2d121f438125e0",
+   "size": 2955484,
+   "mtime_ns": 1795682585930873000,
+   "tag": {
+    "format": "bones-smm-atlas/1",
+    "reference_scale": 1.0,
+    "voxel_au": 1.0,
+    "curvature_radius_au": 2.5,
+    "si_bins": 10,
+    "logc": [
+     -3.5,
+     1.0,
+     0.05
+    ],
+    "windows": [
+     0.2,
+     0.35,
+     0.5,
+     0.75,
+     0.1
+    ]
+   },
+   "info": {
+    "area": 19969.59,
+    "length": 403.245,
+    "extent": [
+     403.245,
+     34.034,
+     28.014
+    ],
+    "points": 83805,
+    "spacing": 0.5,
+    "outer_share": 1.0,
+    "flipped": false,
+    "triangles": 59108
+   },
+   "indexed": "2026-11-26T09:44:34"
+  },
+  "HUMERUS_LEFT": {
+   "name": "HUMERUS_LEFT",
+   "group": "",
+   "file": "HUMERUS_LEFT.stl",
+   "checksum": "879c272ab2f4107c",
+   "size": 5721884,
+   "mtime_ns": 1795682586006019800,
+   "tag": {
+    "format": "bones-smm-atlas/1",
+    "reference_scale": 1.0,
+    "voxel_au": 1.0,
+    "curvature_radius_au": 2.5,
+    "si_bins": 10,
+    "logc": [
+     -3.5,
+     1.0,
+     0.05
+    ],
+    "windows": [
+     0.2,
+     0.35,
+     0.5,
+     0.75,
+     0.1
+    ]
+   },
+   "info": {
+    "area": 26033.96,
+    "length": 291.325,
+    "extent": [
+     291.325,
+     57.705,
+     46.23
+    ],
+    "points": 110716,
+    "spacing": 0.5,
+    "outer_share": 1.0,
+    "flipped": false,
+    "triangles": 114436
+   },
+   "indexed": "2026-11-26T09:44:41"
+  }
+ }
+}
