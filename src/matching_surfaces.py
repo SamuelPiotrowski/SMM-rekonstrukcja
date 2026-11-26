@@ -251,7 +251,7 @@ def make_surface(bone: Bone, contacts: Contacts, sid: int, sample_au: float,
 
 
 def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: ContactParams = ContactParams(),
-                     root: Path | None = None) -> tuple[list[Surface], dict[str, str]]:
+                     root: Path | None = None, log=None) -> tuple[list[Surface], dict[str, str]]:
     """Powierzchnie styku wszystkich kości (każda osobno), bez mniejszych niż p.min_area_au2.
 
     Kości muszą być wczytane z chmurą punktów (load_bones(features=True)) - do kolizji.
@@ -263,6 +263,7 @@ def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: C
         p:              ustawienia (source, min_area_au2, sample_au, use_atlas).
         contact_params: algorytm wykrywania (tryby "auto" i "manual-auto"); też analiza lokalna atlasu.
         root:           folder oznaczeń zamiast contacts/ z settings.json.
+        log:            komunikaty, gdy atlas liczy dopasowanie fragmentu od nowa (None = cisza).
 
     Returns:
         (powierzchnie, {id kości: skąd wzięte powierzchnie - jak w bone_contacts; gdy
@@ -293,7 +294,7 @@ def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: C
             info[b.id] += f", powierzchnie < {p.min_area_au2:g} a.u.²"
         elif p.use_atlas and not atlas_off:
             try:
-                ctx = atlas_context(b, contact_params)
+                ctx = atlas_context(b, contact_params, log)
             except ValueError:     # pusta baza modeli (atlas.load_atlas)
                 atlas_off = "baza modeli pusta - python scripts/build_atlas.py"
                 ctx = None
@@ -310,7 +311,7 @@ def extract_surfaces(bones: list[Bone], p: SurfaceMatchParams, contact_params: C
 ATLAS_MIN_JOINT = 0.02     # start z atlasu tylko z modelu, na którym p_A x p_B >= tyle
 
 
-def atlas_context(bone: Bone, contact_params: ContactParams) -> dict:
+def atlas_context(bone: Bone, contact_params: ContactParams, log=None) -> dict:
     """Ranking kości z bazy dla fragmentu, z ustawieniami na modelach (atlas.cached_match).
 
     Ten sam cache co algorytm "atlas" (out/3d/<zestaw>/cache/atlas/<id>.npz) - gdy wykrywanie
@@ -319,6 +320,7 @@ def atlas_context(bone: Bone, contact_params: ContactParams) -> dict:
     Args:
         bone:           kość (fragment).
         contact_params: analiza lokalna (feature_keys, feature_threshold) - jak przy wykrywaniu.
+        log:            komunikaty przy liczeniu od nowa (brak cache); None = cisza.
 
     Returns:
         {"p_unknown": p "żadna z bazy", "candidates": [{"model", "group", "mirror", "label", "p",
@@ -331,7 +333,16 @@ def atlas_context(bone: Bone, contact_params: ContactParams) -> dict:
     import config
 
     ap, sfp = config.atlas_params(), config.surface_feature_params()
-    m = atlas.cached_match(bone, atlas.load_atlas(ap), ap, contact_params, sfp)
+    started: list = []
+
+    def note(text: str) -> None:
+        """Pierwszy komunikat atlasu dla tej kości poprzedzony jej nazwą (tylko przy liczeniu od nowa)."""
+        if not started:
+            started.append(True)
+            log(f"  atlas: {bone.label} - liczę dopasowanie do bazy (raz, potem z cache)...")
+        log(text)
+
+    m = atlas.cached_match(bone, atlas.load_atlas(ap), ap, contact_params, sfp, log=note if log else None)
     keys = ("model", "group", "mirror", "label", "p", "rel_scale", "T")
     return {"p_unknown": round(float(m.p_unknown), 4),
             "candidates": [{k: c[k] for k in keys} for c in m.candidates if c["p"] >= 0.001]}

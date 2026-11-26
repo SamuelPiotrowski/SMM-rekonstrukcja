@@ -270,12 +270,20 @@ Jak działa:
 2. **RANSAC** na deskryptorach FPFH (zgrubnie) + **ICP** (dokładnie) → przekształcenie A → B. RANSAC w open3d jest losowy (wielowątkowy), dlatego zawsze przechodzi wszystkie 1 mln iteracji - przy 50 tys. dobre ustawienie wychodziło tylko w ~40% prób. Większość złych opcji jest odrzucana od razu, bo są sprawdzane proste warunki. 
 3. Ocena: **styk** = pole, na którym powierzchnie leżą bliżej niż `tolerance_au` (0.5 a.u.) z przeciwnymi normalnymi; **kolizja** = pole, na którym całe kości wchodzą w siebie głębiej niż `collision_au` (1 a.u.). **Wynik = styk − kolizja** [a.u.²].
 
+**Z atlasem anatomicznym** (`settings.json` → `matching` → `use_atlas`, jednorazowo `--use-atlas` / `--no-use-atlas`). Atlas mówi, z której kości z bazy pochodzi każdy fragment (z prawdopodobieństwami) i jak na niej leży. Korzysta z tego samego cache co algorytm `atlas` i `identify_bones.py`, więc zwykle nic nie liczy od nowa. Dopasowanie zawęża się na trzy sposoby:
+- **pomijanie par**: gdy fragmenty na pewno pochodzą z **różnych** kości (`atlas_skip_different`, 95%), para nie jest liczona. „Ta sama kość” = ten sam model i ta sama strona ciała (odbicie lustrzane albo nie). Modele z jednego podfolderu bazy (typ kości) liczą się razem, bez strony. „Żadna z bazy” nie wyklucza pary;
+- **start z atlasu**: gdy A i B leżą na tym samym modelu, ich położenie względem siebie wynika z ustawień na modelu (x_B = T_B · T_A⁻¹ · x_A, sam obrót i przesunięcie). Z tego startu ICP dociska przełomy. Gdy wyjdzie dobry styk (obie powierzchnie pokryte co najmniej w `atlas_enough_cover`, 35%), **RANSAC jest pomijany** i para liczy się w ułamku sekundy. Inaczej RANSAC liczy się jak zwykle i wygrywa lepsza próba;
+- **premia**: styk liczy się do `atlas_boost` (25%) mocniej, gdy to ta sama kość: wynik = styk × (1 + 0.25 × P(ta sama kość)) − kolizja. Para bez styku nic nie zyskuje.
+
+Konsola pokazuje najbardziej prawdopodobną kość każdego fragmentu, liczbę pominiętych par i ile par obeszło się bez RANSAC. W `matching.html` pominięte pary mają w macierzy znak ×.
+
 Wszystkie ustawienia z opisami: `settings.json`, sekcja `matching`.
 
 ```powershell
 python scripts/match_surfaces.py                      # wszystkie kości (~1-3 s na parę powierzchni)
 python scripts/match_surfaces.py whole_scan 3         # tylko wybrane kości
 python scripts/match_surfaces.py --source manual-auto # jednorazowo inny tryb
+python scripts/match_surfaces.py --no-use-atlas       # jednorazowo bez atlasu (porównanie)
 ```
 
 Wynik: `out/3d/<zestaw>/matching.json` - wszystkie pary z wynikami, przekształceniami i użytymi ustawieniami. Skrypt **tylko liczy i zapisuje**; oglądanie to krok 6.
@@ -316,7 +324,7 @@ Składnia JSON: `true` / `false` / `null` małymi literami, tekst w `"..."`, lic
 | `features` | `voxel_size`, `fpfh_radius_factor` | chmura punktów i FPFH do dopasowania |
 | `contacts` | `method`, `rough_threshold`, `port`, `brush_au`, ... | algorytm wykrywania i narzędzie do oznaczania |
 | `atlas` | `reference_scale`, `scale_range`, `max_unexplained`, `tolerance_au`, `min_fit`, ... | atlas anatomiczny: rozpoznawanie kości i algorytm `atlas` |
-| `matching` | `source`, `tolerance_au`, `collision_au`, `ransac_iterations`, ... | dopasowanie po powierzchniach styku |
+| `matching` | `source`, `tolerance_au`, `collision_au`, `ransac_iterations`, `use_atlas`, `atlas_boost`, ... | dopasowanie po powierzchniach styku (z atlasem: pomijanie par, start, premia) |
 | `visualization_3d` | `triangles_total`, `embed_plotly`, `open_browser` | wizualizacje HTML |
 
 ## Wyniki: `out/3d/<zestaw>/` (generowane, można usunąć i policzyć od nowa)

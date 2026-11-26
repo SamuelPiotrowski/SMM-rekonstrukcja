@@ -123,7 +123,7 @@ def main() -> None:
     print(f"Powierzchnie styku: {ms.SOURCE_NAMES[params.source]}{algo}"
           + (", z atlasem anatomicznym" if params.use_atlas else ""))
     start = time.perf_counter()
-    surfaces, info = ms.extract_surfaces(bones, params, contact_params)
+    surfaces, info = ms.extract_surfaces(bones, params, contact_params, log=print)
     for b in bones:
         mine = [s for s in surfaces if s.bone.id == b.id]
         areas = ", ".join(f"{s.area_au2:.0f}" for s in mine)
