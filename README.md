@@ -12,7 +12,7 @@ python -m venv .venv
 
 Przeglądarka otworzy się automatycznie. Zostaw konsolę otwartą. Kolejne uruchomienia zaczynaj od `uruchom-demo.cmd`.
 
-**Nowy przypadek** pozwala wgrać własne pliki STL, OBJ lub PLY. Żeby obejrzeć gotowe testy, **Szczegółowe dopasowanie** i **Podgląd kości**, rozpakuj otrzymany plik `OSTEOFORM-dane.zip` do głównego folderu repozytorium. W archiwum są już właściwe ścieżki.
+**Nowy przypadek** pozwala wgrać pliki STL, OBJ lub PLY. **Podgląd kości** i **Szczegółowe dopasowanie** działają od razu po uruchomieniu. Dodatkowa paczka `OSTEOFORM-dane.zip` zawiera gotowe testy w zakładce **Nasze skany**, zdjęcia oraz pliki źródłowe. Jeśli ją masz, rozpakuj ją do głównego folderu repozytorium.
 
 ---
 

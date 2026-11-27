@@ -7,6 +7,8 @@ import threading
 from pathlib import Path
 from queue import Empty, Queue
 
+from bundled_data import bundled_directory
+
 
 MODULE = Path(__file__).resolve().parents[1] / "moduly" / "szczegolowe-dopasowanie"
 READY = "OSTEOFORM_PORT="
@@ -85,7 +87,15 @@ def run_original_server():
     import config
     from match_tool import LocalServer, _load, make_handler
 
-    config.use_dataset()
+    config.use_dataset(check=False)
+    local = config.DATA_OUT
+    has_results = (local / "matching.json").is_file() or any(local.glob("methods/*/matching.json"))
+    if not has_results or not any(local.glob("bones/*/meta.json")):
+        bundle = bundled_directory("szczegolowe-dopasowanie")
+        if bundle is None:
+            config.use_dataset()
+        else:
+            config.DATA_OUT = bundle
     state = _load(None)
     with LocalServer(("127.0.0.1", 0), make_handler(state)) as server:
         def stop_after_parent_exits():

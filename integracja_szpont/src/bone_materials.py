@@ -3,6 +3,8 @@
 from pathlib import Path
 from urllib.parse import quote, unquote
 
+from bundled_data import bundled_directory
+
 
 ROOT = Path(__file__).resolve().parents[1] / "out" / "materialy-kosci"
 PREFIX = "/bone-materials/"
@@ -32,9 +34,17 @@ def url(relative):
     return PREFIX + quote(relative.as_posix())
 
 
+def report_path(name):
+    local = ROOT / "exports" / name
+    if local.is_file():
+        return local
+    bundle = bundled_directory("podglad-kosci")
+    return bundle / name if bundle is not None else local
+
+
 def catalog():
     reports = [{"label": label, "url": url(Path("exports") / name)}
-               for name, label in REPORTS.items() if (ROOT / "exports" / name).is_file()]
+               for name, label in REPORTS.items() if report_path(name).is_file()]
     photos = []
     for photo in sorted((ROOT / "bone_photos").glob("*")):
         if photo.is_file() and photo.suffix.lower() in SUFFIXES["bone_photos"]:
@@ -59,10 +69,13 @@ def material(encoded_path):
             ":" in relative or any(part in ("", ".", "..") for part in pieces)):
         return None
     section = pieces[0]
+    if section == "exports" and (len(pieces) != 2 or pieces[1] not in REPORTS):
+        return None
+    if section == "exports":
+        report = report_path(pieces[1])
+        return (report, MIME[section], section) if report.is_file() else None
     path = (ROOT / relative).resolve()
     if path.suffix.lower() not in SUFFIXES.get(section, ()) or not path.is_relative_to(ROOT.resolve()):
-        return None
-    if section == "exports" and (len(pieces) != 2 or pieces[1] not in REPORTS):
         return None
     if not path.is_file():
         return None
