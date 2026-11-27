@@ -14,6 +14,8 @@ Przeglądarka otworzy się automatycznie. Zostaw konsolę otwartą. Kolejne uruc
 
 **Nowy przypadek** pozwala wgrać pliki STL, OBJ lub PLY. Gotowe animacje w **Naszych skanach**, **Podgląd kości** i **Szczegółowe dopasowanie** działają od razu. Opcjonalna paczka `OSTEOFORM-dane.zip` dodaje pełną galerię, zdjęcia i dodatkowe pliki źródłowe.
 
+Pięć gotowych złożeń pojawia się automatycznie w **Historii skanów**. Przy wybranym przypadku kliknij **Otwórz wynik**.
+
 Żeby przekazać własne wyniki z **Historii skanów**, wybierz **Pobierz złożenie** przy wyniku lub **Pobierz zapisane złożenia**. Wyślij ZIP osobie z ekipy. U siebie wybierze **Historia skanów → Wczytaj paczkę złożeń → Otwórz wynik**.
 
 ---

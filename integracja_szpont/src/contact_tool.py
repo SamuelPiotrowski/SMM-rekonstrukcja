@@ -49,6 +49,7 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 OUR_SCAN_DIR = WEB_DIR.parents[1] / "out" / "wasze-skany"
 OUR_SCAN_REPORT = OUR_SCAN_DIR / "assembly-manual.html"
 CASE_HISTORY = WEB_DIR.parents[1] / "out" / "historia-skanow.sqlite3"
+STARTER_REPLAYS = WEB_DIR.parents[1] / "dane-startowe" / ARCHIVE_NAME
 FIBULA_DEMO = WEB_DIR.parents[1] / "out" / "fibula-demo"
 MIXED_DEMO = WEB_DIR.parents[1] / "out" / "test-udowa-strzalkowa"
 FIBULA_PAIR_DEMO = WEB_DIR.parents[1] / "out" / "test-dwie-strzalkowe"
@@ -228,6 +229,8 @@ def fetch_vendor(path: str, cache_dir: Path) -> bytes:
 
 def make_handler(state: ToolState, cache_dir: Path, history_path: Path = CASE_HISTORY, *, detailed=None):
     history = CaseHistory(history_path)
+    if STARTER_REPLAYS.is_file():
+        history.import_cases(read_replays(STARTER_REPLAYS.read_bytes()))
     active_cases = {}
     solve_lock = threading.Lock()
 
