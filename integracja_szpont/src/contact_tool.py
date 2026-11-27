@@ -39,7 +39,9 @@ import numpy as np
 import bone_materials
 import contacts as ct
 from bones import Bone, load_bones
+from bundled_data import bundled_directory
 from case_history import CaseHistory
+from case_replays import ARCHIVE_NAME, MAX_BYTES, attach_scan_links, export_replays, read_replays
 from detailed_matching import DetailedMatching
 from fracture_library import catalog, load_case
 
@@ -52,6 +54,8 @@ MIXED_DEMO = WEB_DIR.parents[1] / "out" / "test-udowa-strzalkowa"
 FIBULA_PAIR_DEMO = WEB_DIR.parents[1] / "out" / "test-dwie-strzalkowe"
 FIBULA_REJECTION_DEMO = WEB_DIR.parents[1] / "out" / "test-obce-odlamki"
 FIBULA_GAP_DEMO = WEB_DIR.parents[1] / "out" / "test-brakujacy-odlamek"
+DEMO_PACKS = {FIBULA_DEMO: "pokazy-1-2", FIBULA_PAIR_DEMO: "pokazy-1-2",
+              FIBULA_REJECTION_DEMO: "pokazy-3-4", FIBULA_GAP_DEMO: "pokazy-3-4"}
 DEMO_RESULTS = {"demo-fibula": FIBULA_DEMO / "result.json",
                 "demo-mixed": MIXED_DEMO / "demo-result.json",
                 "demo-fibula-pair": FIBULA_PAIR_DEMO / "result.json",
@@ -202,8 +206,18 @@ class ToolState:
             self.match_lock.release()
 
 
+def demo_file(path):
+    if path.is_file() or path.parent not in DEMO_PACKS:
+        return path
+    bundle = bundled_directory(DEMO_PACKS[path.parent])
+    return bundle / path.parent.name / path.name if bundle else path
+
+
 def fetch_vendor(path: str, cache_dir: Path) -> bytes:
-    """Plik three.js: z cache, a za pierwszym razem pobrany z CDN."""
+    """Read packaged Three.js, with the existing cache and CDN as a fallback."""
+    packaged = WEB_DIR / "vendor" / Path(path).name
+    if packaged.is_file():
+        return packaged.read_bytes()
     target = cache_dir / Path(path).name
     if not target.exists():
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -240,12 +254,7 @@ def make_handler(state: ToolState, cache_dir: Path, history_path: Path = CASE_HI
             meshes = [(f"{i} · {Path(name).stem[:55]}", load_scan(name, data))
                       for i, (name, data) in enumerate(scans, 1)]
             result = make_result(title, meshes, mixed=mixed, upload=True, progress=progress, target_anchor=anchor)
-            parts = result["parts"] + [part for section in result["sections"] for part in section["parts"]]
-            for part in parts:
-                fragment = part["id"]
-                part["uploaded_scan"] = {"url": f"/api/solve/{key}/scan/{fragment}",
-                                         "download": f"/api/history/{key}/scan/{fragment}",
-                                         "label": scans[int(fragment) - 1][0]}
+            attach_scan_links(result, key, scans)
             history.finish(key, result)
         except Exception as error:
             history.fail(key, f"Nie udało się złożyć przypadku. {error}")
@@ -377,6 +386,13 @@ def make_handler(state: ToolState, cache_dir: Path, history_path: Path = CASE_HI
                     for case in listing["cases"]:
                         case["running"] = case["id"] in running and not case["done"]
                     return self._json(listing)
+                if parts[:3] == ["api", "history", "replays"] and len(parts) in (3, 4):
+                    key = parts[3] if len(parts) == 4 else None
+                    try:
+                        archive = export_replays(history, key)
+                    except ValueError as error:
+                        return self._error(HTTPStatus.BAD_REQUEST, str(error))
+                    return self._send(HTTPStatus.OK, archive, "application/zip", download_name=ARCHIVE_NAME)
                 if len(parts) == 4 and parts[:2] == ["api", "team-scans"]:
                     detail = parse_qs(urlsplit(self.path).query).get("detail", ["preview"])[0]
                     if detail not in ("preview", "full"):
@@ -399,7 +415,7 @@ def make_handler(state: ToolState, cache_dir: Path, history_path: Path = CASE_HI
                 if len(parts) == 5 and parts[:4] == ["api", "demo", "fibula", "scan"]:
                     if parts[4] not in ("1", "2", "3", "4"):
                         return self._error(HTTPStatus.NOT_FOUND, "Skan fragmentu jest niedostępny.")
-                    source = FIBULA_DEMO / f"fibula-fragment-{parts[4]}.ply"
+                    source = demo_file(FIBULA_DEMO / f"fibula-fragment-{parts[4]}.ply")
                     if not source.is_file():
                         return self._error(HTTPStatus.NOT_FOUND, "Skan fragmentu jest niedostępny.")
                     if parse_qs(urlsplit(self.path).query).get("download") == ["1"]:
@@ -418,7 +434,7 @@ def make_handler(state: ToolState, cache_dir: Path, history_path: Path = CASE_HI
                         return self._error(HTTPStatus.NOT_FOUND, "Skan fragmentu jest niedostępny.")
                     name = f"fragment_{number:02d}.ply"
                     try:
-                        with ZipFile(archive_path) as archive:
+                        with ZipFile(demo_file(archive_path)) as archive:
                             data = archive.read(name)
                     except (FileNotFoundError, KeyError, BadZipFile):
                         return self._error(HTTPStatus.NOT_FOUND, "Skan fragmentu jest niedostępny.")
@@ -430,7 +446,7 @@ def make_handler(state: ToolState, cache_dir: Path, history_path: Path = CASE_HI
                 if len(parts) == 3 and parts[:2] == ["api", "solve"]:
                     key = parts[2]
                     if key in DEMO_RESULTS:
-                        report = DEMO_RESULTS[key]
+                        report = demo_file(DEMO_RESULTS[key])
                         if not report.is_file():
                             return self._error(HTTPStatus.NOT_FOUND, "Zapisany pokaz jest niedostępny.")
                         return self._send(HTTPStatus.OK, b'{"status":"done","result":'
@@ -506,6 +522,13 @@ def make_handler(state: ToolState, cache_dir: Path, history_path: Path = CASE_HI
             try:
                 if parts == ["api", "history", "folders"]:
                     return self._json(history.create_folder(self._body().get("name")), HTTPStatus.CREATED)
+                if parts == ["api", "history", "replays"]:
+                    size = int(self.headers.get("Content-Length", 0))
+                    if size <= 0 or size > MAX_BYTES:
+                        return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Paczka może mieć do 200 MB.")
+                    cases = read_replays(self.rfile.read(size))
+                    imported = history.import_cases(cases)
+                    return self._json({"imported": imported, "existing": len(cases) - imported}, HTTPStatus.CREATED)
                 if len(parts) == 4 and parts[:2] == ["api", "history"] and parts[3] == "solve":
                     key = parts[2]
                     saved = history.result(key)

@@ -16,6 +16,9 @@ const historyFolder = document.getElementById('historyFolder');
 const folderForm = document.getElementById('folderForm');
 const historyCases = document.getElementById('historyCases');
 const historyMessage = document.getElementById('historyMessage');
+const replayExport = document.getElementById('replayExport');
+const replayImport = document.getElementById('replayImportFile');
+const replayImportButton = document.getElementById('replayImportButton');
 const detailedFrame = document.getElementById('detailedMatchingFrame');
 const boneReport = document.getElementById('boneReport');
 const boneReportFrame = document.getElementById('boneReportFrame');
@@ -185,6 +188,12 @@ function historyRow(entry) {
     const open = node('a', entry.done ? 'Otwórz wynik' : 'Zobacz postęp', 'library-link');
     open.href = '/assembly?job=' + key;
     actions.append(open);
+    if (entry.done) {
+      const replay = node('a', 'Pobierz złożenie', 'library-link');
+      replay.href = '/api/history/replays/' + key;
+      replay.download = '';
+      actions.append(replay);
+    }
   } else if (entry.files.length >= 2) {
     const retry = node('button', 'Uruchom analizę', 'ghost');
     retry.type = 'button';
@@ -217,6 +226,7 @@ function showHistory() {
   const value = historyFolder.value;
   const visible = value === 'all' ? savedCases : savedCases.filter(entry => (entry.folder ?? '') === value);
   historyCases.replaceChildren(...visible.map(historyRow));
+  replayExport.hidden = !savedCases.some(entry => entry.done);
   historyMessage.textContent = visible.length ? '' : 'Brak zapisanych przypadków w tym widoku.';
 }
 
@@ -230,6 +240,26 @@ async function refreshHistory(newFolder) {
 }
 
 historyFolder.onchange = showHistory;
+replayImportButton.onclick = () => replayImport.click();
+replayImport.onchange = async () => {
+  const file = replayImport.files[0];
+  if (!file) return;
+  replayImportButton.disabled = true;
+  historyMessage.textContent = 'Wczytuję zapisane złożenia…';
+  try {
+    const result = await request('/api/history/replays', {
+      method: 'POST', headers: { 'Content-Type': 'application/zip' }, body: file
+    });
+    historyFolder.value = 'all';
+    await refreshHistory();
+    historyMessage.textContent = 'Dodano: ' + result.imported + ' · Już w historii: ' + result.existing;
+  } catch (error) {
+    historyMessage.textContent = error.message;
+  } finally {
+    replayImport.value = '';
+    replayImportButton.disabled = false;
+  }
+};
 folderForm.onsubmit = async event => {
   event.preventDefault();
   const submit = event.submitter;

@@ -97,6 +97,43 @@ class CaseHistory:
                 FROM cases WHERE id = ?
             """, (key,)).fetchone()
 
+    def completed_cases(self, limit, key=None):
+        with self._connect() as db:
+            db.execute("BEGIN")
+            cases = db.execute("""
+                SELECT id, title, created, mixed, anchor, LENGTH(CAST(result AS BLOB)) AS result_bytes,
+                    (SELECT COALESCE(SUM(LENGTH(data)), 0) FROM scans WHERE case_id = cases.id) AS scan_bytes
+                FROM cases
+                WHERE result IS NOT NULL AND (? IS NULL OR id = ?)
+                ORDER BY created
+            """, (key, key)).fetchall()
+            if sum(row["result_bytes"] + row["scan_bytes"] for row in cases) > limit:
+                raise ValueError("Paczka jest za duża. Pobierz wybrane złożenia osobno.")
+            result = []
+            for row in cases:
+                case = {field: row[field] for field in ("id", "title", "created", "mixed", "anchor")}
+                case["result"] = db.execute("SELECT result FROM cases WHERE id = ?", (row["id"],)).fetchone()[0]
+                case["scans"] = [tuple(scan) for scan in db.execute(
+                    "SELECT name, data FROM scans WHERE case_id = ? ORDER BY number", (row["id"],))]
+                result.append(case)
+            return result
+
+    def import_cases(self, cases):
+        imported = 0
+        with self._connect() as db:
+            for case in cases:
+                inserted = db.execute("""
+                    INSERT INTO cases (id, title, created, mixed, anchor, result)
+                    VALUES (:id, :title, :created, :mixed, :anchor, :result)
+                    ON CONFLICT(id) DO NOTHING
+                """, case)
+                if inserted.rowcount:
+                    db.executemany("INSERT INTO scans VALUES (?, ?, ?, ?)",
+                                   ((case["id"], index, name, data)
+                                    for index, (name, data) in enumerate(case["scans"], 1)))
+                    imported += 1
+        return imported
+
     def finish(self, key, result):
         content = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
         with self._connect() as db:

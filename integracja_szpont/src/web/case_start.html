@@ -130,6 +130,11 @@
           <button type="submit" class="ghost">Utwórz folder</button>
         </form>
       </div>
+      <div class="history-replay-actions">
+        <a class="library-link" id="replayExport" href="/api/history/replays" download hidden>Pobierz zapisane złożenia</a>
+        <button class="ghost" id="replayImportButton" type="button">Wczytaj paczkę złożeń</button>
+        <input id="replayImportFile" type="file" accept=".zip" hidden>
+      </div>
       <p id="historyMessage" role="status">Wczytuję historię…</p>
       <ul id="historyCases" class="history-cases"></ul>
     </section>
